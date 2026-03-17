@@ -1,0 +1,35 @@
+# Backend / FastAPI
+fastapi==0.111.0
+uvicorn==0.30.0
+pydantic==2.7.4
+pydantic-settings==2.3.4
+asyncio==3.4.3
+httpx==0.27.0
+
+# Trading & Math
+numpy==1.26.4
+pandas==2.2.2
+# TA-Lib==0.4.28
+
+# Database & Cache
+SQLAlchemy==2.0.30
+asyncpg==0.29.0
+alembic==1.13.1
+redis==5.0.4
+
+# API Exchange & WebSockets
+ccxt>=4.4.29
+aiohttp==3.8.6
+websockets==12.0
+
+# Telegram Bot
+python-telegram-bot==21.2
+
+# Visualization
+plotly==5.22.0
+
+# Security & Utils
+passlib==1.7.4 # for password/key hashing (though we use AES)
+cryptography==42.0.8 # For AES256 encryption
+python-dotenv==1.0.1
+loguru==0.7.2

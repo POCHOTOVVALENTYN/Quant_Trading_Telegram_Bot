@@ -1,0 +1,90 @@
+import asyncio
+import ccxt.pro as ccxtpro
+from typing import Dict, Callable
+from utils.logger import app_logger
+
+class MarketDataService:
+    def __init__(self, symbols: list[str], timeframes: list[str]):
+        """
+        Инициализация сервиса маркет-даты (Этап 4).
+        
+        Источники: Binance WebSocket + REST fallback
+        Потоки: свечи, ордербук, funding rate.
+        """
+        self.symbols = symbols
+        self.timeframes = timeframes
+        self.exchange = ccxtpro.binance({
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'future' # Binance Futures
+            }
+        })
+        self.running = False
+        self.callbacks = [] # type: list[Callable]
+
+    def register_callback(self, cb: Callable):
+        self.callbacks.append(cb)
+
+    async def watch_ohlcv(self, symbol: str, timeframe: str):
+        app_logger.info(f"Начало отслеживания OHLCV для {symbol} ({timeframe})")
+        while self.running:
+            try:
+                candles = await self.exchange.watch_ohlcv(symbol, timeframe)
+                # notify systems
+                for cb in self.callbacks:
+                    await cb("ohlcv", symbol, timeframe, candles[-1])
+            except Exception as e:
+                app_logger.error(f"Ошибка WebSocket (OHLCV {symbol}): {str(e)}")
+                await asyncio.sleep(5)
+                # ccxtpro handles fallback under the hood to REST if WS drops, 
+                # but we can explicitly call fetch_ohlcv if needed.
+
+    async def watch_orderbook(self, symbol: str):
+        app_logger.info(f"Начало отслеживания Orderbook для {symbol}")
+        while self.running:
+            try:
+                orderbook = await self.exchange.watch_order_book(symbol)
+                for cb in self.callbacks:
+                    await cb("orderbook", symbol, None, orderbook)
+            except Exception as e:
+                app_logger.error(f"Ошибка WebSocket (Orderbook {symbol}): {str(e)}")
+                await asyncio.sleep(5)
+
+    async def fetch_funding_rates(self):
+        """
+        Funding rate часто запрашивается через REST, так как нет WS стрима у ccxtpro
+        (в ccxtpro watch_funding_rate поддерживается не везде). 
+        Используем REST fallback периодически.
+        """
+        app_logger.info("Начало проверки Funding Rates")
+        while self.running:
+            try:
+                rates = await self.exchange.fetch_funding_rates(self.symbols)
+                for cb in self.callbacks:
+                    await cb("funding_rate", "ALL", None, rates)
+            except Exception as e:
+                app_logger.error(f"Ошибка получения Funding Rates: {str(e)}")
+            await asyncio.sleep(60 * 5) # Раз в 5 минут
+
+    async def start(self):
+        self.running = True
+        app_logger.info("MarketDataService успешно запущен")
+        
+        tasks = []
+        for sym in self.symbols:
+            # Запуск orderbook
+            tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
+            
+            # Запуск OHLCV по всем таймфреймам
+            for tf in self.timeframes:
+                tasks.append(asyncio.create_task(self.watch_ohlcv(sym, tf)))
+        
+        # Funding rate poll
+        tasks.append(asyncio.create_task(self.fetch_funding_rates()))
+        
+        await asyncio.gather(*tasks)
+
+    async def stop(self):
+        self.running = False
+        await self.exchange.close()
+        app_logger.info("MarketDataService остановлен")
