@@ -1,6 +1,6 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, CallbackQueryHandler
 import time
 import httpx
 from collections import defaultdict
@@ -25,9 +25,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [KeyboardButton("📊 Портфель"), KeyboardButton("📈 Начать торговлю")],
+        [KeyboardButton("📊 Портфель"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📉 Сигналы"), KeyboardButton("📜 История")],
-        [KeyboardButton("⚙ Настройки")]
+        [KeyboardButton("📚 Стратегии"), KeyboardButton("⚙ Настройки")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("Добро пожаловать в Algo Quant Bot! Выберите действие:", reply_markup=reply_markup)
@@ -55,6 +55,37 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Please provide your Binance API keys (Use secure config or settings menu!).")
 
+async def show_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{ENGINE_URL}/api/v1/trades", timeout=5.0)
+            data = response.json()
+            trades = data.get("trades", {})
+
+            if not trades:
+                await update.message.reply_text("📂 У вас пока нет открытых позиций.")
+                return
+
+            await update.message.reply_text(f"📂 **АКТИВНЫЕ ПОЗИЦИИ ({len(trades)}):**", parse_mode='Markdown')
+
+            for symbol, info in trades.items():
+                msg = (
+                    f"🔹 **{symbol}** ({info['signal_type']})\n"
+                    f"💰 Вход: {info['entry']:.2f}\n"
+                    f"🛡 Стоп: {info['stop']:.2f}\n"
+                    f"📊 Объем: {info['current_size']}\n"
+                    f"⏱ Открыта: {time.strftime('%H:%M:%S', time.gmtime(time.time() - info['opened_at']))} назад"
+                )
+
+                keyboard = [[InlineKeyboardButton("❌ Закрыть позицию", callback_data=f"close_{symbol.replace('/', '_')}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+
+    except Exception as e:
+        logging.error(f"Ошибка получения портфеля: {e}")
+        await update.message.reply_text("❌ Ошибка при получении данных о позициях.")
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
@@ -63,56 +94,179 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
     if text == "📊 Портфель":
-        await status(update, context)
+        await show_portfolio(update, context)
     elif text == "📈 Начать торговлю":
         await update.message.reply_text("Система автоматической торговли активирована.")
     elif text == "⚙ Настройки":
-        await update.message.reply_text("Риск на сделку: 2%\nСтратегия: WRD + Rule of 7")
+        try:
+            async with httpx.AsyncClient() as client:
+                # Получаем список пресетов
+                response = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
+                presets = response.json()
+                
+                settings_text = (
+                    "⚙️ **ТЕКУЩИЕ НАСТРОЙКИ**\n\n"
+                    "🛑 **Stop Loss:**\n"
+                    f"🟢 Long: {settings.sl_long_pct*100:.1f}%\n"
+                    f"🔴 Short: {settings.sl_short_pct*100:.1f}%\n"
+                    f"🛡 Коррекция SL (0.1%): {'✅ Вкл' if settings.sl_correction_enabled else '❌ Выкл'}\n\n"
+                    "📊 **Лимиты:**\n"
+                    f"📂 Макс. позиций: {settings.max_open_positions}\n"
+                    f"⏱ Жизнь сигнала: {settings.signal_expiry_seconds}с\n"
+                    f"🆕 Листинг от: {settings.min_listing_days} дней\n\n"
+                    "🎯 **Выберите пресет риска:**"
+                )
+                
+                # Кнопки пресетов
+                buttons = []
+                for p in presets:
+                    label = f"✅ {p['name']}" if p['is_active'] else p['name']
+                    buttons.append([InlineKeyboardButton(label, callback_data=f"apply_preset_{p['name']}")])
+                
+                await update.message.reply_text(settings_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+        except Exception as e:
+            logging.error(f"Ошибка настроек: {e}")
+            await update.message.reply_text("❌ Ошибка при получении настроек.")
     elif text == "📉 Сигналы":
         from database.session import async_session
         from database.models.all_models import Signal
         from sqlalchemy import select
         
         try:
+            from datetime import datetime, timedelta
             async with async_session() as session:
-                query = select(Signal).order_by(Signal.timestamp.desc()).limit(1)
+                # Показываем только свежие сигналы (за последний час), чтобы не путать "старыми" записями
+                one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+                query = select(Signal).where(Signal.timestamp >= one_hour_ago).order_by(Signal.timestamp.desc()).limit(1)
                 result = await session.execute(query)
                 last_signal = result.scalar_one_or_none()
                 
                 if not last_signal:
-                    await update.message.reply_text("📭 Активных сигналов пока нет. Ждем выполнения условий по ансамблю стратегий (Schwager v2 + AI)...")
+                    await update.message.reply_text("📭 Актуальных сигналов за последний час нет. Ждем новых паттернов...")
                     return
+
+                # Перевод статусов для пользователя
+                status_map = {
+                    "PENDING": "⌛️ В ОЖИДАНИИ",
+                    "EXECUTED": "✅ ПОЗИЦИЯ ОТКРЫТА",
+                    "FAILED": "❌ ОШИБКА ВХОДА",
+                    "REJECTED": "🛑 ОТКЛОНЕН РИСКОМ",
+                    "EXPIRED": "⏱ ИСТЕК"
+                }
+                status_ru = status_map.get(last_signal.status, "🕒 ОБРАБОТКА")
 
                 # Перевод сигналов для удобства пользователя
                 signal_type_ru = "🟢 LONG" if last_signal.signal_type == "LONG" else "🔴 SHORT"
-                
+
+                # Форматирование цен (поддержка старых записей без SL/TP)
+                sl_val = f"{last_signal.stop_loss:.2f}" if last_signal.stop_loss is not None else "N/A"
+                tp_val = f"{last_signal.take_profit:.2f}" if last_signal.take_profit is not None else "N/A"
+
                 msg = (
                     f"🚀 **СИГНАЛ: {last_signal.strategy}**\n\n"
                     f"🔸 **Символ:** {last_signal.symbol}\n"
                     f"🔸 **Направление:** {signal_type_ru}\n\n"
-                    f"💰 **Вход:** {last_signal.entry_price:.2f}\n"
-                    f"🕒 **Время:** {last_signal.timestamp.strftime('%H:%M:%S')}\n\n"
+                    f"💰 **Цена входа:** {last_signal.entry_price:.2f}\n"
+                    f"🛡 **Stop Loss:** {sl_val}\n"
+                    f"🎯 **Take Profit:** {tp_val}\n\n"
+                    f"🕒 **Время (UTC):** {last_signal.timestamp.strftime('%H:%M:%S')}\n\n"
                     f"🤖 **AI ВЕРДИКТ:**\n"
                     f"📈 **Вероятность успеха:** {int(last_signal.win_prob * 100)}%\n"
                     f"💰 **Ож. доходность:** {last_signal.expected_return}%\n"
                     f"⚠️ **Уровень риска:** {last_signal.risk}\n"
                     f"📊 **AI Score:** {last_signal.confidence:.2f}\n\n"
-                    f"✅ **Статус:** ТОРГУЕМ"
+                    f"ℹ️ **Статус:** {status_ru}"
                 )
                 await update.message.reply_text(msg, parse_mode='Markdown')
         except Exception as e:
             logging.error(f"Ошибка получения сигналов из БД: {e}")
             await update.message.reply_text("❌ Ошибка при обращении к базе данных.")
+    elif text == "📚 Стратегии":
+        strategy_text = (
+            "📖 **МЕТОДОЛОГИЯ БОТА (Schwager v2 + AI)**\n\n"
+            "🛡 **РИСК-МЕНЕДЖМЕНТ (Осторожный)**\n"
+            "• **Начальный вход:** 15% от плана ( Stage 0 ).\n"
+            "• **Пирамидинг:** Доливка по 5% (4 этапа) при росте цены на +1.5 ATR.\n"
+            "• **Stop Loss:** Раздельный (L/S) + Коррекция 0.1%.\n"
+            "• **ATR Trailing Stop:** Подтягивается в профит.\n"
+            "• **Time Exit:** 5 дней без движения.\n\n"
+            "📈 **СИГНАЛЬНЫЕ СТРАТЕГИИ (10)**\n"
+            "• *Volatility, Trend, Breakout, Pattern*.\n\n"
+            "🤖 **ИНТЕЛЛЕКТУАЛЬНЫЙ СЛОЙ (AI Layer)**\n"
+            "• **Signal Scorer:** Фильтр (Score > 0.65).\n"
+            "• **AI Filter:** Win Prob > 60%.\n"
+            "• **Фильтр листинга:** > 100 дней.\n"
+        )
+        await update.message.reply_text(strategy_text, parse_mode='Markdown')
+    elif text == "📈 Статистика":
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
+                data = response.json()
+                daily = data.get("daily", {})
+                
+                msg = (
+                    "📊 **СТАТИСТИКА ТОРГОВЛИ**\n\n"
+                    "📅 **За последние 24 часа:**\n"
+                    f"• Закрыто сделок: {daily.get('trades_count', 0)}\n"
+                    f"• Прибыль/Убыток: {'🟢' if daily.get('pnl_usd', 0) >= 0 else '🔴'} "
+                    f"{daily.get('pnl_usd', 0):+.2f} USDT ({daily.get('avg_pct', 0):+.2f}%)\n\n"
+                    "📅 *Статистика за 7 и 30 дней будет доступна после накопления данных.*"
+                )
+                
+                keyboard = [[InlineKeyboardButton("♻️ Сбросить статистику", callback_data="reset_stats")]]
+                await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        except Exception as e:
+            logging.error(f"Ошибка статистики: {e}")
+            await update.message.reply_text("❌ Ошибка при получении статистики.")
+
     elif text == "📜 История":
         await update.message.reply_text("Последние сделки: ...")
     else:
         await update.message.reply_text("Команда не распознана.")
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data.startswith("close_"):
+        symbol_raw = query.data.replace("close_", "")
+        symbol = symbol_raw.replace("_", "/")
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/trades/close/{symbol_raw}", timeout=10.0)
+                res = response.json()
+                
+                if res.get("status") == "success":
+                    await query.edit_message_text(f"✅ Позиция **{symbol}** успешно закрыта вручную.", parse_mode='Markdown')
+                else:
+                    await query.edit_message_text(f"❌ Ошибка закрытия **{symbol}**: {res.get('message')}")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
+
+    elif query.data.startswith("apply_preset_"):
+        preset_name = query.data.replace("apply_preset_", "")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/presets/apply/{preset_name}", timeout=5.0)
+                res = response.json()
+                if res.get("status") == "success":
+                    await query.answer(f"✅ Пресет {preset_name} активирован!")
+                    # Можно обновить сообщение, но проще просто уведомить
+                    await query.edit_message_text(f"🎯 Активирован режим: **{preset_name}**\n\nНастройки обновлены в реальном времени.", parse_mode='Markdown')
+                else:
+                    await query.answer(f"❌ Ошибка: {res.get('message')}", show_alert=True)
+        except Exception as e:
+            await query.answer(f"❌ Ошибка связи: {e}", show_alert=True)
+
+    elif query.data == "reset_stats":
+        await query.answer("Эта функция будет реализована в следующем обновлении БД.", show_alert=True)
 
 # ======= ANTI-SPAM & RATE LIMITING (Этап 18) =======
 # Хранилище: {user_id: [timestamp1, timestamp2, ...]}
 user_message_times = defaultdict(list)
-RATE_LIMIT_MESSAGES = 5      # Максимум 5 сообщений
-RATE_LIMIT_WINDOW = 10.0     # за 10 секунд
+RATE_LIMIT_MESSAGES = 10      # Максимум 10 сообщений
+RATE_LIMIT_WINDOW = 5.0      # за 5 секунд
 
 async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -158,6 +312,7 @@ def run_bot():
     app.add_handler(CommandHandler("stop_trading", status)) # mock
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    app.add_handler(CallbackQueryHandler(callback_handler))
 
     logging.info("Telegram Bot is polling...")
     app.run_polling()

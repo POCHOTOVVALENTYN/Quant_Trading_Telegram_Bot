@@ -236,3 +236,10 @@ class StrategyRuleOf7:
             "Цель 3 (7/2)": low + L * (7.0 / 2.0),
         }
         return targets
+def get_timeframe_seconds(tf: str) -> int:
+    unit = tf[-1]
+    val = int(tf[:-1])
+    if unit == 'm': return val * 60
+    if unit == 'h': return val * 3600
+    if unit == 'd': return val * 86400
+    return val # fallback to seconds if no unit

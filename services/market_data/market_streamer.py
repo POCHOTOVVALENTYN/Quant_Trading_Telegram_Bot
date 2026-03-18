@@ -21,6 +21,7 @@ class MarketDataService:
         })
         self.running = False
         self.callbacks = [] # type: list[Callable]
+        self.instrument_info = {} # Кэш инфо об инструментах
 
     def register_callback(self, cb: Callable):
         self.callbacks.append(cb)
@@ -65,6 +66,32 @@ class MarketDataService:
             except Exception as e:
                 app_logger.error(f"Ошибка получения Funding Rates: {str(e)}")
             await asyncio.sleep(60 * 5) # Раз в 5 минут
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
+        """REST-запрос истории для холодного старта"""
+        try:
+            return await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        except Exception as e:
+            app_logger.error(f"Ошибка fetch_ohlcv для {symbol}: {e}")
+            return []
+
+    async def fetch_instrument_info(self, symbol: str):
+        """Получение даты листинга и другой инфы из exchange.fetch_markets() или implicit call"""
+        try:
+            if symbol in self.instrument_info:
+                return self.instrument_info[symbol]
+                
+            markets = await self.exchange.fetch_markets()
+            for m in markets:
+                if m['symbol'] == symbol:
+                    # ccxt не всегда отдает 'info' с датой листинга напрямую в fetch_markets
+                    # Но обычно в Binance это можно вытянуть из info['onboardDate']
+                    self.instrument_info[symbol] = m
+                    return m
+            return None
+        except Exception as e:
+            app_logger.error(f"Ошибка получения инфо об инструменте {symbol}: {e}")
+            return None
 
     async def start(self):
         self.running = True

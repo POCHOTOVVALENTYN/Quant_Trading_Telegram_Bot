@@ -1,1 +1,7 @@
+Alembic migrations live here.
+
+Run:
+  alembic revision --autogenerate -m "message"
+  alembic upgrade head
+
 Generic single-database configuration.

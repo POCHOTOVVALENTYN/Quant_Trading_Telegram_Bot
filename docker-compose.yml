@@ -31,9 +31,9 @@ services:
     container_name: quant_postgres
     restart: always
     environment:
-      POSTGRES_USER: quant_user
-      POSTGRES_PASSWORD: quant_password
-      POSTGRES_DB: quant_db
+      POSTGRES_USER: ${POSTGRES_USER:-quant_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quant_password}
+      POSTGRES_DB: ${POSTGRES_DB:-quant_db}
     ports:
       - "5440:5432"
     volumes:
