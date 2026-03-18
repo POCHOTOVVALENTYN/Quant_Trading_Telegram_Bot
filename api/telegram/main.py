@@ -82,7 +82,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not last_signal:
                     await update.message.reply_text("📭 Активных сигналов пока нет. Ждем выполнения условий по ансамблю стратегий (Schwager v2 + AI)...")
                     return
-保障
 
                 # Перевод сигналов для удобства пользователя
                 signal_type_ru = "🟢 LONG" if last_signal.signal_type == "LONG" else "🔴 SHORT"
