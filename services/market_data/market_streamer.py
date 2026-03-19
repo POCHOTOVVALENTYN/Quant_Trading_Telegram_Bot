@@ -13,8 +13,10 @@ class MarketDataService:
         """
         self.symbols = symbols
         self.timeframes = timeframes
+        from config.settings import settings
         self.exchange = ccxtpro.binance({
             'enableRateLimit': True,
+            'timeout': int(settings.api_timeout_seconds * 1000), # в мс
             'options': {
                 'defaultType': 'future' # Binance Futures
             }
@@ -67,6 +69,23 @@ class MarketDataService:
                 app_logger.error(f"Ошибка получения Funding Rates: {str(e)}")
             await asyncio.sleep(60 * 5) # Раз в 5 минут
 
+    async def fetch_avg_prices(self):
+        """
+        Poll 5-min Weighted Average Price (Binance specific) for all symbols.
+        Used by Spread Momentum strategy.
+        """
+        app_logger.info("Начало мониторинга Average Prices (5m)")
+        while self.running:
+            for symbol in self.symbols:
+                try:
+                    res = await self.exchange.fetch_avg_price(symbol)
+                    avg_price = float(res['price'])
+                    for cb in self.callbacks:
+                        await cb("avg_price", symbol, None, avg_price)
+                except Exception as e:
+                    app_logger.debug(f"AvgPrice poll error for {symbol}: {e}")
+            await asyncio.sleep(60) # Раз в минуту
+
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
         """REST-запрос истории для холодного старта"""
         try:
@@ -105,6 +124,9 @@ class MarketDataService:
             # Запуск OHLCV по всем таймфреймам
             for tf in self.timeframes:
                 tasks.append(asyncio.create_task(self.watch_ohlcv(sym, tf)))
+        
+        # Average price poll (for Spread Momentum strategy)
+        tasks.append(asyncio.create_task(self.fetch_avg_prices()))
         
         # Funding rate poll
         tasks.append(asyncio.create_task(self.fetch_funding_rates()))

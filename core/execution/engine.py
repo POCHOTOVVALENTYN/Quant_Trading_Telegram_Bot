@@ -573,6 +573,7 @@ class ExecutionEngine:
                         "position_db_id": p.id,
                         "stop_order_id": stop_id,
                         "tp_order_id": tp_id,
+                        "timeframe": "1h", # Fallback for reconciled positions
                         "reconciled": True,
                     }
                 except Exception:
@@ -810,6 +811,7 @@ class ExecutionEngine:
                     "current_size": initial_size,
                     "signal_id": signal_id,
                     "position_db_id": position_db_id,
+                    "timeframe": signal_data.get("timeframe", "1h"),
                     **protective,
                 }
 
@@ -864,7 +866,14 @@ class ExecutionEngine:
             trade = self.active_trades[symbol]
         
             # 1. Time Exit (15-я стратегия Швагера)
-            if self.time_exit.should_exit(trade['opened_at'], time.time(), max_days=5):
+            if self.time_exit.should_exit(
+                trade['opened_at'], 
+                time.time(), 
+                trade.get('timeframe', '1h'), 
+                current_price, 
+                trade['entry'], 
+                trade['signal_type']
+            ):
                 await self._close_position(symbol, reason="TIME")
                 return
 

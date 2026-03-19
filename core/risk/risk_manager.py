@@ -105,14 +105,38 @@ class RiskManager:
             return min(current_stop, new_potential_stop)
 
 class TimeExitSystem:
-    """15. Time Exit Strategy"""
+    """
+    Time Exit Strategy 2.0 (Best Practice: Bar-based Exit).
+    Для таймфреймов 1м-1ч выход через 5 дней неэффективен.
+    
+    Используем правило 'No-Progress after N Bars':
+    - Если за 48 свечей (2 полных цикла 24ч для часовика или 48 мин для 1м) 
+      цена не ушла в профит или стоит на месте — выходим.
+    """
     @staticmethod
-    def should_exit(opened_at_timestamp: float, current_timestamp: float, max_days: int = 5) -> bool:
-        """Выход если сделка висит слишком долго без моментума (более 5 дней)"""
-        seconds_in_day = 86400
-        duration_seconds = current_timestamp - opened_at_timestamp
-        if duration_seconds > (max_days * seconds_in_day):
+    def should_exit(opened_at_ts: float, current_ts: float, timeframe: str, 
+                    current_price: float, entry_price: float, signal_type: str = "LONG") -> bool:
+        from core.strategies.strategies import get_timeframe_seconds
+        
+        # 1. Расчет количества прошедших свечей
+        tf_seconds = get_timeframe_seconds(timeframe)
+        duration_sec = current_ts - opened_at_ts
+        bars_passed = duration_sec / tf_seconds
+        
+        # 2. Лимит: 48 свечей без прогресса (Стандарт для внутридневной торговли)
+        MAX_BARS = 48 
+        
+        if bars_passed >= MAX_BARS:
+            # Если цена все еще около входа или в убытке — momentum потерян
+            if signal_type == "LONG" and current_price < (entry_price * 1.005): # меньше 0.5% профита
+                return True
+            if signal_type == "SHORT" and current_price > (entry_price * 0.995):
+                return True
+                
+        # 3. Хард-стоп: 120 свечей (в любом случае выход, так как рыночные условия сменились)
+        if bars_passed >= 120:
             return True
+            
         return False
 
 class PyramidingSystem:

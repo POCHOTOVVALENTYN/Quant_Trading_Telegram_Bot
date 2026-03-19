@@ -33,3 +33,4 @@ passlib==1.7.4 # for password/key hashing (though we use AES)
 cryptography==42.0.8 # For AES256 encryption
 python-dotenv==1.0.1
 loguru==0.7.2
+pytest-asyncio==0.23.7

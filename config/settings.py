@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     default_exchange: str = "binance"
     testnet: bool = True
     is_trading_enabled: bool = True # Глобальный вкл/выкл
+    api_timeout_seconds: float = 5.0 # Стандарт из статьи (контроль зависших запросов)
     
     # Advanced Filters (НОВОЕ)
     max_open_positions: int = 5

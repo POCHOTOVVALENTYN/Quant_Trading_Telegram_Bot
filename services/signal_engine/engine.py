@@ -24,6 +24,8 @@ from core.risk.risk_manager import RiskManager
 from core.execution.engine import ExecutionEngine
 from database.session import async_session
 from database.models.all_models import Signal
+from core.strategies.spread_strategy import SpreadMomentumStrategy
+from utils.exporter import exporter
 
 logger = get_signal_logger()
 
@@ -59,6 +61,10 @@ class TradingOrchestrator:
         self.processed_candles = 0
         self.start_time = time.time()
         self.errors_count = 0
+        
+        # Инфраструктура для Spread Momentum (из статьи)
+        self.spreader = SpreadMomentumStrategy()
+        self.last_avg_prices: Dict[str, float] = {}
         
         self.market_data.register_callback(self.on_market_data)
 
@@ -112,6 +118,8 @@ class TradingOrchestrator:
                 for sym, rate_info in data.items():
                     if isinstance(rate_info, dict):
                         self.funding_rates[sym] = rate_info.get('fundingRate', 0.0)
+        elif data_type == "avg_price":
+            self.last_avg_prices[symbol] = data
 
     async def _process_ohlcv(self, symbol: str, timeframe: str, new_candle: list):
         if symbol not in self.market_history:
@@ -144,6 +152,29 @@ class TradingOrchestrator:
         if timeframe == "1m": # Для мгновенной реакции на цену
             current_price = df.iloc[-1]['close']
             atr = df.iloc[-1].get('atr', 100.0) # Если ATR еще не рассчитан, берем дефолт
+            
+            # --- Spread Momentum Strategy Logic (из статьи) ---
+            avg_p = self.last_avg_prices.get(symbol)
+            if avg_p:
+                spread_signal = await self.spreader.calculate_signal_strength(avg_p, current_price)
+                if spread_signal:
+                    spread_signal["symbol"] = symbol
+                    # Логируем аномалию в Excel для аналитики
+                    exporter.log_anomaly(
+                        avg_p, current_price, spread_signal["spread_pct"], 
+                        symbol, spread_signal["signal"], spread_signal["strength"]
+                    )
+                    # Если сигнал сильный (например > 2/10), можно уведомлять
+                    if spread_signal["strength"] >= 2:
+                        await send_telegram_msg(
+                            f"⚡️ **АНРМАЛИЯ: Spread Momentum**\n\n"
+                            f"🔸 Символ: {symbol}\n"
+                            f"🔹 Спред: {spread_signal['spread_pct']:.4f}%\n"
+                            f"📊 Сила: {'🔥' * spread_signal['strength']} ({spread_signal['strength']}/10)\n"
+                            f"💰 Фьючерс: {current_price}\n"
+                            f"⚖️ Ср. цена (5м): {avg_p}\n"
+                        )
+            
             self.execution.schedule_update_positions(symbol, current_price, atr)
 
         if len(df) < 60: 
@@ -265,7 +296,8 @@ class TradingOrchestrator:
                         "take_profit": tp,
                         "score": score,
                         "atr": df['atr'].iloc[-1],
-                        "ai_data": ai_prediction
+                        "ai_data": ai_prediction,
+                        "timeframe": timeframe
                     }
                     
                     # 7. Сохранение в БД расширенных данных
@@ -292,6 +324,7 @@ class TradingOrchestrator:
                         f"🚀 **СИГНАЛ: {signal['strategy']}**\n\n"
                         f"🔸 Символ: {symbol}\n"
                         f"🔸 Направление: {'🟢 LONG' if signal['signal'] == 'LONG' else '🔴 SHORT'}\n\n"
+                        f"📊 **СИЛА СИГНАЛА:** {'🔥' * int(score * 10)} ({int(score * 10)}/10)\n\n"
                         f"💰 Вход: {signal['entry_price']:.2f}\n"
                         f"🛡 Stop Loss: {sl:.2f}\n"
                         f"🎯 Take Profit: {tp:.2f}\n"
@@ -300,7 +333,7 @@ class TradingOrchestrator:
                         f"📈 Вероятность: {ai_prediction['win_prob']*100:.0f}%\n"
                         f"💰 Доходность: {ai_prediction['expected_return']:.2f}%\n"
                         f"⚠️ Риск: {ai_prediction['risk']:.2f}\n"
-                        f"📊 Score: {score:.2f}\n\n"
+                        f"📊 Scorer: {score:.2f}\n\n"
                         f"ℹ️ Статус: ⌛️ В ОЖИДАНИИ"
                     )
                     await send_telegram_msg(status_msg)
