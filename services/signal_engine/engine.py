@@ -84,14 +84,33 @@ class TradingOrchestrator:
         await self.market_data.start()
     
     async def _prefetch_history(self):
-        """Загрузка истории параллельно для всех символов и таймфреймов"""
-        logger.info("💾 Загружаем историю свечей (Parallel Prefetching)...")
+        """Загрузка истории с ограничением параллелизма (чтобы не банил Binance)"""
+        logger.info("💾 Загружаем историю свечей (Throttled Prefetching)...")
+        
+        symbols = self.market_data.symbols
+        timeframes = self.market_data.timeframes
+        total_tasks = len(symbols) * len(timeframes)
+        processed = 0
+        
+        # Ограничиваем до 5 одновременных запросов
+        semaphore = asyncio.Semaphore(5)
+        
+        async def sem_fetch(s, t):
+            nonlocal processed
+            async with semaphore:
+                res = await self._fetch_and_store_history(s, t)
+                processed += 1
+                if processed % 5 == 0 or processed == total_tasks:
+                    logger.info(f"⏳ Прогресс загрузки истории: {processed}/{total_tasks}")
+                await asyncio.sleep(0.3) # Маленькая пауза между запросами
+                return res
+
         tasks = []
-        for symbol in self.market_data.symbols:
+        for symbol in symbols:
             if symbol not in self.market_history:
                 self.market_history[symbol] = {}
-            for tf in self.market_data.timeframes:
-                tasks.append(self._fetch_and_store_history(symbol, tf))
+            for tf in timeframes:
+                tasks.append(sem_fetch(symbol, tf))
         
         results = await asyncio.gather(*tasks)
         loaded_count = sum(1 for r in results if r)

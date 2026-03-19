@@ -11,6 +11,8 @@ services:
       - redis
       - postgres
       - trading-engine
+    volumes:
+      - .:/app
     command: python -m api.telegram.main
 
   trading-engine:
@@ -24,6 +26,8 @@ services:
     depends_on:
       - redis
       - postgres
+    volumes:
+      - .:/app
     command: uvicorn api.rest.main:app --host 0.0.0.0 --port 8000
 
   postgres:

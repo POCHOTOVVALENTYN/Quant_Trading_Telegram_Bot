@@ -22,13 +22,33 @@ async def lifespan(app: FastAPI):
     global orchestrator, exchange_client, reconcile_task
     
     # 1. Инициализация Базы Данных
-    app_logger.info("Инициализация базы данных...")
+    app_logger.info("🚀 [1/5] Инициализация базы данных...")
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        app_logger.info("Таблицы базы данных успешно синхронизированы.")
+        app_logger.info("✅ База данных готова.")
+        
+        # 0. ГАРАНТИРУЕМ ПОЛЬЗОВАТЕЛЯ (Это должно быть ПЕРЕД синхронизацией)
+        from database.session import async_session
+        from database.models.all_models import User
+        from sqlalchemy import select
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.id == 1))
+            user_exists = result.scalar_one_or_none()
+            if not user_exists:
+                app_logger.info("👥 [DB] Создание дефолтного пользователя (ID=1)...")
+                new_user = User(id=1, telegram_id=0)
+                session.add(new_user)
+                try:
+                    await session.commit()
+                    app_logger.info("✅ Пользователь ID=1 создан.")
+                except Exception as e:
+                    await session.rollback()
+                    app_logger.warning(f"⚠️ Не удалось создать пользователя (возможно, уже есть): {e}")
+            else:
+                app_logger.info("✅ Пользователь ID=1 найден.")
     except Exception as e:
-        app_logger.error(f"Ошибка БД: {e}")
+        app_logger.error(f"❌ Ошибка БД: {e}")
 
     # 2. Инициализация биржевого клиента Binance
     # Выбор ключей в зависимости от режима (Testnet или Real)
@@ -57,9 +77,19 @@ async def lifespan(app: FastAPI):
         'apiKey': api_key,
         'secret': secret,
         'enableRateLimit': True,
-        'options': {'defaultType': 'future'}
+        'options': {'defaultType': 'future'},
+        'timeout': 30000 # 30 секунд
     })
     exchange_client.set_sandbox_mode(settings.testnet)
+    
+    # ПРИНУДИТЕЛЬНО МЕНЯЕМ URL КОНЕКТА (т.к. старый fstream.binancefuture.com тормозит/не работает)
+    if settings.testnet:
+        working_ws_url = "wss://testnet.binancefuture.com/ws-fapi/v1"
+        exchange_client.urls['test']['ws']['future'] = working_ws_url
+        exchange_client.urls['api']['ws']['future'] = working_ws_url
+        app_logger.info(f"🚀 WebSocket URL переопределен на: {working_ws_url}")
+    
+    app_logger.info(f"API URLs: {exchange_client.urls}")
     try:
         await exchange_client.load_markets()
     except Exception as e:
@@ -106,11 +136,13 @@ async def lifespan(app: FastAPI):
         risk_manager=risk_manager
     )
 
-    # Reconcile open positions after restarts
+    # 3. Синхронизация: биржа <-> БД (Идет ПОСЛЕ создания пользователя)
+    app_logger.info("🚀 [3/5] Синхронизация текущих позиций...")
     try:
         await execution_engine.reconcile_full()
+        app_logger.info("✅ Синхронизация завершена.")
     except Exception as e:
-        app_logger.error(f"Ошибка reconcile: {e}")
+        app_logger.error(f"⚠️ Ошибка reconcile: {e}")
 
     # Periodic reconcile loop (keeps state aligned with exchange)
     async def _reconcile_loop():
@@ -118,21 +150,25 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(60)  # every 60s
             try:
                 await execution_engine.reconcile_full()
+                # Вывод текущих метрик для отладки
+                bal, dd, count = await execution_engine.get_account_metrics()
+                app_logger.info(f"📊 [MONITOR] Balance={bal:.2f} USDT | Drawdown={dd*100:.2f}% | Positions={count}")
             except Exception as e:
                 app_logger.error(f"Periodic reconcile error: {e}")
     reconcile_task = asyncio.create_task(_reconcile_loop())
     
     # 4. Инициализация Оркестратора
+    app_logger.info("🚀 [4/5] Инициализация Оркестратора...")
     orchestrator = TradingOrchestrator(
         market_data=market_data, 
         execution_engine=execution_engine
     )
 
-    # 5. Запуск Оркестратора в фоновой задаче (не блокируя FastAPI)
-    app_logger.info("Запуск Торгового Движка (Orchestrator)...")
+    # 5. Запуск Оркестратора
+    app_logger.info("🚀 [5/5] Запуск Торгового Движка (Orchestrator)...")
     asyncio.create_task(orchestrator.start())
     
-    app_logger.info("✅ Платформа успешно запущена!")
+    app_logger.info("🎉 Платформа успешно запущена!")
     
     yield  # --- Здесь работает FastAPI ---
     

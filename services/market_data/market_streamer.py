@@ -17,16 +17,24 @@ class MarketDataService:
         
         if exchange:
             self.exchange = exchange
+            # Принудительно ставим боевой WS для стабильной маркет-даты, 
+            # даже если основной клиент в sandbox-режиме
+            prod_ws = "wss://fstream.binance.com/ws"
+            if hasattr(self.exchange, 'urls'):
+                self.exchange.urls['test']['ws']['future'] = prod_ws
+                self.exchange.urls['api']['ws']['future'] = prod_ws
+                app_logger.info(f"🔮 MarketDataService: используем PROD WS для графиков: {prod_ws}")
         else:
             self.exchange = ccxtpro.binance({
                 'enableRateLimit': True,
-                'timeout': int(settings.api_timeout_seconds * 1000), # в мс
-                'options': {
-                    'defaultType': 'future' # Binance Futures
-                }
+                'timeout': int(settings.api_timeout_seconds * 1000), 
+                'options': {'defaultType': 'future'}
             })
             if settings.testnet:
                 self.exchange.set_sandbox_mode(True)
+                # Переопределяем WS на боевой для стабильности
+                self.exchange.urls['test']['ws']['future'] = "wss://fstream.binance.com/ws"
+                self.exchange.urls['api']['ws']['future'] = "wss://fstream.binance.com/ws"
         self.running = False
         self.callbacks = [] # type: list[Callable]
         self.instrument_info = {} # Кэш инфо об инструментах
@@ -52,9 +60,15 @@ class MarketDataService:
 
     async def watch_orderbook(self, symbol: str):
         app_logger.info(f"Начало отслеживания Orderbook для {symbol}")
+        # Для Binance Futures CCXT Pro иногда требует формат symbol:USDT
+        if ":" not in symbol:
+            target_symbol = f"{symbol}:USDT"
+        else:
+            target_symbol = symbol
+            
         while self.running:
             try:
-                orderbook = await self.exchange.watch_order_book(symbol)
+                orderbook = await self.exchange.watch_order_book(target_symbol)
                 for cb in self.callbacks:
                     await cb("orderbook", symbol, None, orderbook)
             except Exception as e:
@@ -135,10 +149,12 @@ class MarketDataService:
         for sym in self.symbols:
             # Запуск orderbook
             tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
+            await asyncio.sleep(0.05) # Плавная пауза
             
             # Запуск OHLCV по всем таймфреймам
             for tf in self.timeframes:
                 tasks.append(asyncio.create_task(self.watch_ohlcv(sym, tf)))
+                await asyncio.sleep(0.05) 
         
         # Average price poll (for Spread Momentum strategy)
         tasks.append(asyncio.create_task(self.fetch_avg_prices()))

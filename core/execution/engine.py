@@ -151,7 +151,16 @@ class ExecutionEngine:
         if client_order_id:
             p.setdefault("newClientOrderId", client_order_id)
             p.setdefault("clientOrderId", client_order_id)
-        return await self.exchange.create_order(symbol=symbol, type=type, side=side, amount=amount, price=price, params=p)
+        
+        # Для совместимости с Algo API тестнета используем чистый ID монеты (напр. ETHUSDT)
+        try:
+            market = self.exchange.market(symbol)
+            clean_symbol = market['id']
+        except Exception:
+            # Fallback к ручной очистке
+            clean_symbol = symbol.replace("/", "").split(":")[0]
+            
+        return await self.exchange.create_order(symbol=clean_symbol, type=type, side=side, amount=amount, price=price, params=p)
 
     async def _cancel_order_safe(self, symbol: str, order_id: str | None):
         if not order_id:
@@ -449,6 +458,21 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Ошибка reconcile_full: fetch_positions: {e}")
 
+        # 2a) Fetch ALL open orders to find orphans (SL/TP)
+        ex_open_all = []
+        try:
+            ex_open_all = await self.exchange.fetch_open_orders()
+        except Exception as e:
+            logger.error(f"Ошибка fetch_open_orders при синхронизации: {e}")
+
+        # Map symbol -> [Orders]
+        ex_orders_by_symbol = {}
+        for o in (ex_open_all or []):
+            sym = o.get("symbol")
+            if sym not in ex_orders_by_symbol:
+                ex_orders_by_symbol[sym] = []
+            ex_orders_by_symbol[sym].append(o)
+
         try:
             from sqlalchemy import select, update
             from database.models.all_models import Position as PositionModel, PositionStatus
@@ -457,7 +481,8 @@ class ExecutionEngine:
                 r = await session.execute(q)
                 db_open_positions = r.scalars().all()
 
-            db_open_by_symbol = {p.symbol: p for p in db_open_positions}
+            # Приводим все символы из БД к чистому виду (без :USDT) для маппинга
+            db_open_by_symbol = {p.symbol.split(":")[0]: p for p in db_open_positions}
 
             # Закрываем в БД те, которых уже нет на бирже
             for sym, dbp in db_open_by_symbol.items():
@@ -502,19 +527,92 @@ class ExecutionEngine:
                         )
                         await session.commit()
 
+            # 2c) Обновляем существующие в БД позиции, если там NULL в SL/TP (best-effort)
+            for sym, dbp in db_open_by_symbol.items():
+                if sym in exchange_positions:
+                    found_sl = None
+                    found_tp = None
+                    for o in ex_orders_by_symbol.get(sym, []):
+                        ot = (o.get("info", {}).get("type") or o.get("type", "")).upper()
+                        if "STOP" in ot: found_sl = o.get("stopPrice") or o.get("price")
+                        if "TAKE" in ot: found_tp = o.get("stopPrice") or o.get("price")
+                    
+                    if (found_sl or found_tp) and (dbp.stop_loss is None or dbp.take_profit is None):
+                        async with async_session() as session:
+                             await session.execute(
+                                 update(PositionModel)
+                                 .where(PositionModel.id == dbp.id)
+                                 .values(
+                                     stop_loss=float(found_sl) if (found_sl and dbp.stop_loss is None) else dbp.stop_loss,
+                                     take_profit=float(found_tp) if (found_tp and dbp.take_profit is None) else dbp.take_profit,
+                                 )
+                             )
+                             await session.commit()
+                    
+                    # 2d) ЕСЛИ СТОПОВ ВСЕ ЕЩЕ НЕТ (ни на бирже, ни в БД) - ВЫСТАВЛЯЕМ ДЕФОЛТНЫЙ
+                    if not found_sl and not dbp.stop_loss:
+                        try:
+                            side = "sell" if (exchange_positions.get(sym, {}).get("contracts", 0) > 0) else "buy"
+                            entry = float(exchange_positions.get(sym, {}).get("entry", 0))
+                            # Дефолтный стоп 1.5% от входа
+                            sp = entry * 0.985 if side == "sell" else entry * 1.015
+                            sp_norm = await self._normalize_price(sym, sp)
+                            amount = float(abs(exchange_positions.get(sym, {}).get("contracts", 0)))
+                            
+                            logger.info(f"🛡 [AUTORESCUE] Выставляю дефолтный SL для {sym} (1.5%): {sp_norm}")
+                            
+                            # Переходим на самый защищенный тип: STOP (Limit Stop)
+                            # Это обходит блокировку "Algo Order API"
+                            try:
+                                clean_symbol = sym.replace("/", "").split(":")[0]
+                                limit_price = sp_norm * 0.999 if side == "sell" else sp_norm * 1.001
+                                limit_price = await self._normalize_price(sym, limit_price)
+                                amount = float(abs(exchange_positions.get(sym, {}).get("contracts", 0)))
+                                
+                                raw_params = {
+                                    "symbol": clean_symbol,
+                                    "side": side.upper(),
+                                    "type": "STOP",
+                                    "quantity": str(amount),
+                                    "price": str(limit_price),
+                                    "stopPrice": str(sp_norm),
+                                    "timeInForce": "GTC",
+                                    "reduceOnly": "true",
+                                    "workingType": "MARK_PRICE"
+                                }
+                                await self.exchange.fapiPrivatePostOrder(raw_params)
+                                # Сразу пишем в БД
+                                async with async_session() as session:
+                                    await session.execute(update(PositionModel).where(PositionModel.id == dbp.id).values(stop_loss=float(sp_norm)))
+                                    await session.commit()
+                            except Exception as raw_e:
+                                logger.error(f"❌ FINAL RAW API Error для {sym}: {raw_e}")
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка AUTORESCUE SL для {sym}: {e}")
+
             # Создаем в БД позиции, которые есть на бирже, но нет в БД
-            for sym, ep in exchange_positions.items():
+            for raw_sym, ep in exchange_positions.items():
+                sym = raw_sym.split(":")[0]
                 if sym in db_open_by_symbol:
                     continue
                 async with async_session() as session:
+                    # Попытка найти SL/TP среди ордеров на бирже для этого символа
+                    found_sl = None
+                    found_tp = None
+                    # Ищем и по сырому, и по чистому (на всякий случай)
+                    for o in ex_orders_by_symbol.get(sym, []) + ex_orders_by_symbol.get(raw_sym, []):
+                        ot = (o.get("info", {}).get("type") or o.get("type", "")).upper()
+                        if "STOP" in ot: found_sl = o.get("stopPrice") or o.get("price")
+                        if "TAKE" in ot: found_tp = o.get("stopPrice") or o.get("price")
+
                     pos_row = PositionModel(
                         user_id=1,
                         signal_id=None,
-                        symbol=sym,
+                        symbol=sym, # Пишем в базу ЧИСТЫЙ символ
                         entry_price=float(ep.get("entry") or 0.0),
                         size=float(abs(ep.get("contracts") or 0.0)),
-                        stop_loss=None,
-                        take_profit=None,
+                        stop_loss=float(found_sl) if found_sl else None,
+                        take_profit=float(found_tp) if found_tp else None,
                         status=PositionStatus.OPEN,
                         opened_at=datetime.datetime.utcnow(),
                     )
@@ -736,9 +834,10 @@ class ExecutionEngine:
                     sp = await self._normalize_price(symbol, stop_price)
                     sl_order = await self._create_order_with_client_id(
                         symbol=symbol,
-                        type="STOP_MARKET",
+                        type="STOP",
                         side=reduce_side,
                         amount=initial_size,
+                        price=await self._normalize_price(symbol, sp * 0.999 if side == "sell" else sp * 1.001),
                         client_order_id=sl_cid,
                         params={"stopPrice": sp, "reduceOnly": True, "workingType": "MARK_PRICE"},
                     )
@@ -752,9 +851,10 @@ class ExecutionEngine:
                         tp_norm = await self._normalize_price(symbol, float(tp_price))
                         tp_order = await self._create_order_with_client_id(
                             symbol=symbol,
-                            type="TAKE_PROFIT_MARKET",
+                            type="TAKE_PROFIT",
                             side=reduce_side,
                             amount=initial_size,
+                            price=tp_norm,
                             client_order_id=tp_cid,
                             params={"stopPrice": tp_norm, "reduceOnly": True, "workingType": "MARK_PRICE"},
                         )
