@@ -34,3 +34,5 @@ cryptography==42.0.8 # For AES256 encryption
 python-dotenv==1.0.1
 loguru==0.7.2
 pytest-asyncio==0.23.7
+scipy==1.13.1
+openpyxl==3.1.2

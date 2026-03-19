@@ -4,7 +4,7 @@ from typing import Dict, Callable
 from utils.logger import app_logger
 
 class MarketDataService:
-    def __init__(self, symbols: list[str], timeframes: list[str]):
+    def __init__(self, symbols: list[str], timeframes: list[str], exchange: ccxtpro.binance = None):
         """
         Инициализация сервиса маркет-даты (Этап 4).
         
@@ -14,13 +14,19 @@ class MarketDataService:
         self.symbols = symbols
         self.timeframes = timeframes
         from config.settings import settings
-        self.exchange = ccxtpro.binance({
-            'enableRateLimit': True,
-            'timeout': int(settings.api_timeout_seconds * 1000), # в мс
-            'options': {
-                'defaultType': 'future' # Binance Futures
-            }
-        })
+        
+        if exchange:
+            self.exchange = exchange
+        else:
+            self.exchange = ccxtpro.binance({
+                'enableRateLimit': True,
+                'timeout': int(settings.api_timeout_seconds * 1000), # в мс
+                'options': {
+                    'defaultType': 'future' # Binance Futures
+                }
+            })
+            if settings.testnet:
+                self.exchange.set_sandbox_mode(True)
         self.running = False
         self.callbacks = [] # type: list[Callable]
         self.instrument_info = {} # Кэш инфо об инструментах
@@ -33,6 +39,8 @@ class MarketDataService:
         while self.running:
             try:
                 candles = await self.exchange.watch_ohlcv(symbol, timeframe)
+                if not candles or len(candles) == 0:
+                    continue
                 # notify systems
                 for cb in self.callbacks:
                     await cb("ohlcv", symbol, timeframe, candles[-1])
@@ -78,8 +86,15 @@ class MarketDataService:
         while self.running:
             for symbol in self.symbols:
                 try:
-                    res = await self.exchange.fetch_avg_price(symbol)
-                    avg_price = float(res['price'])
+                    # Некоторые версии CCXT или биржи могут не поддерживать fetch_avg_price
+                    if hasattr(self.exchange, 'fetch_avg_price'):
+                        res = await self.exchange.fetch_avg_price(symbol)
+                        avg_price = float(res['price'])
+                    else:
+                        # Fallback: берем текущую цену из тикера
+                        res = await self.exchange.fetch_ticker(symbol)
+                        avg_price = float(res['last'])
+                    
                     for cb in self.callbacks:
                         await cb("avg_price", symbol, None, avg_price)
                 except Exception as e:

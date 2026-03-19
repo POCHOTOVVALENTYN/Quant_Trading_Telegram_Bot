@@ -226,6 +226,100 @@ class StrategyWideRangeReversal(BaseStrategy):
                     return {"strategy": "WRD Reversal", "signal": "SHORT", "entry_price": curr_candle['close'], "confidence": 0.9}
         return None
 
+class StrategyBollingerClusters(BaseStrategy):
+    """
+    Стратегия из статьи №12: Bollinger Bands + RSI + CSI Clusters.
+    Использует отклонение от полос в сочетании с кластерным подтверждением силы.
+    """
+    def __init__(self, bb_period: int = 40, rsi_limit: float = 60, min_cluster: int = 3):
+        self.bb_period = bb_period
+        self.rsi_limit = rsi_limit
+        self.min_cluster = min_cluster
+
+    def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        # Нужно как минимум 450 свечей для надежного индикатора CSI/RSI Slow
+        if len(df) < 450: 
+            return None
+        
+        # Предполагаем, что индикаторы уже рассчитаны в df оркестратором (или рассчитываем здесь)
+        # Если их нет, стратегия не сработает
+        required = ['upper', 'lower', 'RSI', 'CSI']
+        if not all(col in df.columns for col in required):
+            return None
+            
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+        
+        # 1. Проверка Кластера (Упрощенно: последние N свечей имеют одинаковый знак CSI)
+        recent_csi = df['CSI'].tail(self.min_cluster)
+        is_bull_cluster = (recent_csi > 0).all()
+        is_bear_cluster = (recent_csi < 0).all()
+
+        # 2. Условия LONG
+        long_cond = (
+            last_row['close'] < last_row['lower'] and
+            last_row['CSI'] > 0 and 
+            last_row['CSI'] > prev_row['CSI'] and
+            is_bull_cluster and 
+            last_row['RSI'] < self.rsi_limit
+        )
+
+        # 3. Условия SHORT
+        short_cond = (
+            last_row['close'] > last_row['upper'] and
+            last_row['CSI'] < 0 and 
+            last_row['CSI'] < prev_row['CSI'] and
+            is_bear_cluster and 
+            last_row['RSI'] > (100 - self.rsi_limit)
+        )
+
+        if long_cond:
+            return {"strategy": "Bollinger Clusters", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.95}
+        elif short_cond:
+            return {"strategy": "Bollinger Clusters", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.95}
+            
+        return None
+
+class StrategyTripleSMA(BaseStrategy):
+    """
+    Стратегия из статьи №13 (Backtrader): Тройной фильтр SMA.
+    Signal 1: SMA(9) пересекает SMA(30)
+    Signal 2: Тренд фильтр SMA(60) < SMA(30)
+    """
+    def __init__(self, fast=9, medium=30, slow=60):
+        self.fast = fast
+        self.medium = medium
+        self.slow = slow
+
+    def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        if len(df) < self.slow + 1: return None
+        
+        # Индикаторы ma9, ma30, ma60 уже рассчитаны в df оркестратором
+        required = [f'ma{self.fast}', f'ma{self.medium}', f'ma{self.slow}']
+        if not all(col in df.columns for col in required): return None
+        
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        fast_c, med_c, slow_c = curr[required[0]], curr[required[1]], curr[required[2]]
+        fast_p, med_p = prev[required[0]], prev[required[1]]
+        
+        # Сигнал 1: Пересечение Fast/Medium
+        is_cross_up = fast_p <= med_p and fast_c > med_c
+        is_cross_down = fast_p >= med_p and fast_c < med_c
+        
+        # Сигнал 2: Фильтр Medium/Slow
+        # Если SMA(60) < SMA(30), значит рынок в растущем тренде (Medium выше Slow)
+        trend_long = slow_c < med_c
+        trend_short = slow_c > med_c
+        
+        if is_cross_up and trend_long:
+            return {"strategy": "Triple SMA Filter", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.75}
+        elif is_cross_down and trend_short:
+            return {"strategy": "Triple SMA Filter", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.75}
+        
+        return None
+
 class StrategyRuleOf7:
     @staticmethod
     def calculate_targets(high: float, low: float) -> Dict[str, float]:
@@ -236,6 +330,7 @@ class StrategyRuleOf7:
             "Цель 3 (7/2)": low + L * (7.0 / 2.0),
         }
         return targets
+
 def get_timeframe_seconds(tf: str) -> int:
     unit = tf[-1]
     val = int(tf[:-1])

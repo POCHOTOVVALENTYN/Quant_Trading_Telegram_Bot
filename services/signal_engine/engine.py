@@ -1,5 +1,6 @@
 import asyncio
 import pandas as pd
+import traceback
 from typing import Dict, Any, List, Optional
 import time
 from datetime import datetime
@@ -9,13 +10,15 @@ from config.settings import settings
 from utils.logger import get_signal_logger, app_logger
 from utils.notifier import send_telegram_msg
 from services.market_data.market_streamer import MarketDataService
-from core.indicators.indicators import calculate_atr
 from core.strategies.strategies import (
     StrategyWRD, StrategyATRBreakout, StrategyMATrend, 
     StrategyDonchian, StrategyMomentum, StrategyPullback, 
     StrategyVolContraction, StrategyRangeExpansion, 
     StrategyOpeningRange, StrategyWideRangeReversal,
-    StrategyRuleOf7, get_timeframe_seconds
+    StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, get_timeframe_seconds
+)
+from core.indicators.indicators import (
+    calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
@@ -46,7 +49,9 @@ class TradingOrchestrator:
             StrategyVolContraction(threshold=0.6),
             StrategyRangeExpansion(),
             StrategyOpeningRange(),
-            StrategyWideRangeReversal()
+            StrategyWideRangeReversal(),
+            StrategyBollingerClusters(bb_period=40, rsi_limit=60, min_cluster=3),
+            StrategyTripleSMA(fast=9, medium=30, slow=60)
         ]
         
         self.scorer = SignalScorer()
@@ -94,7 +99,8 @@ class TradingOrchestrator:
 
     async def _fetch_and_store_history(self, symbol: str, tf: str):
         try:
-            history = await self.market_data.fetch_ohlcv(symbol, tf, limit=100)
+            # Для RSI 450 и CSI нам нужно минимум 500 свечей
+            history = await self.market_data.fetch_ohlcv(symbol, tf, limit=600)
             if history:
                 df = pd.DataFrame(history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 self.market_history[symbol][tf] = df
@@ -144,8 +150,8 @@ class TradingOrchestrator:
         else:
             df.loc[len(df)] = new_row
             
-        if len(df) > 200: 
-            df = df.tail(200).reset_index(drop=True)
+        if len(df) > 1000: 
+            df = df.tail(1000).reset_index(drop=True)
         self.market_history[symbol][timeframe] = df
 
         # --- НОВОЕ: Обновление Трейлинг-стопов и Пирамидинга (Этап 3 Плана) ---
@@ -180,10 +186,19 @@ class TradingOrchestrator:
         if len(df) < 60: 
             return
 
-        # 1. Расчет базовых индикаторов (ATR для стратегий)
+        # 1. Расчет индикаторов (ATR, RSI 450, Bollinger 40, CSI)
         try:
             self.processed_candles += 1
             df['atr'] = calculate_atr(df, period=14)
+            df['RSI'] = calculate_rsi(df['close'], period=450)
+            upper, ma, lower = calculate_bollinger_bands(df['close'], period=40, std=1.0)
+            df['upper'] = upper
+            df['lower'] = lower
+            df['CSI'] = calculate_csi(df, atr_period=14)
+            # Для StrategyTripleSMA
+            df['ma9'] = calculate_sma(df['close'], 9)
+            df['ma30'] = calculate_sma(df['close'], 30)
+            df['ma60'] = calculate_sma(df['close'], 60)
             # 2. Проверка ансамбля стратегий
             for strategy in self.strategies:
                 signal = strategy.evaluate(df)
@@ -348,7 +363,7 @@ class TradingOrchestrator:
                         logger.info(f"Трейдинг отключен (is_trading_enabled=False). Сигнал {symbol} сохранен, но не исполнен.")
         except Exception as e:
             self.errors_count += 1
-            app_logger.error(f"❌ Ошибка в Resilient Loop для {symbol}: {e}")
+            app_logger.error(f"❌ Ошибка в Resilient Loop для {symbol}: {e}\n{traceback.format_exc()}")
 
             # Circuit breaker: если ошибок много за короткое время — отключаем торговлю
             now = time.time()

@@ -35,10 +35,22 @@ async def lifespan(app: FastAPI):
     api_key = settings.api_key_binance
     secret = settings.secret_api_key_binance
     
+    # Debug: что реально загружено из settings
+    app_logger.info(f"DEBUG Settings: testnet={settings.testnet}")
+    app_logger.info(f"DEBUG Settings: test_api_key_binance={'Loaded ('+settings.test_api_key_binance[:4]+')' if settings.test_api_key_binance else 'None'}")
+    app_logger.info(f"DEBUG Settings: api_key_binance={'Loaded ('+settings.api_key_binance[:4]+')' if settings.api_key_binance else 'None'}")
+
     if settings.testnet and settings.test_api_key_binance:
         app_logger.info("Используются ТЕСТОВЫЕ API ключи (Binance Testnet)")
-        api_key = settings.test_api_key_binance
-        secret = settings.test_secret_api_key_binance
+        api_key = settings.test_api_key_binance.strip()
+        secret = settings.test_secret_api_key_binance.strip()
+    else:
+        app_logger.info("Используются РЕАЛЬНЫЕ API ключи (или ключи по умолчанию)")
+        api_key = settings.api_key_binance.strip() if settings.api_key_binance else ""
+        secret = settings.secret_api_key_binance.strip() if settings.secret_api_key_binance else ""
+    
+    if api_key:
+        app_logger.info(f"FINAL API Key Selected: {api_key[:4]}...{api_key[-4:] if len(api_key)>4 else ''}")
     
     app_logger.info(f"Инициализация клиента Binance API (Testnet: {settings.testnet})...")
     exchange_client = ccxtpro.binance({
@@ -55,16 +67,32 @@ async def lifespan(app: FastAPI):
     
     # 3. Инициализация ключевых микромодулей (Риск, Исполнение ордеров, Данные рынка)
     # Расширяем мониторинг до Топ-20 популярных монет
-    symbols_to_monitor = [
+    all_symbols = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-        "ADA/USDT", "DOGE/USDT", "DOT/USDT", "POL/USDT", "LINK/USDT",
+        "ADA/USDT", "DOGE/USDT", "DOT/USDT", "LINK/USDT",
         "BCH/USDT", "TRX/USDT", "LTC/USDT", "AVAX/USDT", "ATOM/USDT",
         "UNI/USDT", "ETC/USDT", "FIL/USDT", "LDO/USDT", "APT/USDT"
     ]
     
+    symbols_to_monitor = []
+    if exchange_client.markets:
+        for s in all_symbols:
+            if s in exchange_client.markets:
+                symbols_to_monitor.append(s)
+            else:
+                app_logger.warning(f"⚠️ Монета {s} отсутствует в 'markets' биржи. Пропускаем.")
+    else:
+        app_logger.warning("❌ Рынки не загружены (None). Используем Топ-10 монет для мониторинга.")
+        symbols_to_monitor = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "DOT/USDT", "LTC/USDT", "AVAX/USDT"]
+
+    if not symbols_to_monitor:
+        app_logger.error("❌ Список монет для мониторинга ПУСТ.")
+        symbols_to_monitor = ["BTC/USDT"] # Fallback
+
     market_data = MarketDataService(
         symbols=symbols_to_monitor, 
-        timeframes=["1m", "5m", "15m", "1h"]
+        timeframes=["1m", "5m", "15m", "1h"],
+        exchange=exchange_client
     )
     
     risk_manager = RiskManager(
