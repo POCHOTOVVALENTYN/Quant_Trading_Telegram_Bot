@@ -9,12 +9,12 @@ class BaseStrategy(ABC):
         pass
 
 class StrategyWRD(BaseStrategy):
-    def __init__(self, atr_multiplier: float = 1.6):
+    def __init__(self, atr_multiplier: float = 1.6, lookback_bars: int = 1440):
         self.atr_multiplier = atr_multiplier
+        self.lookback_bars = lookback_bars
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        # Нам нужно 1440 свечей для 24ч диапазона (на 1m TF)
-        if len(df) < 1440 or 'atr' not in df.columns:
+        if len(df) < self.lookback_bars or 'atr' not in df.columns:
             return None
 
         last_row = df.iloc[-1]
@@ -389,12 +389,11 @@ class StrategyFundingSqueeze(BaseStrategy):
 class StrategyRuleOf7:
     @staticmethod
     def calculate_targets(high: float, low: float) -> Dict[str, float]:
-        L = high - low
-        targets = {
-            "Цель 1 (7/4)": low + L * (7.0 / 4.0),
-            "Цель 2 (7/3)": low + L * (7.0 / 3.0),
-            "Цель 3 (7/2)": low + L * (7.0 / 2.0),
-        }
+        # Берем экстремумы за последние 20 свечей как опорные точки паттерна
+        lookback = df.tail(20)
+        pattern_high = lookback['high'].max()
+        pattern_low  = lookback['low'].min()
+        targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low)
         return targets
 
 def get_timeframe_seconds(tf: str) -> int:

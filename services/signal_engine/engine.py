@@ -15,7 +15,7 @@ from core.strategies.strategies import (
     StrategyDonchian, StrategyMomentum, StrategyPullback, 
     StrategyVolContraction, StrategyRangeExpansion, 
     StrategyOpeningRange, StrategyWideRangeReversal,
-    StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, get_timeframe_seconds
+    StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, StrategyFundingSqueeze, get_timeframe_seconds
 )
 from core.indicators.indicators import (
     calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma,
@@ -426,7 +426,7 @@ class TradingOrchestrator:
         
         # Волатильность и Импульс
         df['atr'] = calculate_atr(df, period=14)
-        df['RSI'] = calculate_rsi(df['close'], period=450)
+        df['RSI'] = calculate_rsi(df['close'], period=21)    # медленный RSI
         df['RSI_fast'] = calculate_rsi(df['close'], period=14)
         
         # Полосы Боллинджера (Стандарт 40/1.0 как в Bollinger Clusters)

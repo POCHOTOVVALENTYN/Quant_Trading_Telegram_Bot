@@ -27,22 +27,10 @@ def calculate_true_range(high: pd.Series, low: pd.Series, prev_close: pd.Series)
     return tr
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """
-    Рассчитывает Average True Range (ATR).
-    
-    ATR = MovingAverage(TR, n)
-    Ожидает df со столбцами 'high', 'low', 'close'
-    """
-    if 'prev_close' not in df.columns:
-        df['prev_close'] = df['close'].shift(1)
-        
-    df['tr'] = calculate_true_range(df['high'], df['low'], df['prev_close'])
-    
-    # Для ATR обычно используется скользящее среднее RMA, но по формуле из книги 
-    # указана (SMA) или (EMA). Реализуем RMA (по стандарту Уайлдера) или SMA.
-    # В книге "Technical Analysis" обычно подразумевается сглаживание по Уайлдеру.
-    atr = df['tr'].ewm(alpha=1/period, adjust=False).mean()
-    
+    # Работаем с локальными переменными, не загрязняем df
+    prev_close = df['close'].shift(1)
+    tr = calculate_true_range(df['high'], df['low'], prev_close)
+    atr = tr.ewm(alpha=1/period, adjust=False).mean()
     return atr
 
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
