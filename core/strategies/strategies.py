@@ -70,24 +70,30 @@ class StrategyMATrend(BaseStrategy):
         self.slow_ma = slow_ma
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        # Используем пре-рассчитанные ma20 и ma50 из оркестратора
-        fast_col = f'ma{self.fast_ma}'
-        slow_col = f'ma{self.slow_ma}'
+        # Обновлено на EMA
+        fast_col = f'ema{self.fast_ma}'
+        slow_col = f'ema{self.slow_ma}'
         
-        if fast_col not in df.columns or slow_col not in df.columns:
+        if fast_col not in df.columns or slow_col not in df.columns or len(df) < 2:
             return None
             
         last_row = df.iloc[-1]
-        fast_v = last_row[fast_col]
-        slow_v = last_row[slow_col]
+        prev_row = df.iloc[-2]
         
-        if pd.isna(fast_v) or pd.isna(slow_v):
+        fast_curr, slow_curr = last_row[fast_col], last_row[slow_col]
+        fast_prev, slow_prev = prev_row[fast_col], prev_row[slow_col]
+        
+        if pd.isna(fast_curr) or pd.isna(slow_curr):
             return None
 
-        if fast_v > slow_v and last_row['close'] > fast_v:
-            return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.6}
-        elif fast_v < slow_v and last_row['close'] < fast_v:
-            return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.6}
+        # Логика Event-based (пересечение)
+        is_cross_up = fast_prev <= slow_prev and fast_curr > slow_curr
+        is_cross_down = fast_prev >= slow_prev and fast_curr < slow_curr
+
+        if is_cross_up and last_row['close'] > fast_curr:
+            return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.8}
+        elif is_cross_down and last_row['close'] < fast_curr:
+            return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.8}
         return None
 
 class StrategyDonchian(BaseStrategy):
@@ -140,25 +146,34 @@ class StrategyMomentum(BaseStrategy):
         return None
 
 class StrategyPullback(BaseStrategy):
-    def __init__(self, ma_period: int = 20):
+    def __init__(self, ma_period: int = 20, global_period: int = 200):
         self.ma_period = ma_period
+        self.global_period = global_period
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        ma_col = f'ma{self.ma_period}'
-        if ma_col not in df.columns or len(df) < 50:
+        ma_col = f'ema{self.ma_period}'
+        global_col = f'ema{self.global_period}'
+        
+        if ma_col not in df.columns or global_col not in df.columns or len(df) < 50:
             return None
             
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         ma_v = last_row[ma_col]
+        global_v = last_row[global_col]
         
-        if pd.isna(ma_v): return None
+        if pd.isna(ma_v) or pd.isna(global_v): 
+            return None
         
-        # Условие: Тренд выше SMA и цена коснулась MA (или рядом) и развернулась
-        if last_row['close'] > ma_v and prev_row['low'] <= prev_row[ma_col] and last_row['close'] > prev_row['close']:
-            return {"strategy": "Pullback", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.65}
-        elif last_row['close'] < ma_v and prev_row['high'] >= prev_row[ma_col] and last_row['close'] < prev_row['close']:
-            return {"strategy": "Pullback", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.65}
+        # Двойная валидация: проверка глобального тренда
+        global_trend_up = last_row['close'] > global_v
+        global_trend_down = last_row['close'] < global_v
+        
+        # Условие: Глобальный тренд совпадает, цена коснулась локальной MA и отскочила
+        if global_trend_up and last_row['close'] > ma_v and prev_row['low'] <= prev_row[ma_col] and last_row['close'] > prev_row['close']:
+            return {"strategy": "Pullback", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.75}
+        elif global_trend_down and last_row['close'] < ma_v and prev_row['high'] >= prev_row[ma_col] and last_row['close'] < prev_row['close']:
+            return {"strategy": "Pullback", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.75}
         return None
 
 class StrategyVolContraction(BaseStrategy):
@@ -298,11 +313,7 @@ class StrategyBollingerClusters(BaseStrategy):
         return None
 
 class StrategyTripleSMA(BaseStrategy):
-    """
-    Стратегия из статьи №13 (Backtrader): Тройной фильтр SMA.
-    Signal 1: SMA(9) пересекает SMA(30)
-    Signal 2: Тренд фильтр SMA(60) < SMA(30)
-    """
+    # Название класса оставлено прежним для обратной совместимости логов
     def __init__(self, fast=9, medium=30, slow=60):
         self.fast = fast
         self.medium = medium
@@ -311,8 +322,8 @@ class StrategyTripleSMA(BaseStrategy):
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if len(df) < self.slow + 1: return None
         
-        # Индикаторы ma9, ma30, ma60 уже рассчитаны в df оркестратором
-        required = [f'ma{self.fast}', f'ma{self.medium}', f'ma{self.slow}']
+        # Индикаторы ema9, ema30, ema60
+        required = [f'ema{self.fast}', f'ema{self.medium}', f'ema{self.slow}']
         if not all(col in df.columns for col in required): return None
         
         curr = df.iloc[-1]
@@ -321,19 +332,18 @@ class StrategyTripleSMA(BaseStrategy):
         fast_c, med_c, slow_c = curr[required[0]], curr[required[1]], curr[required[2]]
         fast_p, med_p = prev[required[0]], prev[required[1]]
         
-        # Сигнал 1: Пересечение Fast/Medium
+        # Сигнал 1: Пересечение Fast/Medium (Event-driven)
         is_cross_up = fast_p <= med_p and fast_c > med_c
         is_cross_down = fast_p >= med_p and fast_c < med_c
         
-        # Сигнал 2: Фильтр Medium/Slow
-        # Если SMA(60) < SMA(30), значит рынок в растущем тренде (Medium выше Slow)
+        # Сигнал 2: Фильтр Medium/Slow (учет наклона)
         trend_long = slow_c < med_c
         trend_short = slow_c > med_c
         
         if is_cross_up and trend_long:
-            return {"strategy": "Triple SMA Filter", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.75}
+            return {"strategy": "Triple SMA Filter", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.8}
         elif is_cross_down and trend_short:
-            return {"strategy": "Triple SMA Filter", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.75}
+            return {"strategy": "Triple SMA Filter", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.8}
         
         return None
 

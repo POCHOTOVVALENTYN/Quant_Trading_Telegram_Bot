@@ -217,18 +217,20 @@ class TradingOrchestrator:
             df = self._calculate_indicators(df)
             self.market_history[symbol][timeframe] = df
             
-            # 2. Проверка ансамбля стратегий
+            # Получение текущего ADX (MTF: предпочтительно берем с 15m таймфрейма)
             current_adx = df.iloc[-1].get('adx', 0)
-            # if symbol in ["BTC/USDT", "SOL/USDT"]:
-            #     logger.debug(f"📊 [MONITOR] {symbol} ADX: {current_adx:.2f}")
-            
+            if timeframe in ["1m", "5m"] and "15m" in self.market_history.get(symbol, {}):
+                df_15m = self.market_history[symbol]["15m"]
+                if not df_15m.empty:
+                    current_adx = df_15m.iloc[-1].get('adx', current_adx)
+
             for strategy in self.strategies:
                 signal = strategy.evaluate(df)
                 if signal:
-                    # --- НОВОЕ: Трендовый фильтр (ADX Regime Switch) ---
-                    trend_strategies = ["MA Trend", "Triple SMA Filter", "Donchian", "ATR Breakout"]
+                    # Включен StrategyPullback в фильтрацию флэта
+                    trend_strategies = ["MA Trend", "Triple SMA Filter", "Donchian", "ATR Breakout", "Pullback"]
                     if signal['strategy'] in trend_strategies and current_adx < 20:
-                        logger.info(f"💤 [{symbol}] Тренд слишком слабый (ADX={current_adx:.2f} < 20). Пропускаю {signal['strategy']}")
+                        logger.info(f"💤 [{symbol}] Тренд слишком слабый (ADX 15m={current_adx:.2f} < 20). Пропускаю {signal['strategy']}")
                         continue
 
                     # DEDUPE: если за последние N секунд уже был свежий сигнал по символу — пропускаем
@@ -409,14 +411,14 @@ class TradingOrchestrator:
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Единый векторный движок расчета всех индикаторов. 
-        Считается один раз на каждую новую свечу.
         """
-        # Тренды (SMA)
-        df['ma9'] = calculate_sma(df['close'], 9)
-        df['ma20'] = calculate_sma(df['close'], 20)
-        df['ma30'] = calculate_sma(df['close'], 30)
-        df['ma50'] = calculate_sma(df['close'], 50)
-        df['ma60'] = calculate_sma(df['close'], 60)
+        # Тренды (EMA вместо SMA для снижения задержки)
+        df['ema9'] = calculate_ema(df['close'], 9)
+        df['ema20'] = calculate_ema(df['close'], 20)
+        df['ema30'] = calculate_ema(df['close'], 30)
+        df['ema50'] = calculate_ema(df['close'], 50)
+        df['ema60'] = calculate_ema(df['close'], 60)
+        df['ema200'] = calculate_ema(df['close'], 200) # Глобальный тренд-фильтр
         
         # Волатильность и Импульс
         df['atr'] = calculate_atr(df, period=14)
