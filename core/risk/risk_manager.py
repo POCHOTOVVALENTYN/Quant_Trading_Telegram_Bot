@@ -142,16 +142,13 @@ class TimeExitSystem:
 class PyramidingSystem:
     def __init__(self):
         """
-        Пирамидинг (Этап 11).
-        Вход в позицию частями:
-        Entry1 = 50%
-        Entry2 = 30%
-        Entry3 = 20%
-        Условие: Price > Entry + 1.5 ATR
+        Пирамидинг 2.0 (Обновлено по запросу пользователя).
+        Вход в позицию частями от общего ДЕПОЗИТА:
+        Stage 0 (Entry) = 5%
+        Stage 1+ (Confirmation) = 3%
         """
-        # Теперь вход 15% (Stage 0), затем 5% (Stage 1), 5% (Stage 2) и т.д.
-        # Можем расширить список для более плавного входа
-        self.allocation = [0.15, 0.05, 0.05, 0.05, 0.05]
+        # [0.05, 0.03] - Вход 5% + 1 ступень дозакупки 3%
+        self.allocation = [0.05, 0.03]
 
     def check_next_entry_allowed(self, current_price: float, initial_entry: float, atr: float, signal_type: str = "LONG") -> bool:
         """
@@ -162,10 +159,16 @@ class PyramidingSystem:
         else:
             return current_price < (initial_entry - 1.5 * atr)
             
-    def get_allocation_amount(self, total_size: float, current_stage: int) -> float:
+    def get_allocation_amount(self, account_balance: float, current_stage: int, entry_price: float) -> float:
         """
-        stage: 0, 1, 2
+        Возвращает количество контрактов (amount) исходя из % от депозита.
+        account_balance: общий баланс в USDT
+        current_stage: 0, 1, 2...
+        entry_price: текущая цена входа
         """
-        if current_stage < len(self.allocation):
-            return total_size * self.allocation[current_stage]
+        if current_stage < len(self.allocation) and entry_price > 0:
+            # Считаем объем в USDT (баланс * процент этапа)
+            usdt_amount = account_balance * self.allocation[current_stage]
+            # Переводим в количество монет
+            return usdt_amount / entry_price
         return 0.0

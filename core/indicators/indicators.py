@@ -104,3 +104,43 @@ def calculate_csi(df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
     
     csi = direction * (0.5 * body_ratio + 0.3 * vol_score + 0.2 * range_z) / atr
     return csi.fillna(0)
+
+def calculate_ema(series: pd.Series, period: int) -> pd.Series:
+    """
+    Рассчитывает экспоненциальную скользящую среднюю (EMA).
+    """
+    return series.ewm(span=period, adjust=False).mean()
+
+def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """
+    Рассчитывает ADX (Average Directional Index) в энергосберегающем режиме. 
+    """
+    # 1. Локальные переменные (не нагружаем основной DF)
+    tr = calculate_true_range(df['high'], df['low'], df['close'].shift(1))
+    
+    up_move = df['high'] - df['high'].shift(1)
+    down_move = df['low'].shift(1) - df['low']
+    
+    dm_plus = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    dm_minus = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    alpha = 1 / period
+    tr_smooth = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean()
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=alpha, adjust=False).mean()
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=alpha, adjust=False).mean()
+    
+    di_plus = 100 * (dm_plus_smooth / tr_smooth)
+    di_minus = 100 * (dm_minus_smooth / tr_smooth)
+    
+    # 2. DX и ADX
+    denom = (di_plus + di_minus).replace(0, np.nan)
+    dx = 100 * (di_plus - di_minus).abs() / denom
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
+    
+    res = pd.DataFrame({
+        'adx': adx,
+        '+di': di_plus,
+        '-di': di_minus
+    }).fillna(0)
+    
+    return res

@@ -48,6 +48,7 @@ class MarketDataService:
             try:
                 candles = await self.exchange.watch_ohlcv(symbol, timeframe)
                 if not candles or len(candles) == 0:
+                    await asyncio.sleep(1) # Страховка от беск. цикла при пустых данных
                     continue
                 # notify systems
                 for cb in self.callbacks:
@@ -69,6 +70,9 @@ class MarketDataService:
         while self.running:
             try:
                 orderbook = await self.exchange.watch_order_book(target_symbol)
+                if not orderbook:
+                    await asyncio.sleep(1)
+                    continue
                 for cb in self.callbacks:
                     await cb("orderbook", symbol, None, orderbook)
             except Exception as e:
@@ -148,7 +152,7 @@ class MarketDataService:
         tasks = []
         for sym in self.symbols:
             # Запуск orderbook
-            tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
+            # tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
             await asyncio.sleep(0.05) # Плавная пауза
             
             # Запуск OHLCV по всем таймфреймам

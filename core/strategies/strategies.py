@@ -13,23 +13,26 @@ class StrategyWRD(BaseStrategy):
         self.atr_multiplier = atr_multiplier
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if df.empty or 'atr' not in df.columns:
+        # Нам нужно 1440 свечей для 24ч диапазона (на 1m TF)
+        if len(df) < 1440 or 'atr' not in df.columns:
             return None
 
         last_row = df.iloc[-1]
         atr = last_row['atr']
         if pd.isna(atr): return None
 
-        daily_range = last_row['high'] - last_row['low']
+        # Ищем максимум и минимум за последние 24 часа (1440 минут)
+        daily_high = df['high'].tail(1440).max()
+        daily_low = df['low'].tail(1440).min()
+        daily_range = daily_high - daily_low
+        
         vr = daily_range / atr
 
         if vr > self.atr_multiplier:
             close = last_row['close']
-            high = last_row['high']
-            low = last_row['low']
             
-            top_20_level = high - (daily_range * 0.2)
-            bottom_20_level = low + (daily_range * 0.2)
+            top_20_level = daily_high - (daily_range * 0.2)
+            bottom_20_level = daily_low + (daily_range * 0.2)
             
             if close > top_20_level:
                 return {"strategy": "WRD", "signal": "LONG", "entry_price": close, "confidence": vr}
@@ -67,21 +70,23 @@ class StrategyMATrend(BaseStrategy):
         self.slow_ma = slow_ma
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if len(df) < self.slow_ma:
+        # Используем пре-рассчитанные ma20 и ma50 из оркестратора
+        fast_col = f'ma{self.fast_ma}'
+        slow_col = f'ma{self.slow_ma}'
+        
+        if fast_col not in df.columns or slow_col not in df.columns:
             return None
-        
-        # Рассчитываем MA внутри если их нет
-        df = df.copy()
-        df['fast_ma'] = df['close'].rolling(window=self.fast_ma).mean()
-        df['slow_ma'] = df['close'].rolling(window=self.slow_ma).mean()
-        
+            
         last_row = df.iloc[-1]
-        if pd.isna(last_row['fast_ma']) or pd.isna(last_row['slow_ma']):
+        fast_v = last_row[fast_col]
+        slow_v = last_row[slow_col]
+        
+        if pd.isna(fast_v) or pd.isna(slow_v):
             return None
 
-        if last_row['fast_ma'] > last_row['slow_ma'] and last_row['close'] > last_row['fast_ma']:
+        if fast_v > slow_v and last_row['close'] > fast_v:
             return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.6}
-        elif last_row['fast_ma'] < last_row['slow_ma'] and last_row['close'] < last_row['fast_ma']:
+        elif fast_v < slow_v and last_row['close'] < fast_v:
             return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.6}
         return None
 
@@ -103,24 +108,35 @@ class StrategyDonchian(BaseStrategy):
         return None
 
 class StrategyMomentum(BaseStrategy):
-    def __init__(self, period: int = 10, threshold: float = 3.0):
+    """
+    Momentum на базе волатильности (ATR).
+    Порог срабатывания динамически подстраивается под актив.
+    Дистанция за N свечей должна быть > 1.5 ATR.
+    """
+    def __init__(self, period: int = 10, threshold_multiplier: float = 1.5):
         self.period = period
-        self.threshold = threshold
+        self.threshold_multiplier = threshold_multiplier
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if len(df) < self.period:
+        # Используем готовые atr и ma из оркестратора
+        if len(df) < self.period or 'atr' not in df.columns:
             return None
         
-        current_close = df.iloc[-1]['close']
+        last_row = df.iloc[-1]
+        current_close = last_row['close']
         past_close = df.iloc[-(self.period+1)]['close']
+        atr = last_row['atr']
         
-        # Rate of Change
-        roc = ((current_close - past_close) / past_close) * 100
+        # Дистанция, пройденная ценой
+        distance = current_close - past_close
         
-        if roc > self.threshold:
-            return {"strategy": "Momentum", "signal": "LONG", "entry_price": current_close, "confidence": abs(roc)/10}
-        elif roc < -self.threshold:
-            return {"strategy": "Momentum", "signal": "SHORT", "entry_price": current_close, "confidence": abs(roc)/10}
+        # Динамический порог входа в USDT пунктах
+        threshold = atr * self.threshold_multiplier
+        
+        if distance > threshold:
+            return {"strategy": "Momentum ATR", "signal": "LONG", "entry_price": current_close, "confidence": 0.75}
+        elif distance < -threshold:
+            return {"strategy": "Momentum ATR", "signal": "SHORT", "entry_price": current_close, "confidence": 0.75}
         return None
 
 class StrategyPullback(BaseStrategy):
@@ -128,47 +144,48 @@ class StrategyPullback(BaseStrategy):
         self.ma_period = ma_period
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if len(df) < 50: # Нужно для тренда
+        ma_col = f'ma{self.ma_period}'
+        if ma_col not in df.columns or len(df) < 50:
             return None
             
-        df = df.copy()
-        df['sma'] = df['close'].rolling(window=self.ma_period).mean()
-        
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
+        ma_v = last_row[ma_col]
         
-        if pd.isna(last_row['sma']): return None
+        if pd.isna(ma_v): return None
         
         # Условие: Тренд выше SMA и цена коснулась MA (или рядом) и развернулась
-        if last_row['close'] > last_row['sma'] and prev_row['low'] <= prev_row['sma'] and last_row['close'] > prev_row['close']:
+        if last_row['close'] > ma_v and prev_row['low'] <= prev_row[ma_col] and last_row['close'] > prev_row['close']:
             return {"strategy": "Pullback", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.65}
-        elif last_row['close'] < last_row['sma'] and prev_row['high'] >= prev_row['sma'] and last_row['close'] < prev_row['close']:
+        elif last_row['close'] < ma_v and prev_row['high'] >= prev_row[ma_col] and last_row['close'] < prev_row['close']:
             return {"strategy": "Pullback", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.65}
         return None
 
 class StrategyVolContraction(BaseStrategy):
-    """3. Volatility Contraction Breakout"""
+    """3. Volatility Contraction Breakout (5-hour window on 1m TF)"""
     def __init__(self, period_fast: int = 5, period_slow: int = 20, threshold: float = 0.6):
         self.period_fast = period_fast
         self.period_slow = period_slow
         self.threshold = threshold
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if len(df) < self.period_slow + 10: return None
+        # Нам нужно значимое окно (например, 300 свечей = 5 часов)
+        if len(df) < 300 or 'atr' not in df.columns: return None
         
         atr_fast = df['atr'].iloc[-1]
         atr_slow = df['atr'].iloc[-20:-1].mean()
         
         # Сжатие волатильности
         if atr_fast < (atr_slow * self.threshold):
-            # Пробой максимума за 10 дней
-            highest_10 = df['high'].iloc[-11:-1].max()
-            lowest_10 = df['low'].iloc[-11:-1].min()
+            # Пробой максимума за последние 5 часов (300 минут)
+            highest_5h = df['high'].iloc[-301:-1].max()
+            lowest_5h = df['low'].iloc[-301:-1].min()
             
-            if df.iloc[-1]['close'] > highest_10:
-                return {"strategy": "Vol Contraction", "signal": "LONG", "entry_price": df.iloc[-1]['close'], "confidence": 0.85}
-            elif df.iloc[-1]['close'] < lowest_10:
-                return {"strategy": "Vol Contraction", "signal": "SHORT", "entry_price": df.iloc[-1]['close'], "confidence": 0.85}
+            curr_close = df.iloc[-1]['close']
+            if curr_close > highest_5h:
+                return {"strategy": "Vol Contraction", "signal": "LONG", "entry_price": curr_close, "confidence": 0.85}
+            elif curr_close < lowest_5h:
+                return {"strategy": "Vol Contraction", "signal": "SHORT", "entry_price": curr_close, "confidence": 0.85}
         return None
 
 class StrategyRangeExpansion(BaseStrategy):

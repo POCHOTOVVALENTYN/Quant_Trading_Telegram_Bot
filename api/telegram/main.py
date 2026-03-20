@@ -25,7 +25,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [KeyboardButton("📊 Портфель"), KeyboardButton("📈 Статистика")],
+        [KeyboardButton("💼 Активные позиции"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📉 Сигналы"), KeyboardButton("📜 История")],
         [KeyboardButton("📚 Стратегии"), KeyboardButton("⚙ Настройки")]
     ]
@@ -55,25 +55,43 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Please provide your Binance API keys (Use secure config or settings menu!).")
 
-async def show_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{ENGINE_URL}/api/v1/trades", timeout=5.0)
+            response = await client.get(f"{ENGINE_URL}/api/v1/trades", timeout=8.0)
             data = response.json()
+            logging.info(f"🕵️‍♂️ DEBUG: Получено данных от движка: {data}")
             trades = data.get("trades", {})
 
             if not trades:
-                await update.message.reply_text("📂 У вас пока нет открытых позиций.")
+                await update.message.reply_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
                 return
 
-            await update.message.reply_text(f"📂 **АКТИВНЫЕ ПОЗИЦИИ ({len(trades)}):**", parse_mode='Markdown')
+            await update.message.reply_text(f"💼 **ВАШИ ОТКРЫТЫЕ ПОЗИЦИИ ({len(trades)}):**", parse_mode='Markdown')
 
             for symbol, info in trades.items():
+                is_lg = info['signal_type'] == "LONG"
+                side_emoji = "🟢 LONG" if is_lg else "🔴 SHORT"
+                
+                curr_p = info.get('current_price')
+                curr_p_str = f"`{curr_p:+.4f}`" if curr_p else "🔍 Ожидаем..."
+                
+                pnl_usd = info.get('pnl_usd', 0.0)
+                pnl_pct = info.get('pnl_pct', 0.0)
+                
+                if curr_p:
+                    pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+                    pnl_str = f"{pnl_emoji} **PnL: {pnl_usd:+.2f} USDT ({pnl_pct:+.2f}%)**"
+                else:
+                    pnl_str = "⏳ **PnL: расчет...**"
+
                 msg = (
-                    f"🔹 **{symbol}** ({info['signal_type']})\n"
-                    f"💰 Вход: {info['entry']:.2f}\n"
-                    f"🛡 Стоп: {info['stop']:.2f}\n"
-                    f"📊 Объем: {info['current_size']}\n"
+                    f"🔹 **{symbol}** ({side_emoji})\n"
+                    f"💰 Вход: `{info['entry']:.4f}`\n"
+                    f"📈 Тек. цена: {curr_p_str}\n"
+                    f"📊 Объем: `{info['current_size']}`\n"
+                    f"🛡 Стоп: `{info['stop']:.4f}`\n"
+                    f"{pnl_str}\n"
                     f"⏱ Открыта: {time.strftime('%H:%M:%S', time.gmtime(time.time() - info['opened_at']))} назад"
                 )
 
@@ -83,8 +101,8 @@ async def show_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
 
     except Exception as e:
-        logging.error(f"Ошибка получения портфеля: {e}")
-        await update.message.reply_text("❌ Ошибка при получении данных о позициях.")
+        logging.error(f"Ошибка получения позиций: {e}")
+        await update.message.reply_text("❌ Не удалось связаться с движком торгов.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -93,8 +111,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    if text == "📊 Портфель":
-        await show_portfolio(update, context)
+    logging.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
+    if text == "💼 Активные позиции":
+        await show_active_positions(update, context)
     elif text == "📈 Начать торговлю":
         await update.message.reply_text("Система автоматической торговли активирована.")
     elif text == "⚙ Настройки":
@@ -135,49 +154,51 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             from datetime import datetime, timedelta
             async with async_session() as session:
-                # Показываем только свежие сигналы (за последний час), чтобы не путать "старыми" записями
-                one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-                query = select(Signal).where(Signal.timestamp >= one_hour_ago).order_by(Signal.timestamp.desc()).limit(1)
+                # Показываем 5 свежих сигналов за последние 6 часов
+                six_hours_ago = datetime.utcnow() - timedelta(hours=6)
+                query = select(Signal).where(Signal.timestamp >= six_hours_ago).order_by(Signal.timestamp.desc()).limit(5)
                 result = await session.execute(query)
-                last_signal = result.scalar_one_or_none()
+                signals = result.scalars().all()
                 
-                if not last_signal:
-                    await update.message.reply_text("📭 Актуальных сигналов за последний час нет. Ждем новых паттернов...")
+                if not signals:
+                    await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет. Бот мониторит рынок...")
                     return
 
-                # Перевод статусов для пользователя
+                await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({len(signals)}):**", parse_mode='Markdown')
+
                 status_map = {
                     "PENDING": "⌛️ В ОЖИДАНИИ",
-                    "EXECUTED": "✅ ПОЗИЦИЯ ОТКРЫТА",
-                    "FAILED": "❌ ОШИБКА ВХОДА",
-                    "REJECTED": "🛑 ОТКЛОНЕН РИСКОМ",
+                    "EXECUTED": "✅ В ПОЗИЦИИ",
+                    "FAILED": "❌ ОШИБКА",
+                    "REJECTED": "🛑 ОТКЛОНЕН",
                     "EXPIRED": "⏱ ИСТЕК"
                 }
-                status_ru = status_map.get(last_signal.status, "🕒 ОБРАБОТКА")
 
-                # Перевод сигналов для удобства пользователя
-                signal_type_ru = "🟢 LONG" if last_signal.signal_type == "LONG" else "🔴 SHORT"
+                def fmt_p(val):
+                    if val is None: return "N/A"
+                    return f"{val:.4f}" if val < 1.0 else f"{val:.2f}"
 
-                # Форматирование цен (поддержка старых записей без SL/TP)
-                sl_val = f"{last_signal.stop_loss:.2f}" if last_signal.stop_loss is not None else "N/A"
-                tp_val = f"{last_signal.take_profit:.2f}" if last_signal.take_profit is not None else "N/A"
+                for last_signal in signals:
+                    status_ru = status_map.get(last_signal.status, "🕒 ОБРАБОТКА")
+                    signal_type_ru = "🟢 LONG" if last_signal.signal_type == "LONG" else "🔴 SHORT"
 
-                msg = (
-                    f"🚀 **СИГНАЛ: {last_signal.strategy}**\n\n"
-                    f"🔸 **Символ:** {last_signal.symbol}\n"
-                    f"🔸 **Направление:** {signal_type_ru}\n\n"
-                    f"💰 **Цена входа:** {last_signal.entry_price:.2f}\n"
-                    f"🛡 **Stop Loss:** {sl_val}\n"
-                    f"🎯 **Take Profit:** {tp_val}\n\n"
-                    f"🕒 **Время (UTC):** {last_signal.timestamp.strftime('%H:%M:%S')}\n\n"
-                    f"🤖 **AI ВЕРДИКТ:**\n"
-                    f"📈 **Вероятность успеха:** {int(last_signal.win_prob * 100)}%\n"
-                    f"💰 **Ож. доходность:** {last_signal.expected_return}%\n"
-                    f"⚠️ **Уровень риска:** {last_signal.risk}\n"
-                    f"📊 **AI Score:** {last_signal.confidence:.2f}\n\n"
-                    f"ℹ️ **Статус:** {status_ru}"
-                )
-                await update.message.reply_text(msg, parse_mode='Markdown')
+                    msg = (
+                        f"🚀 **СИГНАЛ: {last_signal.strategy}**\n\n"
+                        f"🔸 **Символ:** {last_signal.symbol}\n"
+                        f"🔸 **Направление:** {signal_type_ru}\n\n"
+                        f"💰 **Цена входа:** {fmt_p(last_signal.entry_price)}\n"
+                        f"🛡 **Stop Loss:** {fmt_p(last_signal.stop_loss)}\n"
+                        f"🎯 **Take Profit:** {fmt_p(last_signal.take_profit)}\n\n"
+                        f"🕒 **Время (UTC):** {last_signal.timestamp.strftime('%H:%M:%S')}\n\n"
+                        f"🤖 **AI ВЕРДИКТ:**\n"
+                        f"📈 **Вероятность успеха:** {int((last_signal.win_prob or 0.5) * 100)}%\n"
+                        f"💰 **Ож. доходность:** {last_signal.expected_return or '0.0'}%\n"
+                        f"⚠️ **Уровень риска:** {last_signal.risk or '1.0'}\n"
+                        f"📊 **AI Score:** {last_signal.confidence or 0.6:.2f}\n\n"
+                        f"ℹ️ **Статус:** {status_ru}\n"
+                        f"───────────────────"
+                    )
+                    await update.message.reply_text(msg, parse_mode='Markdown')
         except Exception as e:
             logging.error(f"Ошибка получения сигналов из БД: {e}")
             await update.message.reply_text("❌ Ошибка при обращении к базе данных.")

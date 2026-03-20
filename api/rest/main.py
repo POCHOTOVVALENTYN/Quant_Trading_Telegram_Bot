@@ -21,7 +21,7 @@ reconcile_task = None
 async def lifespan(app: FastAPI):
     global orchestrator, exchange_client, reconcile_task
     
-    # 1. Инициализация Базы Данных
+    print("!!!!!!!! APP STARTING !!!!!!!!", flush=True) # DEBUG
     app_logger.info("🚀 [1/5] Инициализация базы данных...")
     try:
         async with engine.begin() as conn:
@@ -77,7 +77,12 @@ async def lifespan(app: FastAPI):
         'apiKey': api_key,
         'secret': secret,
         'enableRateLimit': True,
-        'options': {'defaultType': 'future'},
+        'options': {
+            'defaultType': 'future',
+            'testnet': settings.testnet,
+            'adjustForTimeDifference': True,
+            'recvWindow': 10000, 
+        },
         'timeout': 30000 # 30 секунд
     })
     exchange_client.set_sandbox_mode(settings.testnet)
@@ -95,33 +100,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app_logger.error(f"Не удалось загрузить markets: {e}")
     
-    # 3. Инициализация ключевых микромодулей (Риск, Исполнение ордеров, Данные рынка)
-    # Расширяем мониторинг до Топ-20 популярных монет
-    all_symbols = [
+    # 1. Загрузка списка символов для мониторинга
+    # Возвращаем ПОЛНЫЙ список после оптимизации CPU
+    base_symbols = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-        "ADA/USDT", "DOGE/USDT", "DOT/USDT", "LINK/USDT",
-        "BCH/USDT", "TRX/USDT", "LTC/USDT", "AVAX/USDT", "ATOM/USDT",
-        "UNI/USDT", "ETC/USDT", "FIL/USDT", "LDO/USDT", "APT/USDT"
+        "DOGE/USDT", "ADA/USDT", "TRX/USDT", "LINK/USDT", "DOT/USDT",
+        "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT", 
+        "MATIC/USDT", "FIL/USDT", "ICP/USDT", "APT/USDT"
     ]
+    tfs = ["1m", "5m", "15m", "1h", "4h"]
     
-    symbols_to_monitor = []
-    if exchange_client.markets:
-        for s in all_symbols:
-            if s in exchange_client.markets:
-                symbols_to_monitor.append(s)
-            else:
-                app_logger.warning(f"⚠️ Монета {s} отсутствует в 'markets' биржи. Пропускаем.")
-    else:
-        app_logger.warning("❌ Рынки не загружены (None). Используем Топ-10 монет для мониторинга.")
-        symbols_to_monitor = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "DOT/USDT", "LTC/USDT", "AVAX/USDT"]
-
-    if not symbols_to_monitor:
-        app_logger.error("❌ Список монет для мониторинга ПУСТ.")
-        symbols_to_monitor = ["BTC/USDT"] # Fallback
-
+    app_logger.info(f"🚀 [1/6] Запуск мониторинга {len(base_symbols)} монет на {len(tfs)} ТФ...")
+    
+    # 2. Инициализация сервисов
     market_data = MarketDataService(
-        symbols=symbols_to_monitor, 
-        timeframes=["1m", "5m", "15m", "1h"],
+        symbols=base_symbols, 
+        timeframes=tfs,
         exchange=exchange_client
     )
     
@@ -136,18 +130,22 @@ async def lifespan(app: FastAPI):
         risk_manager=risk_manager
     )
 
-    # 3. Синхронизация: биржа <-> БД (Идет ПОСЛЕ создания пользователя)
-    app_logger.info("🚀 [3/5] Синхронизация текущих позиций...")
+    # 4. Предварительная настройка двигателя и ПЕРВИЧНАЯ СИНХРОНИЗАЦИЯ
     try:
+        await execution_engine.start()
+        # Сразу опрашиваем биржу, чтобы active_trades заполнились ДО того, как API станет доступно
         await execution_engine.reconcile_full()
-        app_logger.info("✅ Синхронизация завершена.")
+        app_logger.info("✅ Синхронизация ExecutionEngine завершена.")
     except Exception as e:
-        app_logger.error(f"⚠️ Ошибка reconcile: {e}")
+        app_logger.error(f"⚠️ Ошибка инициализации ExecutionEngine: {e}")
 
     # Periodic reconcile loop (keeps state aligned with exchange)
     async def _reconcile_loop():
+        # С WebSocket мониторингом мы можем опрашивать биржу реже (раз в 5 минут как страховка)
+        RECONCILE_INTERVAL = 300 
         while True:
-            await asyncio.sleep(60)  # every 60s
+            # Сначала ждем интервал, т.к. первичный reconcile уже сделан выше
+            await asyncio.sleep(RECONCILE_INTERVAL)
             try:
                 await execution_engine.reconcile_full()
                 # Вывод текущих метрик для отладки
@@ -158,13 +156,13 @@ async def lifespan(app: FastAPI):
     reconcile_task = asyncio.create_task(_reconcile_loop())
     
     # 4. Инициализация Оркестратора
-    app_logger.info("🚀 [4/5] Инициализация Оркестратора...")
+    app_logger.info("🚀 [4/6] Инициализация Оркестратора...")
     orchestrator = TradingOrchestrator(
         market_data=market_data, 
         execution_engine=execution_engine
     )
 
-    # 5. Запуск Оркестратора
+    # 5. Запуск Оркестратора в фоновой задаче (не блокируя FastAPI)
     app_logger.info("🚀 [5/5] Запуск Торгового Движка (Orchestrator)...")
     asyncio.create_task(orchestrator.start())
     
@@ -178,6 +176,8 @@ async def lifespan(app: FastAPI):
         reconcile_task.cancel()
     if orchestrator:
         await orchestrator.stop()
+    if execution_engine:
+        await execution_engine.stop()
     if exchange_client:
         await exchange_client.close()
     await engine.dispose()
@@ -317,8 +317,66 @@ async def get_stats():
 @app.get("/api/v1/trades")
 async def get_active_trades():
     if not orchestrator:
-        return {"trades": []}
-    return {"trades": orchestrator.execution.active_trades}
+        return {"trades": {}}
+    
+    trades = orchestrator.execution.active_trades.copy()
+    if not trades:
+        return {"trades": {}}
+    
+    try:
+        # Пытаемся получить текущие цены
+        symbols = list(trades.keys())
+        # Используем fetch_ticker если fetch_tickers не вернул данные
+        tickers = {}
+        try:
+            app_logger.info(f"📊 [DEBUG] Запрос цен для: {symbols}")
+            # Используем ГЛОБАЛЬНЫЙ exchange_client
+            tickers = await exchange_client.fetch_tickers(symbols)
+            app_logger.info(f"📊 [DEBUG] Получено тикеров: {list(tickers.keys())}")
+        except Exception as te:
+            app_logger.warning(f"Ошибка fetch_tickers, пробуем по одному: {te}")
+            for s in symbols:
+                try:
+                    tickers[s] = await exchange_client.fetch_ticker(s)
+                except:
+                    continue
+
+        for symbol, info in trades.items():
+            # Пробуем найти тикер (учитываем, что CCXT может добавить :USDT для фьючерсов)
+            ticker = tickers.get(symbol) or tickers.get(symbol + ":USDT")
+            
+            if ticker and (ticker.get('last') or ticker.get('close')):
+                curr_price = ticker.get('last') or ticker.get('close')
+                info['current_price'] = curr_price
+                
+                # Расчет PnL
+                entry = info.get('entry', 0)
+                size = float(info.get('current_size') or 0)
+                is_long = info.get('signal_type') == "LONG"
+                
+                if entry > 0 and size > 0:
+                    if is_long:
+                        pnl_usd = (curr_price - entry) * size
+                        pnl_pct = ((curr_price / entry) - 1) * 100
+                    else:
+                        pnl_usd = (entry - curr_price) * size
+                        pnl_pct = ((entry / curr_price) - 1) * 100
+                        
+                    info['pnl_usd'] = pnl_usd
+                    info['pnl_pct'] = pnl_pct
+                else:
+                    info['pnl_usd'] = 0.0
+                    info['pnl_pct'] = 0.0
+            else:
+                # Если цену так и не нашли
+                info['current_price'] = None
+                info['pnl_usd'] = 0.0
+                info['pnl_pct'] = 0.0
+
+    except Exception as e:
+        app_logger.error(f"Глобальная ошибка при расчете PnL: {e}")
+        
+    return {"trades": trades}
 
 @app.post("/api/v1/trades/close/{symbol}")
 async def close_trade(symbol: str):

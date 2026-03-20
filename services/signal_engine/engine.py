@@ -18,7 +18,8 @@ from core.strategies.strategies import (
     StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, get_timeframe_seconds
 )
 from core.indicators.indicators import (
-    calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma
+    calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma,
+    calculate_ema, calculate_adx
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
@@ -44,7 +45,7 @@ class TradingOrchestrator:
             StrategyATRBreakout(period=20, multiplier=0.5),
             StrategyMATrend(fast_ma=20, slow_ma=50),
             StrategyDonchian(period=20),
-            StrategyMomentum(period=10, threshold=3.0),
+            StrategyMomentum(period=10, threshold_multiplier=1.5),
             StrategyPullback(ma_period=20),
             StrategyVolContraction(threshold=0.6),
             StrategyRangeExpansion(),
@@ -61,11 +62,13 @@ class TradingOrchestrator:
         # Кэш внешних данных для AI
         self.funding_rates: Dict[str, float] = {}
         self.orderbooks: Dict[str, Any] = {}
-        
         # Статистика для Heartbeat (Этап 6)
         self.processed_candles = 0
         self.start_time = time.time()
         self.errors_count = 0
+        
+        # --- НОВОЕ: Кэш дубликатов сигналов для скорости ---
+        self._last_signals_cache: Dict[tuple, float] = {}
         
         # Инфраструктура для Spread Momentum (из статьи)
         self.spreader = SpreadMomentumStrategy()
@@ -185,64 +188,60 @@ class TradingOrchestrator:
                 if spread_signal:
                     spread_signal["symbol"] = symbol
                     # Логируем аномалию в Excel для аналитики
-                    exporter.log_anomaly(
-                        avg_p, current_price, spread_signal["spread_pct"], 
-                        symbol, spread_signal["signal"], spread_signal["strength"]
-                    )
+                    # exporter.log_anomaly(
+                    #     avg_p, current_price, spread_signal["spread_pct"], 
+                    #     symbol, spread_signal["signal"], spread_signal["strength"]
+                    # )
                     # Если сигнал сильный (например > 2/10), можно уведомлять
-                    if spread_signal["strength"] >= 2:
-                        await send_telegram_msg(
-                            f"⚡️ **АНРМАЛИЯ: Spread Momentum**\n\n"
-                            f"🔸 Символ: {symbol}\n"
-                            f"🔹 Спред: {spread_signal['spread_pct']:.4f}%\n"
-                            f"📊 Сила: {'🔥' * spread_signal['strength']} ({spread_signal['strength']}/10)\n"
-                            f"💰 Фьючерс: {current_price}\n"
-                            f"⚖️ Ср. цена (5м): {avg_p}\n"
-                        )
+                    if spread_signal["strength"] >= 8: # Порог поднят до 8, чтобы убрать спам
+                        # await send_telegram_msg(
+                        #     f"⚡️ **АНРМАЛИЯ: Spread Momentum**\n\n"
+                        #     f"🔸 Символ: {symbol}\n"
+                        #     f"🔹 Спред: {spread_signal['spread_pct']:.4f}%\n"
+                        #     f"📊 Сила: {'🔥' * spread_signal['strength']} ({spread_signal['strength']}/10)\n"
+                        #     f"💰 Фьючерс: {current_price}\n"
+                        #     f"⚖️ Ср. цена (5м): {avg_p}\n"
+                        # )
+                        pass
             
-            self.execution.schedule_update_positions(symbol, current_price, atr)
+            await self.execution.schedule_update_positions(symbol, current_price, atr)
 
         if len(df) < 60: 
             return
 
-        # 1. Расчет индикаторов (ATR, RSI 450, Bollinger 40, CSI)
+        # 1. Расчет индикаторов (Vectorized Engine)
         try:
+            # Небольшая пауза для разгрузки Event Loop (предотвращает 100% CPU при запуске)
+            await asyncio.sleep(0.05)
             self.processed_candles += 1
-            df['atr'] = calculate_atr(df, period=14)
-            df['RSI'] = calculate_rsi(df['close'], period=450)
-            upper, ma, lower = calculate_bollinger_bands(df['close'], period=40, std=1.0)
-            df['upper'] = upper
-            df['lower'] = lower
-            df['CSI'] = calculate_csi(df, atr_period=14)
-            # Для StrategyTripleSMA
-            df['ma9'] = calculate_sma(df['close'], 9)
-            df['ma30'] = calculate_sma(df['close'], 30)
-            df['ma60'] = calculate_sma(df['close'], 60)
+            df = self._calculate_indicators(df)
+            self.market_history[symbol][timeframe] = df
+            
             # 2. Проверка ансамбля стратегий
+            current_adx = df.iloc[-1].get('adx', 0)
+            # if symbol in ["BTC/USDT", "SOL/USDT"]:
+            #     logger.debug(f"📊 [MONITOR] {symbol} ADX: {current_adx:.2f}")
+            
             for strategy in self.strategies:
                 signal = strategy.evaluate(df)
                 if signal:
+                    # --- НОВОЕ: Трендовый фильтр (ADX Regime Switch) ---
+                    trend_strategies = ["MA Trend", "Triple SMA Filter", "Donchian", "ATR Breakout"]
+                    if signal['strategy'] in trend_strategies and current_adx < 20:
+                        logger.info(f"💤 [{symbol}] Тренд слишком слабый (ADX={current_adx:.2f} < 20). Пропускаю {signal['strategy']}")
+                        continue
+
                     # DEDUPE: если за последние N секунд уже был свежий сигнал по символу — пропускаем
-                    try:
-                        from sqlalchemy import select
-                        from datetime import timedelta
-                        cutoff = datetime.utcnow() - timedelta(seconds=max(30, settings.signal_expiry_seconds))
-                        async with async_session() as session:
-                            q = (
-                                select(Signal)
-                                .where(Signal.symbol == symbol)
-                                .where(Signal.timestamp >= cutoff)
-                                .where(Signal.status.in_(["PENDING", "EXECUTING", "EXECUTED"]))
-                                .order_by(Signal.timestamp.desc())
-                                .limit(1)
-                            )
-                            r = await session.execute(q)
-                            recent = r.scalar_one_or_none()
-                            if recent:
-                                continue
-                    except Exception:
-                        # дедуп — best-effort, не должен ломать торговлю
-                        pass
+                    # --- Усовершенствованный DEDUPE (In-memory) ---
+                    now = time.time()
+                    cooldown = max(30, settings.signal_expiry_seconds)
+                    cache_key = (symbol, signal['strategy'], signal['signal'])
+                    
+                    last_ts = self._last_signals_cache.get(cache_key, 0)
+                    if (now - last_ts) < cooldown:
+                        continue # Пропускаем дубликат без запроса к БД
+                    
+                    self._last_signals_cache[cache_key] = now
                     # 3. Фильтрация (НОВОЕ по плану)
                     # 3.1 Защита от старых сигналов (Signal Expiry)
                     candle_time = df.iloc[-1]['timestamp']
@@ -266,10 +265,10 @@ class TradingOrchestrator:
                             logger.warning(f"Монета {symbol} слишком новая. Листинг {onboard_date_str}")
                             continue
 
-                    # 3.3 Проверка лимита позиций (из настроек)
+                    # 3.3 Проверка лимита позиций (ПРЯМОЙ запрос к RiskManager)
                     balance, drawdown, open_trades = await self.execution.get_account_metrics()
-                    if open_trades >= settings.max_open_positions:
-                        logger.warning(f"Лимит позиций достигнут ({open_trades} >= {settings.max_open_positions})")
+                    if open_trades >= self.risk_manager.max_open_trades:
+                        logger.warning(f"Лимит позиций достигнут ({open_trades} >= {self.risk_manager.max_open_trades})")
                         # Уведомление в TG (раз в 15 минут, чтобы не спамить)
                         now = time.time()
                         if not hasattr(self, '_last_limit_notify') or (now - self._last_limit_notify) > 900:
@@ -277,7 +276,7 @@ class TradingOrchestrator:
                             await send_telegram_msg(
                                 f"⚠️ **ВХОД ПРОПУЩЕН**\n\n"
                                 f"Символ: {symbol}\n"
-                                f"Причина: Достигнут лимит позиций ({open_trades}/{settings.max_open_positions})\n"
+                                f"Причина: Достигнут лимит позиций ({open_trades}/{self.risk_manager.max_open_trades})\n"
                                 f"Закройте одну из открытых позиций, чтобы открыть новую."
                             )
                         return # Прекращаем обработку символа
@@ -353,23 +352,28 @@ class TradingOrchestrator:
                         await session.commit()
                         enrich_signal["id"] = new_sig_model.id
 
-                    # 7.5 Уведомление о сигнале (Этап 4)
+                    # 7.5 Формирование премиум-визуала сигнала (Запрос пользователя)
+                    from datetime import datetime, timezone
+                    now_utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
+                    dir_emoji = "🟢 LONG" if enrich_signal['signal'] == "LONG" else "🔴 SHORT"
+                    
                     status_msg = (
-                        f"🚀 **СИГНАЛ: {signal['strategy']}**\n\n"
+                        f"🚀 **СИГНАЛ: {enrich_signal['strategy']}**\n\n"
                         f"🔸 Символ: {symbol}\n"
-                        f"🔸 Направление: {'🟢 LONG' if signal['signal'] == 'LONG' else '🔴 SHORT'}\n\n"
-                        f"📊 **СИЛА СИГНАЛА:** {'🔥' * int(score * 10)} ({int(score * 10)}/10)\n\n"
-                        f"💰 Вход: {signal['entry_price']:.2f}\n"
-                        f"🛡 Stop Loss: {sl:.2f}\n"
-                        f"🎯 Take Profit: {tp:.2f}\n"
-                        f"🕒 Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                        f"🔸 Направление: {dir_emoji}\n\n"
+                        f"💰 Цена входа: {enrich_signal['entry_price']:.4f}\n"
+                        f"🛡 **Stop Loss:** {enrich_signal['stop_loss']:.4f}\n"
+                        f"🎯 **Take Profit:** {enrich_signal['take_profit']:.4f}\n\n"
+                        f"🕒 Время (UTC): {now_utc}\n\n"
                         f"🤖 **AI ВЕРДИКТ:**\n"
-                        f"📈 Вероятность: {ai_prediction['win_prob']*100:.0f}%\n"
-                        f"💰 Доходность: {ai_prediction['expected_return']:.2f}%\n"
-                        f"⚠️ Риск: {ai_prediction['risk']:.2f}\n"
-                        f"📊 Scorer: {score:.2f}\n\n"
-                        f"ℹ️ Статус: ⌛️ В ОЖИДАНИИ"
+                        f"📈 Вероятность успеха: {ai_prediction.get('win_prob', 0)*100:.1f}%\n"
+                        f"💰 Ож. доходность: {ai_prediction.get('expected_return', 0)*100:.2f}%\n"
+                        f"⚠️ Уровень риска: {ai_prediction.get('risk', 0):.2f}\n"
+                        f"📊 AI Score: {score:.2f}\n\n"
+                        f"ℹ️ Статус: ⌛️ **В ОЖИДАНИИ**"
                     )
+                    
+                    # Отправляем уведомление
                     await send_telegram_msg(status_msg)
 
                     # 8. Исполнение
@@ -401,6 +405,39 @@ class TradingOrchestrator:
             if not hasattr(self, '_last_error_notify') or (now - self._last_error_notify) > 1800:
                 self._last_error_notify = now
                 await send_telegram_msg(f"⚠️ **КРИТИЧЕСКИЙ СБОЙ: Resilient Loop**\n\nСимвол: {symbol}\nОшибка: {str(e)[:200]}")
+
+    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Единый векторный движок расчета всех индикаторов. 
+        Считается один раз на каждую новую свечу.
+        """
+        # Тренды (SMA)
+        df['ma9'] = calculate_sma(df['close'], 9)
+        df['ma20'] = calculate_sma(df['close'], 20)
+        df['ma30'] = calculate_sma(df['close'], 30)
+        df['ma50'] = calculate_sma(df['close'], 50)
+        df['ma60'] = calculate_sma(df['close'], 60)
+        
+        # Волатильность и Импульс
+        df['atr'] = calculate_atr(df, period=14)
+        df['RSI'] = calculate_rsi(df['close'], period=450)
+        df['RSI_fast'] = calculate_rsi(df['close'], period=14)
+        
+        # Полосы Боллинджера (Стандарт 40/1.0 как в Bollinger Clusters)
+        upper, ma, lower = calculate_bollinger_bands(df['close'], period=40, std=1.0)
+        df['upper'] = upper
+        df['lower'] = lower
+        
+        # Кластерная сила
+        df['CSI'] = calculate_csi(df, atr_period=14)
+        
+        # --- НОВОЕ: Тренд-фильтр ADX ---
+        adx_df = calculate_adx(df, period=14)
+        df['adx'] = adx_df['adx']
+        df['+di'] = adx_df['+di']
+        df['-di'] = adx_df['-di']
+        
+        return df
 
     async def _heartbeat_loop(self):
         """Задача 'Пульс' (Этап 6) - отчет раз в час"""
