@@ -66,9 +66,9 @@ def test_time_exit():
 
 def test_pyramiding_allocation():
     ps = PyramidingSystem()
-    # Stage 0: 15%
-    assert ps.get_allocation_amount(total_size=100, current_stage=0) == 15.0
-    # Stage 1: 5%
-    assert ps.get_allocation_amount(total_size=100, current_stage=1) == 5.0
+    # Stage 0: 5% of 100 = 5.0
+    assert ps.get_allocation_usdt(account_balance=100, current_stage=0) == 5.0
+    # Stage 1: 3% of 100 = 3.0
+    assert ps.get_allocation_usdt(account_balance=100, current_stage=1) == 3.0
     # Out of bounds
-    assert ps.get_allocation_amount(total_size=100, current_stage=10) == 0.0
+    assert ps.get_allocation_usdt(account_balance=100, current_stage=10) == 0.0

@@ -441,6 +441,51 @@ class ExecutionEngine:
             # Временной выход
             if self.time_exit.should_exit(trade['opened_at'], time.time(), "1h", current_price, trade['entry'], trade['signal_type']):
                 await self._close_position(symbol, reason="TIME")
+                return
+
+            # Пирамидинг (Баг 3.2 — ATR-based пирамидинг Швагера)
+            if self.pyramiding.check_next_entry_allowed(current_price, trade['entry'], atr, trade['signal_type']):
+                next_stage = trade['stage'] + 1
+                if next_stage < len(self.pyramiding.allocation_pct):
+                    balance, _, _ = await self.get_account_metrics()
+                    add_size = self.pyramiding.get_allocation_amount(balance, next_stage, current_price)
+                    add_size = await self._normalize_amount(symbol, add_size)
+                    
+                    if add_size > 1e-8:
+                        logger.info(f"💎 [PYRAMID] Adding {add_size} to {symbol} (Stage {next_stage})")
+                        try:
+                            side = 'buy' if trade['signal_type'] == "LONG" else 'sell'
+                            await self.exchange.create_order(symbol, 'market', side, add_size)
+                            
+                            # Обновляем среднюю и объем
+                            old_size = trade['current_size']
+                            new_size = old_size + add_size
+                            new_entry = ((trade['entry'] * old_size) + (current_price * add_size)) / new_size
+                            
+                            trade['stage'] = next_stage
+                            trade['current_size'] = new_size
+                            trade['entry'] = new_entry
+                            
+                            async with async_session() as session:
+                                await session.execute(
+                                    update(PositionModel)
+                                    .where(PositionModel.id == trade["position_db_id"])
+                                    .values(size=float(new_size), entry_price=float(new_entry))
+                                )
+                                await session.commit()
+                            
+                            # Переставляем стопы
+                            await self._cancel_all_orders(symbol)
+                            sl_id, _ = await self._set_protective_orders(symbol, trade['signal_type'], new_size, trade['stop'])
+                            trade['stop_order_id'] = sl_id
+                            
+                            await send_telegram_msg(
+                                f"💎 **ДОБОР: {symbol}** (Этап {next_stage})\n"
+                                f"📈 Новый объем: {new_size:.4f}\n"
+                                f"💰 Новая средняя: {new_entry:.4f}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Pyramid error for {symbol}: {e}")
 
     async def _close_position(self, symbol: str, reason: str = "AUTO"):
         if symbol not in self.active_trades: return
@@ -452,12 +497,47 @@ class ExecutionEngine:
                 await self.exchange.create_order(symbol, 'market', side, trade['current_size'])
             
             async with async_session() as session:
-                await session.execute(update(PositionModel).where(PositionModel.id == trade["position_db_id"]).values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow()))
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.id == trade["position_db_id"])
+                    .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
+                )
+                
+                # Добавить PnL-запись (Баг 4.3)
+                if reason != "EXTERNAL":
+                    try:
+                        ticker = await self.exchange.fetch_ticker(symbol)
+                        exit_price = ticker['last']
+                        entry = trade['entry']
+                        size = trade['current_size']
+                        is_long = trade['signal_type'] == "LONG"
+                        
+                        pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
+                        pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
+                        
+                        pnl_rec = PnLModel(
+                            user_id=1,
+                            symbol=symbol,
+                            pnl_usd=pnl_usd,
+                            pnl_pct=pnl_pct,
+                            reason=reason
+                        )
+                        session.add(pnl_rec)
+                    except Exception as e:
+                        logger.warning(f"PnL record error: {e}")
+                
                 await session.commit()
             
             del self.active_trades[symbol]
             await send_telegram_msg(f"💰 **ЗАКРЫТО: {symbol}**\nПричина: {reason}")
         except Exception as e: logger.error(f"Error closing {symbol}: {e}")
+
+    async def manual_close(self, symbol: str) -> bool:
+        """Публичный метод для ручного закрытия из Telegram. (Баг 4.1)"""
+        if symbol in self.active_trades:
+            await self._close_position(symbol, reason="MANUAL")
+            return True
+        return False
 
     async def get_account_metrics(self):
         try:

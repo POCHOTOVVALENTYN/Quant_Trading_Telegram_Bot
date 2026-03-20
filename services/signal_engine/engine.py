@@ -177,35 +177,11 @@ class TradingOrchestrator:
             df = df.tail(1000).reset_index(drop=True)
         self.market_history[symbol][timeframe] = df
 
-        # --- НОВОЕ: Обновление Трейлинг-стопов и Пирамидинга (Этап 3 Плана) ---
-        if timeframe == "1m": # Для мгновенной реакции на цену
+        # --- НОВОЕ: Обновление Трейлинг-стопов и Пирамидинга (Баг 4.2) ---
+        if timeframe == "1m":
             current_price = df.iloc[-1]['close']
-            atr = df.iloc[-1].get('atr', 100.0) # Если ATR еще не рассчитан, берем дефолт
-            
-            # --- Spread Momentum Strategy Logic (из статьи) ---
-            avg_p = self.last_avg_prices.get(symbol)
-            if avg_p:
-                spread_signal = await self.spreader.calculate_signal_strength(avg_p, current_price)
-                if spread_signal:
-                    spread_signal["symbol"] = symbol
-                    # Логируем аномалию в Excel для аналитики
-                    # exporter.log_anomaly(
-                    #     avg_p, current_price, spread_signal["spread_pct"], 
-                    #     symbol, spread_signal["signal"], spread_signal["strength"]
-                    # )
-                    # Если сигнал сильный (например > 2/10), можно уведомлять
-                    if spread_signal["strength"] >= 8: # Порог поднят до 8, чтобы убрать спам
-                        # await send_telegram_msg(
-                        #     f"⚡️ **АНРМАЛИЯ: Spread Momentum**\n\n"
-                        #     f"🔸 Символ: {symbol}\n"
-                        #     f"🔹 Спред: {spread_signal['spread_pct']:.4f}%\n"
-                        #     f"📊 Сила: {'🔥' * spread_signal['strength']} ({spread_signal['strength']}/10)\n"
-                        #     f"💰 Фьючерс: {current_price}\n"
-                        #     f"⚖️ Ср. цена (5м): {avg_p}\n"
-                        # )
-                        pass
-            
-            await self.execution.schedule_update_positions(symbol, current_price, atr)
+            atr = df.iloc[-1].get('atr', 100.0)
+            asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr))
 
         if len(df) < 60: 
             return
@@ -215,18 +191,16 @@ class TradingOrchestrator:
             # Небольшая пауза для разгрузки Event Loop (предотвращает 100% CPU при запуске)
             await asyncio.sleep(0.05)
             self.processed_candles += 1
-            df = self._calculate_indicators(df)
+            df = self._calculate_indicators(df)                         # 1. Индикаторы (Баг 6.1)
+            df['funding_rate'] = self.funding_rates.get(symbol, 0.0)    # 2. Внешние данные
             self.market_history[symbol][timeframe] = df
-            
+
             # Получение текущего ADX (Берем ЗАВЕРШЕННУЮ свечу [-2], чтобы избежать дребезга)
             current_adx = df.iloc[-1].get('adx', 0)
             if timeframe in ["1m", "5m"] and "15m" in self.market_history.get(symbol, {}):
                 df_15m = self.market_history[symbol]["15m"]
                 if not df_15m.empty and len(df_15m) > 1:
                     current_adx = df_15m.iloc[-2].get('adx', current_adx)
-
-            # Присваиваем один раз перед циклом
-            df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
 
             for strategy in self.strategies:
                 signal = strategy.evaluate(df)
@@ -249,7 +223,7 @@ class TradingOrchestrator:
                     
                     self._last_signals_cache[cache_key] = now
                     # 3. Фильтрация (НОВОЕ по плану)
-                    # 3.1 Защита от старых сигналов (Signal Expiry)
+                    # 3.1 Защита от старых сигналов (Signal Expiry - Баг 6.3)
                     candle_time = df.iloc[-1]['timestamp']
                     now_ts = time.time()
                     candle_ts = candle_time if not isinstance(candle_time, datetime) else candle_time.timestamp()
@@ -257,7 +231,8 @@ class TradingOrchestrator:
                     
                     tf_secs = get_timeframe_seconds(timeframe)
                     # Сигнал актуален, если мы внутри свечи ИЛИ прошло не более N секунд после её закрытия
-                    if (now_ts - (candle_ts + tf_secs)) > settings.signal_expiry_seconds:
+                    candle_age = now_ts - candle_ts  # возраст начала свечи
+                    if candle_age > (tf_secs + settings.signal_expiry_seconds):
                         logger.warning(f"⚠️ Сигнал {symbol} {signal['strategy']} ПРОПУЩЕН: устарел на {int(now_ts - (candle_ts+tf_secs))}с")
                         continue
 
@@ -320,7 +295,11 @@ class TradingOrchestrator:
                         continue
 
                     # 6. Дополнение данными
-                    targets = StrategyRuleOf7.calculate_targets(df.iloc[-1]['high'], df.iloc[-1]['low'])
+                    # 6. Дополнение данными (Баг Step 3 — Rule of 7)
+                    lookback_p = df.tail(20)
+                    pattern_high = lookback_p['high'].max()
+                    pattern_low = lookback_p['low'].min()
+                    targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low)
                     sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], df['atr'].iloc[-1], signal['signal'])
                     # Берем первую цель из Rule of 7 как основной TP для индикации
                     tp = next(iter(targets.values())) if targets else signal['entry_price'] * (1.05 if signal['signal'] == "LONG" else 0.95)
@@ -373,7 +352,7 @@ class TradingOrchestrator:
                         f"🕒 Время (UTC): {now_utc}\n\n"
                         f"🤖 **AI ВЕРДИКТ:**\n"
                         f"📈 Вероятность успеха: {ai_prediction.get('win_prob', 0)*100:.1f}%\n"
-                        f"💰 Ож. доходность: {ai_prediction.get('expected_return', 0)*100:.2f}%\n"
+                        f"💰 Ож. доходность: {ai_prediction.get('expected_return', 0):.2f}%\n"
                         f"⚠️ Уровень риска: {ai_prediction.get('risk', 0):.2f}\n"
                         f"📊 AI Score: {score:.2f}\n\n"
                         f"ℹ️ Статус: ⌛️ **В ОЖИДАНИИ**"

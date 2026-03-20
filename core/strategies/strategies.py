@@ -21,9 +21,9 @@ class StrategyWRD(BaseStrategy):
         atr = last_row['atr']
         if pd.isna(atr): return None
 
-        # Ищем максимум и минимум за последние 24 часа (1440 минут)
-        daily_high = df['high'].tail(1440).max()
-        daily_low = df['low'].tail(1440).min()
+        # Ищем максимум и минимум за период lookback (Баг 2.4 - lookback bars)
+        daily_high = df['high'].tail(self.lookback_bars).max()
+        daily_low = df['low'].tail(self.lookback_bars).min()
         daily_range = daily_high - daily_low
         
         vr = daily_range / atr
@@ -192,9 +192,9 @@ class StrategyVolContraction(BaseStrategy):
         
         # Сжатие волатильности
         if atr_fast < (atr_slow * self.threshold):
-            # Пробой максимума за последние 5 часов (300 минут)
-            highest_5h = df['high'].iloc[-301:-1].max()
-            lowest_5h = df['low'].iloc[-301:-1].min()
+            # Пробой максимума за последние 5 часов (300 минут) (Баг 2.5)
+            highest_5h = df['high'].iloc[-300:-1].max()
+            lowest_5h = df['low'].iloc[-300:-1].min()
             
             curr_close = df.iloc[-1]['close']
             if curr_close > highest_5h:
@@ -269,8 +269,8 @@ class StrategyBollingerClusters(BaseStrategy):
         self.min_cluster = min_cluster
 
     def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        # Нужно как минимум 450 свечей для надежного индикатора CSI/RSI Slow
-        if len(df) < 450: 
+        # Достаточно 60 свечей для расчета (Баг 6.2)
+        if len(df) < 60: 
             return None
         
         # Предполагаем, что индикаторы уже рассчитаны в df оркестратором (или рассчитываем здесь)
@@ -389,12 +389,24 @@ class StrategyFundingSqueeze(BaseStrategy):
 class StrategyRuleOf7:
     @staticmethod
     def calculate_targets(high: float, low: float) -> Dict[str, float]:
-        # Берем экстремумы за последние 20 свечей как опорные точки паттерна
-        lookback = df.tail(20)
-        pattern_high = lookback['high'].max()
-        pattern_low  = lookback['low'].min()
-        targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low)
-        return targets
+        """
+        Rule of 7 (Schwager): Расчет целей на основе диапазона (high - low).
+        """
+        rng = high - low
+        if rng <= 0: return {}
+        
+        # Классические цели Rule of 7 (коэффициенты 0.5, 1.0, 1.5 от диапазона)
+        t1 = high + (rng * 0.5)
+        t2 = high + (rng * 1.0)
+        t3 = high + (rng * 1.5)
+        
+        # Если это SHORT (инвертируем логику если нужно, но обычно Rule 7 для пробоев)
+        # В нашем случае мы принимаем high/low как границы паттерна.
+        return {
+            "Цель 1 (0.5x)": round(t1, 4),
+            "Цель 2 (1.0x)": round(t2, 4),
+            "Цель 3 (1.5x)": round(t3, 4)
+        }
 
 def get_timeframe_seconds(tf: str) -> int:
     unit = tf[-1]

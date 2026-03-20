@@ -34,8 +34,8 @@ class AIModel:
         try:
             score = 0.0
             
-            # Объем - ключевой фактор
-            score += min(1.0, (features['volume_ratio'] - 1.0) / 2.0) * self.weights['volume_ratio']
+            # Объем - ключевой фактор (Баг 5.2)
+            score += max(-1.0, min(1.0, (features['volume_ratio'] - 1.0) / 2.0)) * self.weights['volume_ratio']
             
             # Моментум
             if signal_type == "LONG":
@@ -75,16 +75,16 @@ class AIModel:
             win_prob = 0.45 + (score * 0.45) 
             win_prob = max(0.1, min(0.98, win_prob))
 
-            # Расчет мат. ожидания (Expected Return)
-            # Зависит от волатильности (ATR)
-            expected_return = 1.0 + (features['atr_ratio'] * 1.5) # Например 2.5% при высокой воле
+            # Расчет мат. ожидания (Expected Return) (Баг 5.1)
+            # Зависит от волатильности (ATR). Сохраняем в процентах (~1.5% при atr_ratio=1)
+            expected_return_pct = (features['atr_ratio'] * 1.5) * 100
             
             # Риск зависит от резкости движений
             risk = 1.0 + (features['range_relative'] * 0.5)
 
             return {
                 "win_prob": round(win_prob, 2),
-                "expected_return": round(expected_return, 2),
+                "expected_return": round(expected_return_pct, 2),
                 "risk": round(risk, 2)
             }
         except Exception as e:

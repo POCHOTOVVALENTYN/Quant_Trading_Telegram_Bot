@@ -142,13 +142,12 @@ class TimeExitSystem:
 class PyramidingSystem:
     def __init__(self):
         """
-        Пирамидинг 2.0 (Обновлено по запросу пользователя).
+        Пирамидинг 2.0 (Обновлено по запросу пользователя - Баг 3.1).
         Вход в позицию частями от общего ДЕПОЗИТА:
         Stage 0 (Entry) = 5%
-        Stage 1+ (Confirmation) = 3%
+        Stage 1 (Confirmation) = 3%
         """
-        # [0.05, 0.03] - Вход 5% + 1 ступень дозакупки 3%
-        self.allocation = [0.05, 0.03]
+        self.allocation_pct = [0.05, 0.03]  # 5% вход, 3% доливка
 
     def check_next_entry_allowed(self, current_price: float, initial_entry: float, atr: float, signal_type: str = "LONG") -> bool:
         """
@@ -160,15 +159,14 @@ class PyramidingSystem:
             return current_price < (initial_entry - 1.5 * atr)
             
     def get_allocation_amount(self, account_balance: float, current_stage: int, entry_price: float) -> float:
-        """
-        Возвращает количество контрактов (amount) исходя из % от депозита.
-        account_balance: общий баланс в USDT
-        current_stage: 0, 1, 2...
-        entry_price: текущая цена входа
-        """
-        if current_stage < len(self.allocation) and entry_price > 0:
-            # Считаем объем в USDT (баланс * процент этапа)
-            usdt_amount = account_balance * self.allocation[current_stage]
-            # Переводим в количество монет
-            return usdt_amount / entry_price
-        return 0.0
+        """Возвращает количество контрактов для данного этапа (Баг 3.1)."""
+        if current_stage >= len(self.allocation_pct) or entry_price <= 0:
+            return 0.0
+        usdt_amount = account_balance * self.allocation_pct[current_stage]
+        return usdt_amount / entry_price
+
+    def get_allocation_usdt(self, account_balance: float, current_stage: int) -> float:
+        """Вспомогательный метод — возвращает USD-сумму (для совместимости с тестами)."""
+        if current_stage >= len(self.allocation_pct):
+            return 0.0
+        return account_balance * self.allocation_pct[current_stage]

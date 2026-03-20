@@ -192,10 +192,10 @@ class MarketDataService:
                     except Exception as e:
                         app_logger.error(f"Watchdog error: {e}")
                 
-                # Обновляем время, чтобы не спамить
-                self.last_candle_time[sym] = now
-                
-        await asyncio.sleep(30) # Проверяем каждые 30 секунд
+            # Обновляем время, чтобы не спамить
+            self.last_candle_time[sym] = now
+            
+            await asyncio.sleep(30) # Проверяем каждые 30 секунд (Баг 7.1)
 
     async def stop(self):
         self.running = False
