@@ -218,22 +218,17 @@ class TradingOrchestrator:
             df = self._calculate_indicators(df)
             self.market_history[symbol][timeframe] = df
             
-            # Получение текущего ADX (MTF: предпочтительно берем с 15m таймфрейма)
+            # Получение текущего ADX (Берем ЗАВЕРШЕННУЮ свечу [-2], чтобы избежать дребезга)
             current_adx = df.iloc[-1].get('adx', 0)
             if timeframe in ["1m", "5m"] and "15m" in self.market_history.get(symbol, {}):
                 df_15m = self.market_history[symbol]["15m"]
-                if not df_15m.empty:
-                    
-                    # Получение текущего ADX (Берем ЗАВЕРШЕННУЮ свечу [-2], чтобы избежать дребезга)
-                    current_adx = df.iloc[-1].get('adx', 0)
-                    if timeframe in ["1m", "5m"] and "15m" in self.market_history.get(symbol, {}):
-                        df_15m = self.market_history[symbol]["15m"]
-                        if not df_15m.empty and len(df_15m) > 1:
-                            # [-2] гарантирует, что мы смотрим на уже закрытую 15-минутку
-                            current_adx = df_15m.iloc[-2].get('adx', current_adx)
+                if not df_15m.empty and len(df_15m) > 1:
+                    current_adx = df_15m.iloc[-2].get('adx', current_adx)
+
+            # Присваиваем один раз перед циклом
+            df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
 
             for strategy in self.strategies:
-                df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
                 signal = strategy.evaluate(df)
                 if signal:
                     # Включен StrategyPullback в фильтрацию флэта

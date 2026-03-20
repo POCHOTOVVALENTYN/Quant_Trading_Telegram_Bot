@@ -168,6 +168,9 @@ class MarketDataService:
         
         # Funding rate poll
         tasks.append(asyncio.create_task(self.fetch_funding_rates()))
+
+        # ЗАПУСК WATCHDOG
+        tasks.append(asyncio.create_task(self._watchdog_loop()))
         
         await asyncio.gather(*tasks)
 

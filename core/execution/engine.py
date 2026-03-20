@@ -336,7 +336,7 @@ class ExecutionEngine:
             
             if lot_size <= 0: raise Exception("Zero lot size after normalization")
 
-            # 1. Умный Вход (Limit Chasing)
+            # 1. Умный Вход (Limit Chasing) с защитой от частичного исполнения
             await self._set_leverage_best_effort(symbol, settings.leverage)
             side = 'buy' if direction.upper() == 'LONG' else 'sell'
             
@@ -344,42 +344,59 @@ class ExecutionEngine:
             order = None
             max_retries = 3
             
+            remaining_size = lot_size
+            filled_total = 0.0
+
             for attempt in range(max_retries):
+                if remaining_size <= 0:
+                    break
                 try:
-                    # Получаем свежий стакан (Orderbook)
                     ob = await self.exchange.fetch_order_book(symbol, limit=5)
-                    # Для лонга встаем в лучший Bid, для шорта в лучший Ask
                     best_price = ob['bids'][0][0] if side == 'buy' else ob['asks'][0][0]
                     best_price = await self._normalize_price(symbol, best_price)
                     
-                    # Пытаемся выставить Maker ордер (postOnly)
                     logger.info(f"🕸 [LIMIT CHASE] Попытка {attempt+1}: Лимитка {side} {symbol} по {best_price}")
                     temp_order = await self.exchange.create_order(
-                        symbol=symbol, type='limit', side=side, amount=lot_size, price=best_price,
-                        params={'timeInForce': 'GTX', 'postOnly': True} # GTX = Post Only
+                        symbol=symbol, type='limit', side=side, amount=remaining_size, price=best_price,
+                        params={'timeInForce': 'GTX', 'postOnly': True}
                     )
                     
-                    # Ждем 3 секунды исполнения
                     await asyncio.sleep(3)
                     
-                    # Проверяем статус
                     check = await self.exchange.fetch_order(temp_order['id'], symbol)
+                    filled_now = float(check.get('filled', 0.0) or 0.0)
+                    
                     if check['status'] == 'closed':
                         order = check
-                        entry_exec = check['average'] or check['price']
-                        break # Успешно вошли по лучшей цене!
+                        entry_exec = float(check.get('average') or check.get('price') or entry_price)
+                        filled_total += filled_now
+                        remaining_size = 0.0
+                        break
                     else:
-                        # Отменяем неисполненный лимит и пробуем снова
                         await self.exchange.cancel_order(temp_order['id'], symbol)
+                        if filled_now > 0:
+                            filled_total += filled_now
+                            remaining_size -= filled_now
+                            entry_exec = float(check.get('average') or check.get('price') or entry_price)
                         
                 except Exception as e:
                     logger.warning(f"Limit chase error: {e}")
                     
-            # Fallback (План Б): Если за 3 попытки не вошли (рынок улетел), бьем по рынку
-            if not order:
-                logger.warning(f"⚡️ [FALLBACK] Лимитки не сработали, входим Market ордером для {symbol}")
-                order = await self.exchange.create_order(symbol, 'market', side, lot_size)
-                entry_exec = float(order.get("average") or order.get("price") or entry_price)
+            # Fallback (План Б): Добиваем неисполненный остаток по рынку
+            if remaining_size > 0:
+                logger.warning(f"⚡️ [FALLBACK] Добиваем остаток {remaining_size} Market ордером для {symbol}")
+                try:
+                    fallback_order = await self.exchange.create_order(symbol, 'market', side, remaining_size)
+                    if filled_total == 0:  # Если лимитки вообще не сработали
+                        entry_exec = float(fallback_order.get("average") or fallback_order.get("price") or entry_price)
+                    filled_total += float(fallback_order.get("filled", remaining_size))
+                except Exception as e:
+                    logger.error(f"Market fallback error: {e}")
+                    if filled_total == 0:
+                        raise e # Если вообще ничего не удалось купить, прерываем вход
+            
+            # Корректируем финальный размер позиции для БД и стопов
+            lot_size = filled_total
 
             # 2. БД
             async with async_session() as session:
