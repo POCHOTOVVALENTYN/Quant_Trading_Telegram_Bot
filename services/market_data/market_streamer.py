@@ -13,6 +13,7 @@ class MarketDataService:
         """
         self.symbols = symbols
         self.timeframes = timeframes
+        self.last_candle_time: Dict[str, float] = {}
         from config.settings import settings
         
         if exchange:
@@ -47,6 +48,7 @@ class MarketDataService:
         while self.running:
             try:
                 candles = await self.exchange.watch_ohlcv(symbol, timeframe)
+                self.last_candle_time[symbol] = asyncio.get_event_loop().time()
                 if not candles or len(candles) == 0:
                     await asyncio.sleep(1) # Страховка от беск. цикла при пустых данных
                     continue
@@ -59,6 +61,7 @@ class MarketDataService:
                 # ccxtpro handles fallback under the hood to REST if WS drops, 
                 # but we can explicitly call fetch_ohlcv if needed.
 
+    
     async def watch_orderbook(self, symbol: str):
         app_logger.info(f"Начало отслеживания Orderbook для {symbol}")
         # Для Binance Futures CCXT Pro иногда требует формат symbol:USDT
@@ -167,6 +170,29 @@ class MarketDataService:
         tasks.append(asyncio.create_task(self.fetch_funding_rates()))
         
         await asyncio.gather(*tasks)
+
+    async def _watchdog_loop(self):
+        """Проверяет зависшие потоки данных (нет свечей > 2 минут)"""
+        app_logger.info("🐕 Watchdog запущен")
+        while self.running:
+            now = asyncio.get_event_loop().time()
+            for sym, last_time in list(self.last_candle_time.items()):
+                if now - last_time > 120:  # 120 секунд без новых данных
+                    app_logger.warning(f"⚠️ [WATCHDOG] Нет данных по {sym} более 2 минут! Очищаю кэш сокетов CCXT.")
+                    # В CCXT Pro можно сбросить кэш подключений, чтобы форсировать реконнект
+                    try:
+                        url = self.exchange.urls['api']['ws']['future']
+                        if url in self.exchange.clients:
+                            client = self.exchange.clients[url]
+                            await client.close()
+                            del self.exchange.clients[url]
+                    except Exception as e:
+                        app_logger.error(f"Watchdog error: {e}")
+                
+                # Обновляем время, чтобы не спамить
+                self.last_candle_time[sym] = now
+                
+        await asyncio.sleep(30) # Проверяем каждые 30 секунд
 
     async def stop(self):
         self.running = False

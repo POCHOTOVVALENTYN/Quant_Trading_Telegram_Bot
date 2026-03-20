@@ -187,13 +187,41 @@ class ExecutionEngine:
                 sl_id = str(res_sl["algoId"])
                 logger.info(f"🛡 [PROTECT] SL установлен для {symbol}: {sl}")
 
-            # 2. TAKE PROFIT
+            # 2. TAKE PROFIT (Scale-out: Частичная фиксация)
             if tp:
-                tp_p = {**base_params, "type": "TAKE_PROFIT_MARKET", "triggerPrice": str(await self._normalize_price(symbol, tp))}
-                res_tp = await self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p)
-                if res_tp and res_tp.get("algoId"):
-                    tp_id = str(res_tp["algoId"])
-                    logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
+                tp_ids = []
+                # Проверяем, передан ли словарь целей (targets) или просто одно число
+                if isinstance(tp, dict):
+                    # Ожидаем словарь вида: {"Цель 1": price1, "Цель 2": price2, "Цель 3": price3}
+                    # Распределение объемов: 50%, 30%, 20%
+                    portions = [0.5, 0.3, 0.2]
+                    targets = list(tp.values())
+                    
+                    remaining_amount = Decimal(str(amount))
+                    for i, target_price in enumerate(targets[:3]):
+                        part_amt = float((Decimal(str(amount)) * Decimal(str(portions[i]))).quantize(Decimal('0.001'), rounding=ROUND_DOWN))
+                        
+                        # На последнем шаге отдаем весь остаток во избежание "пыли"
+                        if i == 2 or i == len(targets)-1:
+                            part_amt = float(remaining_amount)
+                            
+                        if part_amt <= 0: continue
+                        remaining_amount -= Decimal(str(part_amt))
+                        
+                        tp_p = {**base_params, "type": "TAKE_PROFIT_MARKET", "triggerPrice": str(await self._normalize_price(symbol, target_price)), "quantity": str(part_amt)}
+                        res_tp = await self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p)
+                        if res_tp and res_tp.get("algoId"):
+                            tp_ids.append(str(res_tp["algoId"]))
+                            logger.info(f"🎯 [PARTIAL TP {i+1}] {symbol} объем {part_amt} по {target_price}")
+                            
+                    tp_id = ",".join(tp_ids) # Сохраняем все ID через запятую
+                else:
+                    # Классический единый TP
+                    tp_p = {**base_params, "type": "TAKE_PROFIT_MARKET", "triggerPrice": str(await self._normalize_price(symbol, tp))}
+                    res_tp = await self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p)
+                    if res_tp and res_tp.get("algoId"):
+                        tp_id = str(res_tp["algoId"])
+                        logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
 
         except Exception as e:
             logger.error(f"❌ [PROTECT] Ошибка защиты {symbol}: {e}")
@@ -308,11 +336,50 @@ class ExecutionEngine:
             
             if lot_size <= 0: raise Exception("Zero lot size after normalization")
 
-            # 1. Вход
+            # 1. Умный Вход (Limit Chasing)
             await self._set_leverage_best_effort(symbol, settings.leverage)
             side = 'buy' if direction.upper() == 'LONG' else 'sell'
-            order = await self.exchange.create_order(symbol, 'market', side, lot_size)
-            entry_exec = float(order.get("average") or order.get("price") or entry_price)
+            
+            entry_exec = entry_price
+            order = None
+            max_retries = 3
+            
+            for attempt in range(max_retries):
+                try:
+                    # Получаем свежий стакан (Orderbook)
+                    ob = await self.exchange.fetch_order_book(symbol, limit=5)
+                    # Для лонга встаем в лучший Bid, для шорта в лучший Ask
+                    best_price = ob['bids'][0][0] if side == 'buy' else ob['asks'][0][0]
+                    best_price = await self._normalize_price(symbol, best_price)
+                    
+                    # Пытаемся выставить Maker ордер (postOnly)
+                    logger.info(f"🕸 [LIMIT CHASE] Попытка {attempt+1}: Лимитка {side} {symbol} по {best_price}")
+                    temp_order = await self.exchange.create_order(
+                        symbol=symbol, type='limit', side=side, amount=lot_size, price=best_price,
+                        params={'timeInForce': 'GTX', 'postOnly': True} # GTX = Post Only
+                    )
+                    
+                    # Ждем 3 секунды исполнения
+                    await asyncio.sleep(3)
+                    
+                    # Проверяем статус
+                    check = await self.exchange.fetch_order(temp_order['id'], symbol)
+                    if check['status'] == 'closed':
+                        order = check
+                        entry_exec = check['average'] or check['price']
+                        break # Успешно вошли по лучшей цене!
+                    else:
+                        # Отменяем неисполненный лимит и пробуем снова
+                        await self.exchange.cancel_order(temp_order['id'], symbol)
+                        
+                except Exception as e:
+                    logger.warning(f"Limit chase error: {e}")
+                    
+            # Fallback (План Б): Если за 3 попытки не вошли (рынок улетел), бьем по рынку
+            if not order:
+                logger.warning(f"⚡️ [FALLBACK] Лимитки не сработали, входим Market ордером для {symbol}")
+                order = await self.exchange.create_order(symbol, 'market', side, lot_size)
+                entry_exec = float(order.get("average") or order.get("price") or entry_price)
 
             # 2. БД
             async with async_session() as session:
@@ -321,8 +388,9 @@ class ExecutionEngine:
                                     status=PositionStatus.OPEN, opened_at=datetime.datetime.utcnow())
                 session.add(pos); await session.commit(); await session.refresh(pos)
 
-            # 3. Защита
-            sl_id, _ = await self._set_protective_orders(symbol, direction, lot_size, stop_price, signal_data.get("take_profit"))
+            # Передаем словарь целей из RuleOf7
+            targets = signal_data.get("targets", signal_data.get("take_profit"))
+            sl_id, _ = await self._set_protective_orders(symbol, direction, lot_size, stop_price, targets)
 
             self.active_trades[symbol] = {
                 "entry": entry_exec, "stop": stop_price, "stage": 0, "opened_at": time.time(),

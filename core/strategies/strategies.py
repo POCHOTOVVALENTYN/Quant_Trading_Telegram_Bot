@@ -154,7 +154,7 @@ class StrategyPullback(BaseStrategy):
         ma_col = f'ema{self.ma_period}'
         global_col = f'ema{self.global_period}'
         
-        if ma_col not in df.columns or global_col not in df.columns or len(df) < 50:
+        if ma_col not in df.columns or global_col not in df.columns or len(df) < self.global_period:
             return None
             
         last_row = df.iloc[-1]
@@ -331,6 +331,9 @@ class StrategyTripleSMA(BaseStrategy):
         
         fast_c, med_c, slow_c = curr[required[0]], curr[required[1]], curr[required[2]]
         fast_p, med_p = prev[required[0]], prev[required[1]]
+
+        if pd.isna(fast_c) or pd.isna(med_c) or pd.isna(slow_c):
+            return None
         
         # Сигнал 1: Пересечение Fast/Medium (Event-driven)
         is_cross_up = fast_p <= med_p and fast_c > med_c
@@ -346,6 +349,42 @@ class StrategyTripleSMA(BaseStrategy):
             return {"strategy": "Triple SMA Filter", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.8}
         
         return None
+
+
+class StrategyFundingSqueeze(BaseStrategy):
+    """
+    Поиск ликвидаций (Сквизов) при экстремальном фандинге.
+    Если толпа платит огромный фандинг за лонги, маркетмейкер побреет их вниз (Short).
+    """
+    def __init__(self, funding_threshold: float = 0.015, rsi_period: int = 14):
+        self.funding_threshold = funding_threshold
+        self.rsi_period = rsi_period
+
+    def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        if len(df) < self.rsi_period + 1 or 'funding_rate' not in df.columns or 'RSI_fast' not in df.columns:
+            return None
+            
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+        
+        fr = last_row['funding_rate']
+        rsi = last_row['RSI_fast']
+        prev_rsi = prev_row['RSI_fast']
+        
+        # Long Squeeze (Толпа в лонгах -> Ищем ШОРТ)
+        if fr > self.funding_threshold:
+            # RSI пробивает 70 сверху вниз (начало падения)
+            if prev_rsi >= 70 and rsi < 70:
+                return {"strategy": "Funding Squeeze", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.9}
+                
+        # Short Squeeze (Толпа в шортах -> Ищем ЛОНГ)
+        elif fr < -self.funding_threshold:
+            # RSI пробивает 30 снизу вверх (начало роста)
+            if prev_rsi <= 30 and rsi > 30:
+                return {"strategy": "Funding Squeeze", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.9}
+                
+        return None
+
 
 class StrategyRuleOf7:
     @staticmethod
