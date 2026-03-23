@@ -9,6 +9,19 @@ class RiskManager:
         self.max_risk_pct = max_risk_pct
         self.max_drawdown_pct = max_drawdown_pct
         self.max_open_trades = max_open_trades
+        
+        # R2: Максимальная дневная просадка (5%)
+        self.max_daily_drawdown_pct = 0.05
+        self._daily_pnl_usd = 0.0
+        self._daily_reset_ts = 0.0
+        
+        # R3: Корреляционные группы — не открывать больше 2 позиций в одном направлении в группе
+        self.correlation_groups = {
+            "BTC_cluster": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "LTC/USDT", "BCH/USDT"],
+            "ALT_cluster": ["ADA/USDT", "DOT/USDT", "LINK/USDT", "NEAR/USDT"],
+            "MEME_cluster": ["DOGE/USDT", "SHIB/USDT"]
+        }
+        self.max_correlated_same_direction = 2
 
     def check_listing_days(self, listing_date_str: str, min_days: int) -> bool:
         """Проверка даты листинга (Защита от новых монет)"""
@@ -28,6 +41,45 @@ class RiskManager:
             return False
             
         return True
+
+    def check_correlation_limit(self, symbol: str, direction: str, active_trades: dict) -> bool:
+        """
+        R3: Корреляционный фильтр.
+        Не открывать больше max_correlated_same_direction позиций в одном направлении
+        для монет из одной корреляционной группы.
+        """
+        for group_name, group_symbols in self.correlation_groups.items():
+            if symbol in group_symbols:
+                same_dir_count = 0
+                for sym, trade_info in active_trades.items():
+                    if sym in group_symbols and trade_info.get('signal_type') == direction:
+                        same_dir_count += 1
+                if same_dir_count >= self.max_correlated_same_direction:
+                    return False
+        return True
+
+    @staticmethod
+    def kelly_position_size(account_balance: float, win_prob: float, avg_win_pct: float = 1.5, avg_loss_pct: float = 1.0) -> float:
+        """
+        R1: Kelly Criterion для оптимального размера позиции.
+        f* = (b*p - q) / b, где:
+        - p = вероятность выигрыша (из AI)
+        - q = 1 - p (вероятность проигрыша)
+        - b = средний выигрыш / средний проигрыш
+        
+        Используем Half-Kelly (f*/2) для снижения дисперсии.
+        """
+        if win_prob <= 0 or win_prob >= 1 or avg_loss_pct <= 0:
+            return account_balance * 0.01  # Fallback 1%
+        
+        b = avg_win_pct / avg_loss_pct
+        q = 1 - win_prob
+        kelly_f = (b * win_prob - q) / b
+        
+        # Half-Kelly для безопасности
+        kelly_f = max(0.005, min(0.05, kelly_f / 2))  # Лимит: 0.5%-5% от депозита
+        
+        return account_balance * kelly_f
 
     @staticmethod
     def is_volatility_sufficient(df, threshold: float = 0.002) -> bool:

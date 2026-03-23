@@ -25,14 +25,21 @@ class SignalScorer:
         prev_row = df.iloc[-2]
         direction = signal.get("signal")
         
-        # 1. Trend alignment (Используем простую SMA 50)
-        df = df.copy()
-        df['sma_50'] = df['close'].rolling(window=50).mean()
+        # 1. Trend alignment (M3: используем готовый ema50 вместо дублирующего sma_50)
         trend_score = 0.0
-        if direction == "LONG" and last_row['close'] > df.iloc[-1]['sma_50']:
-            trend_score = 1.0
-        elif direction == "SHORT" and last_row['close'] < df.iloc[-1]['sma_50']:
-            trend_score = 1.0
+        trend_col = 'ema50' if 'ema50' in df.columns else None
+        if trend_col:
+            if direction == "LONG" and last_row['close'] > last_row[trend_col]:
+                trend_score = 1.0
+            elif direction == "SHORT" and last_row['close'] < last_row[trend_col]:
+                trend_score = 1.0
+        else:
+            # Fallback без копирования df
+            sma_50_val = df['close'].tail(50).mean()
+            if direction == "LONG" and last_row['close'] > sma_50_val:
+                trend_score = 1.0
+            elif direction == "SHORT" and last_row['close'] < sma_50_val:
+                trend_score = 1.0
             
         # 2. Volatility (Используем ATR рост)
         vol_score = 0.0

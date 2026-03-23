@@ -21,8 +21,13 @@ class FeatureGenerator:
         features['atr_ratio'] = last_row['atr'] / df_window['atr'].tail(20).mean() if 'atr' in df_window else 1.0
         features['range_relative'] = (last_row['high'] - last_row['low']) / (df_window['high'] - df_window['low']).tail(20).mean()
         
-        # 2. Моментум (Momentum)
-        features['rsi'] = FeatureGenerator._calculate_rsi(df_window['close'], 14).iloc[-1]
+        # 2. Моментум (Momentum) — L1: используем готовый RSI из df если есть
+        if 'RSI_fast' in df_window.columns:
+            features['rsi'] = df_window['RSI_fast'].iloc[-1]
+        elif 'RSI' in df_window.columns:
+            features['rsi'] = df_window['RSI'].iloc[-1]
+        else:
+            features['rsi'] = FeatureGenerator._calculate_rsi(df_window['close'], 14).iloc[-1]
         features['roc_10'] = ((last_row['close'] - df_window.iloc[-10]['close']) / df_window.iloc[-10]['close']) * 100
         
         # 3. Трендовые (Trend)

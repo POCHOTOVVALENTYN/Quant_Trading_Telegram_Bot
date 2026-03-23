@@ -75,9 +75,9 @@ class AIModel:
             win_prob = 0.45 + (score * 0.45) 
             win_prob = max(0.1, min(0.98, win_prob))
 
-            # Расчет мат. ожидания (Expected Return) (Баг 5.1)
-            # Зависит от волатильности (ATR). Сохраняем в процентах (~1.5% при atr_ratio=1)
-            expected_return_pct = (features['atr_ratio'] * 1.5) * 100
+            # Расчет мат. ожидания (Expected Return) (Баг L4: убрал *100)
+            # При atr_ratio=1 → ~1.5% за сделку (реалистично для крипты)
+            expected_return_pct = features['atr_ratio'] * 1.5
             
             # Риск зависит от резкости движений
             risk = 1.0 + (features['range_relative'] * 0.5)

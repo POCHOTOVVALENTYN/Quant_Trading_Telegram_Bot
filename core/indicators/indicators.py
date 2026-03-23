@@ -132,3 +132,28 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     }).fillna(0)
     
     return res
+
+
+def calculate_williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """
+    Williams %R — осциллятор (из статьи xcritical).
+    %R = (Highest High - Close) / (Highest High - Lowest Low) * (-100)
+    Диапазон: от -100 до 0.
+    Перекупленность: > -20, Перепроданность: < -80.
+    """
+    highest_high = df['high'].rolling(window=period).max()
+    lowest_low = df['low'].rolling(window=period).min()
+    denom = highest_high - lowest_low
+    williams_r = ((highest_high - df['close']) / denom.replace(0, np.nan)) * (-100)
+    return williams_r.fillna(-50)
+
+
+def calculate_vwap(df: pd.DataFrame) -> pd.Series:
+    """
+    VWAP (Volume Weighted Average Price) — институциональный стандарт.
+    Используется для определения справедливой цены актива.
+    """
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    cumulative_tp_vol = (typical_price * df['volume']).cumsum()
+    cumulative_vol = df['volume'].cumsum().replace(0, np.nan)
+    return cumulative_tp_vol / cumulative_vol

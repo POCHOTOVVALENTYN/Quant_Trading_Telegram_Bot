@@ -102,12 +102,43 @@ async def lifespan(app: FastAPI):
     
     # 1. Загрузка списка символов для мониторинга
     # Возвращаем ПОЛНЫЙ список после оптимизации CPU
-    base_symbols = [
+    desired_symbols = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
         "DOGE/USDT", "ADA/USDT", "TRX/USDT", "LINK/USDT", "DOT/USDT",
         "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT", 
         "MATIC/USDT", "FIL/USDT", "ICP/USDT", "APT/USDT"
     ]
+    
+    # K2: Фильтрация — оставляем только символы, реально доступные на бирже
+    available_markets = set(exchange_client.markets.keys()) if exchange_client.markets else set()
+    base_symbols = []
+    skipped = []
+    for s in desired_symbols:
+        # Проверяем через несколько форматов (BTC/USDT и BTC/USDT:USDT)
+        if s in available_markets or f"{s}:USDT" in available_markets:
+            base_symbols.append(s)
+        else:
+            skipped.append(s)
+    
+    # K2+Testnet: Дополнительная проверка — пробуем загрузить 1 свечу для каждого символа
+    if settings.testnet and base_symbols:
+        verified_symbols = []
+        for s in base_symbols:
+            try:
+                candles = await exchange_client.fetch_ohlcv(s, '1h', limit=1)
+                if candles:
+                    verified_symbols.append(s)
+                else:
+                    skipped.append(s)
+            except Exception:
+                skipped.append(s)
+            await asyncio.sleep(0.2)  # Пауза чтобы не триггерить рейт-лимит
+        base_symbols = verified_symbols
+    
+    if skipped:
+        app_logger.warning(f"⚠️ [K2] Символы отсутствуют на бирже и пропущены: {list(set(skipped))}")
+    app_logger.info(f"✅ Валидных символов: {len(base_symbols)} из {len(desired_symbols)}")
+    
     tfs = ["1m", "5m", "15m", "1h", "4h"]
     
     app_logger.info(f"🚀 [1/6] Запуск мониторинга {len(base_symbols)} монет на {len(tfs)} ТФ...")
@@ -352,7 +383,7 @@ async def get_active_trades():
                 # Расчет PnL
                 entry = info.get('entry', 0)
                 size = float(info.get('current_size') or 0)
-                is_long = info.get('signal_type') == "LONG"
+                is_long = str(info.get('signal_type', '')).upper() == "LONG"
                 
                 if entry > 0 and size > 0:
                     if is_long:

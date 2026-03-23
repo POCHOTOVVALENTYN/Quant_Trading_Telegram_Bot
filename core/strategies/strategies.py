@@ -386,22 +386,58 @@ class StrategyFundingSqueeze(BaseStrategy):
         return None
 
 
+class StrategyWilliamsR(BaseStrategy):
+    """
+    Фаза 3 (U5): Williams %R Mean-Reversion (из статьи xcritical).
+    Покупаем при выходе из перепроданности (-80), продаём при выходе из перекупленности (-20).
+    Дополнительный фильтр: RSI должен подтверждать разворот.
+    """
+    def __init__(self, overbought: float = -20, oversold: float = -80):
+        self.overbought = overbought
+        self.oversold = oversold
+
+    def evaluate(self, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        if len(df) < 20 or 'williams_r' not in df.columns or 'RSI_fast' not in df.columns:
+            return None
+            
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        wr_curr = curr['williams_r']
+        wr_prev = prev['williams_r']
+        rsi = curr['RSI_fast']
+        
+        # LONG: Williams %R пробивает -80 снизу вверх + RSI < 45 (подтверждение перепроданности)
+        if wr_prev <= self.oversold and wr_curr > self.oversold and rsi < 45:
+            return {"strategy": "Williams R", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.85}
+        
+        # SHORT: Williams %R пробивает -20 сверху вниз + RSI > 55 (подтверждение перекупленности)
+        if wr_prev >= self.overbought and wr_curr < self.overbought and rsi > 55:
+            return {"strategy": "Williams R", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.85}
+        
+        return None
+
+
 class StrategyRuleOf7:
     @staticmethod
-    def calculate_targets(high: float, low: float) -> Dict[str, float]:
+    def calculate_targets(high: float, low: float, direction: str = "LONG") -> Dict[str, float]:
         """
         Rule of 7 (Schwager): Расчет целей на основе диапазона (high - low).
+        K5: Поддержка SHORT — цели ниже диапазона.
         """
         rng = high - low
         if rng <= 0: return {}
         
-        # Классические цели Rule of 7 (коэффициенты 0.5, 1.0, 1.5 от диапазона)
-        t1 = high + (rng * 0.5)
-        t2 = high + (rng * 1.0)
-        t3 = high + (rng * 1.5)
+        if direction == "LONG":
+            t1 = high + (rng * 0.5)
+            t2 = high + (rng * 1.0)
+            t3 = high + (rng * 1.5)
+        else:
+            # SHORT: цели ниже нижней границы
+            t1 = low - (rng * 0.5)
+            t2 = low - (rng * 1.0)
+            t3 = low - (rng * 1.5)
         
-        # Если это SHORT (инвертируем логику если нужно, но обычно Rule 7 для пробоев)
-        # В нашем случае мы принимаем high/low как границы паттерна.
         return {
             "Цель 1 (0.5x)": round(t1, 4),
             "Цель 2 (1.0x)": round(t2, 4),

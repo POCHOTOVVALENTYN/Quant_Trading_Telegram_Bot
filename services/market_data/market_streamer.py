@@ -154,8 +154,10 @@ class MarketDataService:
         
         tasks = []
         for sym in self.symbols:
-            # Запуск orderbook
-            # tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
+            # L2: Orderbook стрим для AI-фильтра (только прод — тестнет не поддерживает)
+            from config.settings import settings
+            if not settings.testnet:
+                tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
             await asyncio.sleep(0.05) # Плавная пауза
             
             # Запуск OHLCV по всем таймфреймам
@@ -182,7 +184,6 @@ class MarketDataService:
             for sym, last_time in list(self.last_candle_time.items()):
                 if now - last_time > 120:  # 120 секунд без новых данных
                     app_logger.warning(f"⚠️ [WATCHDOG] Нет данных по {sym} более 2 минут! Очищаю кэш сокетов CCXT.")
-                    # В CCXT Pro можно сбросить кэш подключений, чтобы форсировать реконнект
                     try:
                         url = self.exchange.urls['api']['ws']['future']
                         if url in self.exchange.clients:
@@ -191,11 +192,10 @@ class MarketDataService:
                             del self.exchange.clients[url]
                     except Exception as e:
                         app_logger.error(f"Watchdog error: {e}")
-                
-            # Обновляем время, чтобы не спамить
-            self.last_candle_time[sym] = now
+                    # Сбрасываем время ТОЛЬКО для зависшего символа, чтобы не спамить (K1)
+                    self.last_candle_time[sym] = now
             
-            await asyncio.sleep(30) # Проверяем каждые 30 секунд (Баг 7.1)
+            await asyncio.sleep(30)
 
     async def stop(self):
         self.running = False

@@ -3,7 +3,7 @@ import pandas as pd
 import traceback
 from typing import Dict, Any, List, Optional
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
 
 from config.settings import settings
@@ -15,11 +15,12 @@ from core.strategies.strategies import (
     StrategyDonchian, StrategyMomentum, StrategyPullback, 
     StrategyVolContraction, StrategyRangeExpansion, 
     StrategyOpeningRange, StrategyWideRangeReversal,
-    StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, StrategyFundingSqueeze, get_timeframe_seconds
+    StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, StrategyFundingSqueeze, 
+    StrategyWilliamsR, get_timeframe_seconds
 )
 from core.indicators.indicators import (
     calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma,
-    calculate_ema, calculate_adx
+    calculate_ema, calculate_adx, calculate_williams_r, calculate_vwap
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
@@ -53,7 +54,8 @@ class TradingOrchestrator:
             StrategyWideRangeReversal(),
             StrategyBollingerClusters(bb_period=40, rsi_limit=60, min_cluster=3),
             StrategyTripleSMA(fast=9, medium=30, slow=60),
-            StrategyFundingSqueeze()
+            StrategyFundingSqueeze(),
+            StrategyWilliamsR()  # Фаза 3 (U5): Williams %R Mean-Reversion
         ]
         
         self.scorer = SignalScorer()
@@ -247,9 +249,10 @@ class TradingOrchestrator:
                             continue
 
                     # 3.3 Проверка лимита позиций (ПРЯМОЙ запрос к RiskManager)
-                    balance, drawdown, open_trades = await self.execution.get_account_metrics()
-                    if open_trades >= self.risk_manager.max_open_trades:
-                        logger.warning(f"Лимит позиций достигнут ({open_trades} >= {self.risk_manager.max_open_trades})")
+                    # M1: Сохраняем метрики для повторного использования при исполнении
+                    cached_balance, cached_drawdown, cached_open_trades = await self.execution.get_account_metrics()
+                    if cached_open_trades >= self.risk_manager.max_open_trades:
+                        logger.warning(f"Лимит позиций достигнут ({cached_open_trades} >= {self.risk_manager.max_open_trades})")
                         # Уведомление в TG (раз в 15 минут, чтобы не спамить)
                         now = time.time()
                         if not hasattr(self, '_last_limit_notify') or (now - self._last_limit_notify) > 900:
@@ -257,12 +260,17 @@ class TradingOrchestrator:
                             await send_telegram_msg(
                                 f"⚠️ **ВХОД ПРОПУЩЕН**\n\n"
                                 f"Символ: {symbol}\n"
-                                f"Причина: Достигнут лимит позиций ({open_trades}/{self.risk_manager.max_open_trades})\n"
+                                f"Причина: Достигнут лимит позиций ({cached_open_trades}/{self.risk_manager.max_open_trades})\n"
                                 f"Закройте одну из открытых позиций, чтобы открыть новую."
                             )
                         return # Прекращаем обработку символа
 
-                    # 3.4 Проверка Funding Rate (Защита от списаний)
+                    # 3.4 R3: Корреляционный фильтр (не открывать 3+ лонга на BTC/ETH/SOL)
+                    if not self.risk_manager.check_correlation_limit(symbol, signal['signal'], self.execution.active_trades):
+                        logger.info(f"🔗 [{symbol}] Корреляционный лимит: слишком много {signal['signal']} в группе")
+                        continue
+
+                    # 3.5 Проверка Funding Rate (Защита от списаний)
                     fr = self.funding_rates.get(symbol, 0.0)
                     if abs(fr) > settings.max_funding_rate:
                         logger.warning(f"Слишком высокий Funding Rate для {symbol}: {fr*100:.4f}% > {settings.max_funding_rate*100:.2f}%")
@@ -299,7 +307,7 @@ class TradingOrchestrator:
                     lookback_p = df.tail(20)
                     pattern_high = lookback_p['high'].max()
                     pattern_low = lookback_p['low'].min()
-                    targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low)
+                    targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low, signal['signal'])
                     sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], df['atr'].iloc[-1], signal['signal'])
                     # Берем первую цель из Rule of 7 как основной TP для индикации
                     tp = next(iter(targets.values())) if targets else signal['entry_price'] * (1.05 if signal['signal'] == "LONG" else 0.95)
@@ -338,7 +346,6 @@ class TradingOrchestrator:
                         enrich_signal["id"] = new_sig_model.id
 
                     # 7.5 Формирование премиум-визуала сигнала (Запрос пользователя)
-                    from datetime import datetime, timezone
                     now_utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
                     dir_emoji = "🟢 LONG" if enrich_signal['signal'] == "LONG" else "🔴 SHORT"
                     
@@ -361,11 +368,10 @@ class TradingOrchestrator:
                     # Отправляем уведомление
                     await send_telegram_msg(status_msg)
 
-                    # 8. Исполнение
+                    # 8. Исполнение (M1: переиспользуем метрики из шага 3.3)
                     if settings.is_trading_enabled:
-                        balance, drawdown, open_trades = await self.execution.get_account_metrics()
                         asyncio.create_task(
-                            self.execution.execute_signal(enrich_signal, balance, drawdown, open_trades)
+                            self.execution.execute_signal(enrich_signal, cached_balance, cached_drawdown, cached_open_trades)
                         )
                     else:
                         logger.info(f"Трейдинг отключен (is_trading_enabled=False). Сигнал {symbol} сохранен, но не исполнен.")
@@ -416,11 +422,15 @@ class TradingOrchestrator:
         # Кластерная сила
         df['CSI'] = calculate_csi(df, atr_period=14)
         
-        # --- НОВОЕ: Тренд-фильтр ADX ---
+        # Тренд-фильтр ADX
         adx_df = calculate_adx(df, period=14)
         df['adx'] = adx_df['adx']
         df['+di'] = adx_df['+di']
         df['-di'] = adx_df['-di']
+        
+        # Фаза 3: Williams %R (из статьи xcritical) и VWAP
+        df['williams_r'] = calculate_williams_r(df, period=14)
+        df['vwap'] = calculate_vwap(df)
         
         return df
 
