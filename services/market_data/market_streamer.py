@@ -45,9 +45,11 @@ class MarketDataService:
 
     async def watch_ohlcv(self, symbol: str, timeframe: str):
         app_logger.info(f"Начало отслеживания OHLCV для {symbol} ({timeframe})")
+        reconnect_backoff = 1.0
         while self.running:
             try:
                 candles = await self.exchange.watch_ohlcv(symbol, timeframe)
+                reconnect_backoff = 1.0
                 self.last_candle_time[symbol] = asyncio.get_event_loop().time()
                 if not candles or len(candles) == 0:
                     await asyncio.sleep(1) # Страховка от беск. цикла при пустых данных
@@ -57,7 +59,25 @@ class MarketDataService:
                     await cb("ohlcv", symbol, timeframe, candles[-1])
             except Exception as e:
                 app_logger.error(f"Ошибка WebSocket (OHLCV {symbol}): {str(e)}")
-                await asyncio.sleep(5)
+                # Жесткий reconnect с экспоненциальным backoff и очисткой WS-клиента.
+                try:
+                    target_urls = []
+                    if hasattr(self.exchange, "urls"):
+                        ws_api = self.exchange.urls.get("api", {}).get("ws", {}).get("future")
+                        ws_test = self.exchange.urls.get("test", {}).get("ws", {}).get("future")
+                        if ws_api:
+                            target_urls.append(ws_api)
+                        if ws_test and ws_test not in target_urls:
+                            target_urls.append(ws_test)
+                    for u in target_urls:
+                        if u in getattr(self.exchange, "clients", {}):
+                            client = self.exchange.clients[u]
+                            await client.close()
+                            del self.exchange.clients[u]
+                except Exception as close_err:
+                    app_logger.debug(f"WS reconnect cleanup error ({symbol}/{timeframe}): {close_err}")
+                await asyncio.sleep(reconnect_backoff)
+                reconnect_backoff = min(reconnect_backoff * 2.0, 20.0)
                 # ccxtpro handles fallback under the hood to REST if WS drops, 
                 # but we can explicitly call fetch_ohlcv if needed.
 

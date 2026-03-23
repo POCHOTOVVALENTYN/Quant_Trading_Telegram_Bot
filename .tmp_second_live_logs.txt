@@ -1,0 +1,628 @@
+quant_trading_engine  | 2026-03-23 13:17:39 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 50/80
+quant_trading_engine  | 2026-03-23 13:17:40 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 55/80
+quant_trading_engine  | 2026-03-23 13:17:41 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 60/80
+quant_trading_engine  | 2026-03-23 13:17:43 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 65/80
+quant_trading_engine  | 2026-03-23 13:17:45 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 70/80
+quant_trading_engine  | 2026-03-23 13:17:46 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 75/80
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 80/80
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.signal_engine.engine:_prefetch_history:123 - ✅ Загружена история для 80 инструментов.
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:start:153 - MarketDataService успешно запущен
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:51 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Momentum ATR ПРОПУЩЕН: устарел на 1071с
+quant_trading_engine  | 2026-03-23 13:17:51 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Pullback ПРОПУЩЕН: устарел на 1071с
+quant_trading_engine  | 2026-03-23 13:17:51 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Range Expansion ПРОПУЩЕН: устарел на 1071с
+quant_trading_engine  | 2026-03-23 13:17:51 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:51 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:51 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:51 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Opening Range ПРОПУЩЕН: устарел на 4671с
+quant_trading_engine  | 2026-03-23 13:17:51 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:51 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Pullback ПРОПУЩЕН: устарел на 171с
+quant_trading_engine  | 2026-03-23 13:17:51 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Opening Range ПРОПУЩЕН: устарел на 171с
+quant_trading_engine  | 2026-03-23 13:17:52 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:52 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:52 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:52 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:52 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:52 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Momentum ATR ПРОПУЩЕН: устарел на 172с
+quant_trading_engine  | 2026-03-23 13:17:53 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Range Expansion ПРОПУЩЕН: устарел на 1073с
+quant_trading_engine  | INFO:     149.154.166.110:28396 - "GET /api/v1/status HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:17:53 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:53 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:53 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:54 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:54 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BTC/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:17:54 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:55 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Opening Range ПРОПУЩЕН: устарел на 175с
+quant_trading_engine  | 2026-03-23 13:17:55 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Momentum ATR ПРОПУЩЕН: устарел на 175с
+quant_trading_engine  | 2026-03-23 13:17:55 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [ETH/USDT] Scorer отклонил Donchian: 0.42 < 0.65
+quant_trading_engine  | 2026-03-23 13:17:55 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:55 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:56 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Range Expansion ПРОПУЩЕН: устарел на 1076с
+quant_trading_engine  | 2026-03-23 13:17:56 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:56 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:57 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Williams R ПРОПУЩЕН: устарел на 4677с
+quant_trading_engine  | 2026-03-23 13:17:57 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:17:57 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [SOL/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:17:57 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:17:58 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BNB/USDT] Тренд слишком слабый (ADX 15m=17.59 < 20). Пропускаю Pullback
+quant_trading_engine  | 2026-03-23 13:17:58 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:17:58 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:17:59 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Momentum ATR ПРОПУЩЕН: устарел на 179с
+quant_trading_engine  | 2026-03-23 13:17:59 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Williams R ПРОПУЩЕН: устарел на 179с
+quant_trading_engine  | 2026-03-23 13:17:59 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:17:59 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:18:00 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:18:00 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:18:01 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [SOL/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:18:01 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BNB/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:18:02 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Pullback ПРОПУЩЕН: устарел на 1082с
+quant_trading_engine  | 2026-03-23 13:18:02 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Range Expansion ПРОПУЩЕН: устарел на 1082с
+quant_trading_engine  | 2026-03-23 13:18:02 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Opening Range ПРОПУЩЕН: устарел на 4682с
+quant_trading_engine  | 2026-03-23 13:18:02 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:18:02 | INFO     | api.rest.main:get_active_trades:449 - 📊 [DEBUG] Запрос цен для: ['SOL/USDT']
+quant_trading_engine  | 2026-03-23 13:18:02 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:18:03 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [XRP/USDT] Тренд слишком слабый (ADX 15m=13.56 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:18:03 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:18:03 | INFO     | api.rest.main:get_active_trades:452 - 📊 [DEBUG] Получено тикеров: ['SOL/USDT:USDT']
+quant_trading_engine  | INFO:     149.154.166.110:20684 - "GET /api/v1/trades HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:18:03 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [XRP/USDT] Тренд слишком слабый (ADX 15m=13.56 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:18:04 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Opening Range ПРОПУЩЕН: устарел на 184с
+quant_trading_engine  | 2026-03-23 13:18:04 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Williams R ПРОПУЩЕН: устарел на 184с
+quant_trading_engine  | 2026-03-23 13:18:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Momentum ATR ПРОПУЩЕН: устарел на 185с
+quant_trading_engine  | 2026-03-23 13:18:05 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:18:05 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:18:05 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:18:07 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:18:07 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:18:09 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Range Expansion ПРОПУЩЕН: устарел на 4689с
+quant_trading_engine  | 2026-03-23 13:18:09 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Williams R ПРОПУЩЕН: устарел на 4689с
+quant_trading_engine  | 2026-03-23 13:18:09 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:18:09 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:18:11 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:18:11 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:18:11 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:18:13 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Opening Range ПРОПУЩЕН: устарел на 193с
+quant_trading_engine  | 2026-03-23 13:18:13 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:18:14 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Momentum ATR ПРОПУЩЕН: устарел на 194с
+quant_trading_engine  | 2026-03-23 13:18:14 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:18:14 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:18:15 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:18:16 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:18:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Range Expansion ПРОПУЩЕН: устарел на 4699с
+quant_trading_engine  | 2026-03-23 13:18:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Opening Range ПРОПУЩЕН: устарел на 4699с
+quant_trading_engine  | 2026-03-23 13:18:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Williams R ПРОПУЩЕН: устарел на 4699с
+quant_trading_engine  | 2026-03-23 13:18:19 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:18:19 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:18:19 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:18:21 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:18:21 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:18:23 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Opening Range ПРОПУЩЕН: устарел на 203с
+quant_trading_engine  | 2026-03-23 13:18:23 | INFO     | services.market_data.market_streamer:fetch_avg_prices:106 - Начало мониторинга Average Prices (5m)
+quant_trading_engine  | 2026-03-23 13:18:23 | INFO     | services.market_data.market_streamer:fetch_funding_rates:91 - Начало проверки Funding Rates
+quant_trading_engine  | 2026-03-23 13:18:23 | INFO     | services.market_data.market_streamer:_watchdog_loop:181 - 🐕 Watchdog запущен
+quant_trading_engine  | 2026-03-23 13:18:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Momentum ATR ПРОПУЩЕН: устарел на 204с
+quant_trading_engine  | 2026-03-23 13:18:29 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Range Expansion ПРОПУЩЕН: устарел на 4709с
+quant_trading_engine  | 2026-03-23 13:18:29 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Williams R ПРОПУЩЕН: устарел на 4709с
+quant_trading_engine  | 2026-03-23 13:18:32 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал TRX/USDT Opening Range ПРОПУЩЕН: устарел на 212с
+quant_trading_engine  | 2026-03-23 13:18:38 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [LINK/USDT] Тренд слишком слабый (ADX 15m=12.66 < 20). Пропускаю Triple EMA Filter
+quant_trading_engine  | 2026-03-23 13:18:39 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Opening Range ПРОПУЩЕН: устарел на 219с
+quant_trading_engine  | 2026-03-23 13:18:40 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [LINK/USDT] Тренд слишком слабый (ADX 15m=12.66 < 20). Пропускаю Triple EMA Filter
+quant_trading_engine  | 2026-03-23 13:18:44 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Momentum ATR ПРОПУЩЕН: устарел на 1124с
+quant_trading_engine  | 2026-03-23 13:18:46 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Range Expansion ПРОПУЩЕН: устарел на 4726с
+quant_trading_engine  | 2026-03-23 13:18:46 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Williams R ПРОПУЩЕН: устарел на 4726с
+quant_trading_engine  | 2026-03-23 13:18:49 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Momentum ATR ПРОПУЩЕН: устарел на 229с
+quant_trading_engine  | 2026-03-23 13:18:49 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Opening Range ПРОПУЩЕН: устарел на 229с
+quant_trading_engine  | 2026-03-23 13:18:53 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Range Expansion ПРОПУЩЕН: устарел на 4733с
+quant_trading_engine  | 2026-03-23 13:18:53 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Williams R ПРОПУЩЕН: устарел на 4733с
+quant_trading_engine  | 2026-03-23 13:18:53 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [TRX/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:18:53 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [LINK/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:18:55 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Opening Range ПРОПУЩЕН: устарел на 235с
+quant_trading_engine  | 2026-03-23 13:18:55 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Williams R ПРОПУЩЕН: устарел на 235с
+quant_trading_engine  | 2026-03-23 13:18:59 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Momentum ATR ПРОПУЩЕН: устарел на 239с
+quant_trading_engine  | 2026-03-23 13:19:03 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BCH/USDT Momentum ATR ПРОПУЩЕН: устарел на 243с
+quant_trading_engine  | 2026-03-23 13:19:03 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BCH/USDT Opening Range ПРОПУЩЕН: устарел на 243с
+quant_trading_engine  | 2026-03-23 13:19:04 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [TRX/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:04 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [TRX/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:04 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [TRX/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:04 | ERROR    | core.execution.engine:_close_position:855 - Error closing SOL/USDT: 'SOL/USDT'
+quant_trading_engine  | 2026-03-23 13:19:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Pullback ПРОПУЩЕН: устарел на 1145с
+quant_trading_engine  | 2026-03-23 13:19:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Range Expansion ПРОПУЩЕН: устарел на 4745с
+quant_trading_engine  | 2026-03-23 13:19:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Williams R ПРОПУЩЕН: устарел на 4745с
+quant_trading_engine  | 2026-03-23 13:19:07 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [LINK/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:08 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:19:08 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BCH/USDT Range Expansion ПРОПУЩЕН: устарел на 1148с
+quant_trading_engine  | 2026-03-23 13:19:12 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | INFO:     149.154.166.110:21065 - "POST /api/v1/trades/close/SOL_USDT HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:19:13 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал UNI/USDT Opening Range ПРОПУЩЕН: устарел на 253с
+quant_trading_engine  | 2026-03-23 13:19:13 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал UNI/USDT Momentum ATR ПРОПУЩЕН: устарел на 253с
+quant_trading_engine  | 2026-03-23 13:19:15 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | INFO:     149.154.166.110:58657 - "GET /api/v1/trades HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:19:16 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BCH/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:20 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал UNI/USDT Range Expansion ПРОПУЩЕН: устарел на 4760с
+quant_trading_engine  | 2026-03-23 13:19:20 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал UNI/USDT Opening Range ПРОПУЩЕН: устарел на 4760с
+quant_trading_engine  | 2026-03-23 13:19:27 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [NEAR/USDT] Тренд слишком слабый (ADX 15m=16.00 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:19:27 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал NEAR/USDT Opening Range ПРОПУЩЕН: устарел на 267с
+quant_trading_engine  | 2026-03-23 13:19:27 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:19:31 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал NEAR/USDT Momentum ATR ПРОПУЩЕН: устарел на 271с
+quant_trading_engine  | 2026-03-23 13:19:32 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал NEAR/USDT Range Expansion ПРОПУЩЕН: устарел на 4772с
+quant_trading_engine  | 2026-03-23 13:19:32 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал NEAR/USDT Opening Range ПРОПУЩЕН: устарел на 4772с
+quant_trading_engine  | 2026-03-23 13:19:35 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:19:35 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал FIL/USDT Opening Range ПРОПУЩЕН: устарел на 275с
+quant_trading_engine  | 2026-03-23 13:19:38 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [DOGE/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:38 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [DOGE/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:19:40 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:19:40 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал FIL/USDT Range Expansion ПРОПУЩЕН: устарел на 4780с
+quant_trading_engine  | 2026-03-23 13:19:40 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал FIL/USDT Momentum ATR ПРОПУЩЕН: устарел на 1180с
+quant_trading_engine  | INFO:     Shutting down
+quant_trading_engine  | INFO:     Started server process [1]
+quant_trading_engine  | INFO:     Waiting for application startup.
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:25 - 🚀 [1/5] Инициализация базы данных...
+quant_trading_engine  | !!!!!!!! APP STARTING !!!!!!!!
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:29 - ✅ База данных готова.
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:49 - ✅ Пользователь ID=1 найден.
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:59 - DEBUG Settings: testnet=True
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:60 - DEBUG Settings: test_api_key_binance=Loaded (ADfQ)
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:61 - DEBUG Settings: api_key_binance=None
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:64 - Используются ТЕСТОВЫЕ API ключи (Binance Testnet)
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:73 - FINAL API Key Selected: ADfQ...pvWY
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:75 - Инициализация клиента Binance API (Testnet: True)...
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:95 - 🚀 WebSocket URL переопределен на: wss://testnet.binancefuture.com/ws-fapi/v1
+quant_trading_engine  | 2026-03-23 13:19:43 | INFO     | api.rest.main:lifespan:97 - API URLs: {'logo': 'https://github.com/user-attachments/assets/e9419b93-ccb0-46aa-9bff-c883f096274b', 'api': {'dapiPublic': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivate': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivateV2': 'https://testnet.binancefuture.com/dapi/v2', 'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3', 'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', 'public': 'https://testnet.binance.vision/api/v3', 'private': 'https://testnet.binance.vision/api/v3', 'v1': 'https://testnet.binance.vision/api/v1', 'ws': {'spot': 'wss://stream.testnet.binance.vision/ws', 'margin': 'wss://stream.testnet.binance.vision/ws', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://dstream.binancefuture.com/ws', 'ws-api': {'spot': 'wss://ws-api.testnet.binance.vision/ws-api/v3', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://testnet.binancefuture.com/ws-dapi/v1'}}}, 'www': 'https://www.binance.com', 'doc': 'https://developers.binance.com/en', 'fees': 'https://www.binance.com/en/fee/schedule', 'test': {'dapiPublic': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivate': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivateV2': 'https://testnet.binancefuture.com/dapi/v2', 'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3', 'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', 'public': 'https://testnet.binance.vision/api/v3', 'private': 'https://testnet.binance.vision/api/v3', 'v1': 'https://testnet.binance.vision/api/v1', 'ws': {'spot': 'wss://stream.testnet.binance.vision/ws', 'margin': 'wss://stream.testnet.binance.vision/ws', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://dstream.binancefuture.com/ws', 'ws-api': {'spot': 'wss://ws-api.testnet.binance.vision/ws-api/v3', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://testnet.binancefuture.com/ws-dapi/v1'}}}, 'referral': {'url': 'https://accounts.binance.com/en/register?ref=D7YA7CLY', 'discount': 0.1}, 'api_management': 'https://www.binance.com/en/usercenter/settings/api-management', 'apiBackup': {'dapiPublic': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivate': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivateV2': 'https://testnet.binancefuture.com/dapi/v2', 'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3', 'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', 'public': 'https://testnet.binance.vision/api/v3', 'private': 'https://testnet.binance.vision/api/v3', 'v1': 'https://testnet.binance.vision/api/v1', 'ws': {'spot': 'wss://stream.testnet.binance.vision/ws', 'margin': 'wss://stream.testnet.binance.vision/ws', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://dstream.binancefuture.com/ws', 'ws-api': {'spot': 'wss://ws-api.testnet.binance.vision/ws-api/v3', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://testnet.binancefuture.com/ws-dapi/v1'}}}}
+quant_trading_engine  | 2026-03-23 13:19:54 | WARNING  | api.rest.main:lifespan:139 - ⚠️ [K2] Символы отсутствуют на бирже и пропущены: ['MATIC/USDT', 'SHIB/USDT', 'ICP/USDT']
+quant_trading_engine  | 2026-03-23 13:19:54 | INFO     | api.rest.main:lifespan:140 - ✅ Валидных символов: 16 из 19
+quant_trading_engine  | 2026-03-23 13:19:54 | INFO     | api.rest.main:lifespan:144 - 🚀 [1/6] Запуск мониторинга 16 монет на 5 ТФ...
+quant_trading_engine  | 2026-03-23 13:19:54 | INFO     | services.market_data.market_streamer:__init__:27 - 🔮 MarketDataService: используем PROD WS для графиков: wss://fstream.binance.com/ws
+quant_trading_engine  | 2026-03-23 13:19:54 | INFO     | core.execution.engine:start:165 - 📡 [EXEC] WebSocket ОРДЕРА: OK
+quant_trading_engine  | 2026-03-23 13:19:54 | INFO     | core.execution.engine:start:169 - 📡 [EXEC] WebSocket ПОЗИЦИИ: OK
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | core.execution.engine:reconcile_full:562 - ✅ [RECONCILE] Активных позиций: 0
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | api.rest.main:lifespan:169 - ✅ Синхронизация ExecutionEngine завершена.
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | api.rest.main:lifespan:190 - 🚀 [4/6] Инициализация Оркестратора...
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | api.rest.main:lifespan:197 - 🚀 [5/5] Запуск Торгового Движка (Orchestrator)...
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | api.rest.main:lifespan:200 - 🎉 Платформа успешно запущена!
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | services.signal_engine.engine:start:86 - Запуск Торгового Движка v2 (10 стратегий + AI Layer)...
+quant_trading_engine  | 2026-03-23 13:19:58 | INFO     | services.signal_engine.engine:_prefetch_history:94 - 💾 Загружаем историю свечей (Throttled Prefetching)...
+quant_trading_engine  | INFO:     Application startup complete.
+quant_trading_engine  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+quant_trading_engine  | 2026-03-23 13:19:59 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 5/80
+quant_trading_engine  | 2026-03-23 13:20:01 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 10/80
+quant_trading_engine  | 2026-03-23 13:20:04 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 15/80
+quant_trading_engine  | 2026-03-23 13:20:06 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 20/80
+quant_trading_engine  | 2026-03-23 13:20:08 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 25/80
+quant_trading_engine  | 2026-03-23 13:20:09 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 30/80
+quant_trading_engine  | 2026-03-23 13:20:11 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 35/80
+quant_trading_engine  | 2026-03-23 13:20:13 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 40/80
+quant_trading_engine  | 2026-03-23 13:20:14 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 45/80
+quant_trading_engine  | 2026-03-23 13:20:16 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 50/80
+quant_trading_engine  | 2026-03-23 13:20:17 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 55/80
+quant_trading_engine  | 2026-03-23 13:20:19 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 60/80
+quant_trading_engine  | INFO:     149.154.166.110:35721 - "GET /api/v1/status HTTP/1.1" 200 OK
+quant_trading_engine  | INFO:     149.154.166.110:34977 - "GET /api/v1/trades HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:20:20 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 65/80
+quant_trading_engine  | 2026-03-23 13:20:22 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 70/80
+quant_trading_engine  | 2026-03-23 13:20:24 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 75/80
+quant_trading_engine  | 2026-03-23 13:20:25 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 80/80
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.signal_engine.engine:_prefetch_history:123 - ✅ Загружена история для 80 инструментов.
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:start:153 - MarketDataService успешно запущен
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:26 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:27 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:28 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:29 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:20:30 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:20:31 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:20:31 | INFO     | services.market_data.market_streamer:fetch_avg_prices:106 - Начало мониторинга Average Prices (5m)
+quant_trading_engine  | 2026-03-23 13:20:31 | INFO     | services.market_data.market_streamer:fetch_funding_rates:91 - Начало проверки Funding Rates
+quant_trading_engine  | 2026-03-23 13:20:31 | INFO     | services.market_data.market_streamer:_watchdog_loop:181 - 🐕 Watchdog запущен
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:36 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:20:51 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ETH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV SOL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BNB/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV XRP/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOGE/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV ADA/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV TRX/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LINK/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV DOT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV LTC/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV BCH/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV UNI/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV NEAR/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV FIL/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:06 | ERROR    | services.market_data.market_streamer:watch_ohlcv:59 - Ошибка WebSocket (OHLCV APT/USDT): Connection timeout
+quant_trading_engine  | 2026-03-23 13:21:18 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Momentum ATR ПРОПУЩЕН: устарел на 378с
+quant_trading_engine  | 2026-03-23 13:21:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Pullback ПРОПУЩЕН: устарел на 1279с
+quant_trading_engine  | 2026-03-23 13:21:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Range Expansion ПРОПУЩЕН: устарел на 1279с
+quant_trading_engine  | 2026-03-23 13:21:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Opening Range ПРОПУЩЕН: устарел на 4879с
+quant_trading_engine  | 2026-03-23 13:21:20 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Momentum ATR ПРОПУЩЕН: устарел на 380с
+quant_trading_engine  | 2026-03-23 13:21:20 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Pullback ПРОПУЩЕН: устарел на 1280с
+quant_trading_engine  | 2026-03-23 13:21:20 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Range Expansion ПРОПУЩЕН: устарел на 1280с
+quant_trading_engine  | 2026-03-23 13:21:21 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BTC/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:21:23 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [ETH/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:21:23 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Momentum ATR ПРОПУЩЕН: устарел на 383с
+quant_trading_engine  | 2026-03-23 13:21:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Pullback ПРОПУЩЕН: устарел на 1284с
+quant_trading_engine  | 2026-03-23 13:21:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Range Expansion ПРОПУЩЕН: устарел на 1284с
+quant_trading_engine  | 2026-03-23 13:21:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Williams R ПРОПУЩЕН: устарел на 4884с
+quant_trading_engine  | 2026-03-23 13:21:25 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [SOL/USDT] Scorer отклонил Opening Range: 0.32 < 0.65
+quant_trading_engine  | INFO:     149.154.166.110:55826 - "GET /api/v1/trades HTTP/1.1" 200 OK
+quant_trading_engine  | INFO:     149.154.166.110:28175 - "GET /api/v1/status HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:21:27 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Momentum ATR ПРОПУЩЕН: устарел на 1287с
+quant_trading_engine  | 2026-03-23 13:21:27 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Pullback ПРОПУЩЕН: устарел на 1287с
+quant_trading_engine  | 2026-03-23 13:21:27 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Range Expansion ПРОПУЩЕН: устарел на 1287с
+quant_trading_engine  | 2026-03-23 13:21:29 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Opening Range ПРОПУЩЕН: устарел на 4889с
+quant_trading_engine  | 2026-03-23 13:21:29 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BNB/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:21:32 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Momentum ATR ПРОПУЩЕН: устарел на 392с
+quant_trading_engine  | 2026-03-23 13:21:36 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Range Expansion ПРОПУЩЕН: устарел на 4896с
+quant_trading_engine  | 2026-03-23 13:21:36 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Williams R ПРОПУЩЕН: устарел на 4896с
+quant_trading_engine  | 2026-03-23 13:21:36 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [DOGE/USDT] Тренд слишком слабый (ADX 15m=12.77 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:21:37 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [XRP/USDT] Scorer отклонил Opening Range: 0.34 < 0.65
+quant_trading_engine  | 2026-03-23 13:21:38 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [DOGE/USDT] Тренд слишком слабый (ADX 15m=12.77 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:21:40 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [DOGE/USDT] Тренд слишком слабый (ADX 15m=12.77 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:21:41 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Momentum ATR ПРОПУЩЕН: устарел на 401с
+quant_trading_engine  | 2026-03-23 13:21:45 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Range Expansion ПРОПУЩЕН: устарел на 4905с
+quant_trading_engine  | 2026-03-23 13:21:45 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Opening Range ПРОПУЩЕН: устарел на 4905с
+quant_trading_engine  | 2026-03-23 13:21:45 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Williams R ПРОПУЩЕН: устарел на 4905с
+quant_trading_engine  | 2026-03-23 13:21:47 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [DOGE/USDT] Scorer отклонил Opening Range: 0.33 < 0.65
+quant_trading_engine  | 2026-03-23 13:21:49 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Momentum ATR ПРОПУЩЕН: устарел на 409с
+quant_trading_engine  | 2026-03-23 13:21:53 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Range Expansion ПРОПУЩЕН: устарел на 4913с
+quant_trading_engine  | 2026-03-23 13:21:53 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Williams R ПРОПУЩЕН: устарел на 4913с
+quant_trading_engine  | 2026-03-23 13:22:01 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [LINK/USDT] Тренд слишком слабый (ADX 15m=17.16 < 20). Пропускаю Pullback
+quant_trading_engine  | 2026-03-23 13:22:03 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Opening Range ПРОПУЩЕН: устарел на 123с
+quant_trading_engine  | 2026-03-23 13:22:04 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Momentum ATR ПРОПУЩЕН: устарел на 424с
+quant_trading_engine  | 2026-03-23 13:22:09 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Range Expansion ПРОПУЩЕН: устарел на 4929с
+quant_trading_engine  | 2026-03-23 13:22:09 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Williams R ПРОПУЩЕН: устарел на 4929с
+quant_trading_engine  | 2026-03-23 13:22:11 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Opening Range ПРОПУЩЕН: устарел на 131с
+quant_trading_engine  | 2026-03-23 13:22:11 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [ADA/USDT] Scorer отклонил Opening Range: 0.31 < 0.65
+quant_trading_engine  | 2026-03-23 13:22:13 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [TRX/USDT] Scorer отклонил Opening Range: 0.52 < 0.65
+quant_trading_engine  | 2026-03-23 13:22:13 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [XRP/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:16 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Range Expansion ПРОПУЩЕН: устарел на 4936с
+quant_trading_engine  | 2026-03-23 13:22:16 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Williams R ПРОПУЩЕН: устарел на 4936с
+quant_trading_engine  | 2026-03-23 13:22:16 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOT/USDT Momentum ATR ПРОПУЩЕН: устарел на 1336с
+quant_trading_engine  | 2026-03-23 13:22:16 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [DOGE/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:16 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [DOGE/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:16 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [LINK/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:16 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BTC/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:16 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BTC/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:17 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [ETH/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:17 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [ETH/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:17 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [SOL/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:19 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Opening Range ПРОПУЩЕН: устарел на 139с
+quant_trading_engine  | INFO:     149.154.166.110:50020 - "GET /api/v1/trades HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:22:20 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [TRX/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:21 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Momentum ATR ПРОПУЩЕН: устарел на 1341с
+quant_trading_engine  | 2026-03-23 13:22:21 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Pullback ПРОПУЩЕН: устарел на 1341с
+quant_trading_engine  | 2026-03-23 13:22:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Range Expansion ПРОПУЩЕН: устарел на 4944с
+quant_trading_engine  | 2026-03-23 13:22:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LTC/USDT Williams R ПРОПУЩЕН: устарел на 4944с
+quant_trading_engine  | 2026-03-23 13:22:24 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [TRX/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:22:26 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BCH/USDT Momentum ATR ПРОПУЩЕН: устарел на 146с
+quant_trading_engine  | 2026-03-23 13:22:26 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BCH/USDT Opening Range ПРОПУЩЕН: устарел на 146с
+quant_trading_engine  | 2026-03-23 13:22:30 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:22:30 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BCH/USDT Range Expansion ПРОПУЩЕН: устарел на 1350с
+quant_trading_engine  | 2026-03-23 13:22:34 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:22:36 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал UNI/USDT Opening Range ПРОПУЩЕН: устарел на 156с

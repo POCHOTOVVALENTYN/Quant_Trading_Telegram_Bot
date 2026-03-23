@@ -43,6 +43,7 @@ class ExecutionEngine:
         self._METRICS_CACHE_TTL: float = 30.0
         self._last_ws_reconcile_ts: float = 0.0
         self._entry_policy_activated: bool = False
+        self._rescue_cooldown_until: Dict[str, float] = {}
 
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self._symbol_locks:
@@ -79,6 +80,37 @@ class ExecutionEngine:
                 pass
             logger.warning(f"⏱ [TIME_SYNC] Retry after -1021 ({ctx})")
             return await op()
+
+    async def _prepare_private_ops(self, ctx: str = ""):
+        """Preflight sync для серии приватных запросов."""
+        try:
+            await self.exchange.load_time_difference()
+        except Exception as e:
+            logger.warning(f"⚠️ [TIME_SYNC] Preflight failed ({ctx}): {e}")
+
+    async def _get_reference_price(self, symbol: str) -> Optional[float]:
+        """Mark/last цена для safety-check защитных триггеров."""
+        try:
+            t = await self._with_time_sync_retry(
+                lambda: self.exchange.fetch_ticker(symbol),
+                ctx=f"fetch_ticker({symbol})"
+            )
+            px = t.get("mark") or t.get("last") or t.get("close")
+            return float(px) if px else None
+        except Exception:
+            return None
+
+    def _is_valid_stop_side(self, trigger: float, reference: float, side: str) -> bool:
+        """
+        side = BUY/LONG -> stop ниже рынка
+        side = SELL/SHORT -> stop выше рынка
+        """
+        s = (side or "").upper()
+        if s in ("BUY", "LONG"):
+            return trigger < reference
+        if s in ("SELL", "SHORT"):
+            return trigger > reference
+        return False
 
     def _classify_protective_order(
         self,
@@ -323,17 +355,56 @@ class ExecutionEngine:
         sl_id, tp_id = None, None
         try:
             side = self._entry_side_to_order_side(side)
+            await self._prepare_private_ops(ctx=f"set_protective_orders({symbol})")
             is_hedge = await self._get_position_mode()
             clean_sym = symbol.replace("/", "").split(":")[0]
             reduce_side = "SELL" if side.upper() == "BUY" else "BUY"
+            ref_price = await self._get_reference_price(symbol)
+
+            # Dedup перед постановкой новой защиты:
+            # удаляем конфликтующие closePosition/GTE ордера того же reduce-side,
+            # чтобы избежать -4130 (existing open stop/tp in direction).
+            try:
+                raw_existing = await self._with_time_sync_retry(
+                    lambda: self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': clean_sym}),
+                    ctx=f"protective_dedup.openAlgoOrders({symbol})"
+                )
+                existing = raw_existing.get("algoOrders", []) if isinstance(raw_existing, dict) else (raw_existing if isinstance(raw_existing, list) else [])
+                for eo in existing:
+                    eo_type = str(eo.get("type", "")).upper()
+                    algo_id = eo.get("algoId")
+                    if not algo_id:
+                        continue
+                    if ("STOP" in eo_type) or ("TAKE_PROFIT" in eo_type):
+                        try:
+                            await self._with_time_sync_retry(
+                                lambda: self.exchange.request(
+                                    'algoOrder', 'fapiPrivate', 'DELETE',
+                                    {'symbol': clean_sym, 'algoId': str(algo_id)}
+                                ),
+                                ctx=f"protective_dedup.cancel({symbol}:{algo_id})"
+                            )
+                        except Exception as cancel_err:
+                            logger.warning(f"⚠️ [PROTECT] Dedup cancel failed {symbol}:{algo_id}: {cancel_err}")
+            except Exception as dedup_err:
+                logger.warning(f"⚠️ [PROTECT] Dedup precheck failed for {symbol}: {dedup_err}")
 
             # 1. STOP LOSS (closePosition=true — закрыть всё)
+            sl_trigger = await self._normalize_price(symbol, sl)
+            if ref_price and not self._is_valid_stop_side(sl_trigger, ref_price, side):
+                # Защита от -2021: корректируем триггер чуть дальше от рынка.
+                eps = max(ref_price * 0.0015, 1e-8)
+                sl_trigger = (ref_price - eps) if side.upper() == "BUY" else (ref_price + eps)
+                sl_trigger = await self._normalize_price(symbol, sl_trigger)
+                logger.warning(
+                    f"⚠️ [PROTECT] Adjust SL trigger for {symbol}: requested={sl:.8f}, ref={ref_price:.8f}, adjusted={sl_trigger:.8f}"
+                )
             sl_p = {
                 "symbol": clean_sym,
                 "side": reduce_side,
                 "algoType": "CONDITIONAL",
                 "type": "STOP_MARKET",
-                "triggerPrice": str(await self._normalize_price(symbol, sl)),
+                "triggerPrice": str(sl_trigger),
                 "closePosition": "true",
                 "workingType": "MARK_PRICE"
             }
@@ -515,19 +586,47 @@ class ExecutionEngine:
 
                 # РЕАНИМАЦИЯ: Если нет SL ИЛИ нет TP - восстанавливаем недостающее
                 if (not sl_id and dbp.stop_loss) or (not tp_id and dbp.take_profit):
-                    logger.warning(f"🛡 [RESCUE] Восстанавливаю защиту для {symbol} (SL: {sl_id}, TP: {tp_id})")
-                    # Пересоздаем оба для гарантии консистентности (Binance закроет дубли по ID если что)
-                    res_sl_id, res_tp_id = await self._set_protective_orders(symbol, "BUY" if is_long else "SELL", contracts, dbp.stop_loss, dbp.take_profit)
-                    if res_sl_id: sl_id = res_sl_id; dbp.sl_order_id = sl_id
-                    if res_tp_id: tp_id = res_tp_id; dbp.tp_order_id = tp_id
-                    await session.commit()
-                    
-                    await send_telegram_msg(
-                        f"🛡 **RESCUE: Восстановление защиты**\n\n"
-                        f"🔸 Символ: {symbol}\n"
-                        f"🎯 TP: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}\n"
-                        f"✅ Защитные ордера успешно выставлены на бирже."
-                    )
+                    now_ts = time.time()
+                    if now_ts < self._rescue_cooldown_until.get(symbol, 0.0):
+                        logger.warning(f"⏭ [RESCUE] Cooldown active for {symbol}, skip retry.")
+                    else:
+                        live_size, live_side = await self._get_live_position(symbol)
+                        if live_size <= 0 or (live_side and ((is_long and live_side != "LONG") or ((not is_long) and live_side != "SHORT"))):
+                            logger.warning(f"⏭ [RESCUE] Skip for {symbol}: no live position or side mismatch.")
+                            continue
+                        logger.warning(f"🛡 [RESCUE] Восстанавливаю защиту для {symbol} (SL: {sl_id}, TP: {tp_id})")
+                        # Если stop на неправильной стороне, не шлем его в биржу как есть.
+                        safe_stop = dbp.stop_loss
+                        if safe_stop:
+                            invalid_for_side = (is_long and float(safe_stop) >= entry) or ((not is_long) and float(safe_stop) <= entry)
+                            if invalid_for_side:
+                                safe_stop = entry * (0.995 if is_long else 1.005)
+                                logger.warning(f"⚠️ [RESCUE] Adjust stop for {symbol}: {dbp.stop_loss} -> {safe_stop}")
+
+                        # Пересоздаем оба для гарантии консистентности.
+                        res_sl_id, res_tp_id = await self._set_protective_orders(
+                            symbol, "BUY" if is_long else "SELL", contracts, safe_stop, dbp.take_profit
+                        )
+                        if res_sl_id:
+                            sl_id = res_sl_id
+                            dbp.sl_order_id = sl_id
+                            self._rescue_cooldown_until.pop(symbol, None)
+                        else:
+                            # Не спамим RESCUE при невалидных рыночных условиях.
+                            self._rescue_cooldown_until[symbol] = now_ts + 60
+                            logger.warning(f"⏳ [RESCUE] Failed for {symbol}. Set cooldown 60s.")
+                        if res_tp_id:
+                            tp_id = res_tp_id
+                            dbp.tp_order_id = tp_id
+                        await session.commit()
+
+                        if res_sl_id or res_tp_id:
+                            await send_telegram_msg(
+                                f"🛡 **RESCUE: Восстановление защиты**\n\n"
+                                f"🔸 Символ: {symbol}\n"
+                                f"🎯 TP: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}\n"
+                                f"✅ Защитные ордера успешно выставлены на бирже."
+                            )
 
                 # Санити для кеша: для LONG stop < entry, для SHORT stop > entry.
                 cache_stop = found_sl or dbp.stop_loss
@@ -606,6 +705,7 @@ class ExecutionEngine:
                     return
 
             try:
+                await self._prepare_private_ops(ctx=f"execute_signal({symbol})")
                 # 3. Расчет параметров входа
                 entry_price = float(signal_data['entry_price'])
                 stop_price = self.risk_manager.calculate_atr_stop(entry_price, signal_data.get('atr', 100.0), direction)
@@ -626,19 +726,28 @@ class ExecutionEngine:
                 for attempt in range(max_retries):
                     if remaining_size <= 0: break
                     try:
-                        ob = await self.exchange.fetch_order_book(symbol, limit=5)
+                        ob = await self._with_time_sync_retry(
+                            lambda: self.exchange.fetch_order_book(symbol, limit=5),
+                            ctx=f"fetch_order_book({symbol})"
+                        )
                         best_price = ob['bids'][0][0] if side == 'buy' else ob['asks'][0][0]
                         best_price = await self._normalize_price(symbol, best_price)
                         
                         logger.info(f"🕸 [LIMIT CHASE] Попытка {attempt+1}: Лимитка {side} {symbol} по {best_price}")
-                        temp_order = await self.exchange.create_order(
-                            symbol=symbol, type='limit', side=side, amount=remaining_size, price=best_price,
-                            params={'timeInForce': 'GTX', 'postOnly': True}
+                        temp_order = await self._with_time_sync_retry(
+                            lambda: self.exchange.create_order(
+                                symbol=symbol, type='limit', side=side, amount=remaining_size, price=best_price,
+                                params={'timeInForce': 'GTX', 'postOnly': True}
+                            ),
+                            ctx=f"create_limit_entry({symbol})"
                         )
                         
                         await asyncio.sleep(3)
                         
-                        check = await self.exchange.fetch_order(temp_order['id'], symbol)
+                        check = await self._with_time_sync_retry(
+                            lambda: self.exchange.fetch_order(temp_order['id'], symbol),
+                            ctx=f"fetch_order({symbol}:{temp_order['id']})"
+                        )
                         filled_now = float(check.get('filled', 0.0) or 0.0)
                         
                         if check['status'] == 'closed':
@@ -647,7 +756,10 @@ class ExecutionEngine:
                             remaining_size = 0.0
                             break
                         else:
-                            await self.exchange.cancel_order(temp_order['id'], symbol)
+                            await self._with_time_sync_retry(
+                                lambda: self.exchange.cancel_order(temp_order['id'], symbol),
+                                ctx=f"cancel_order({symbol}:{temp_order['id']})"
+                            )
                             if filled_now > 0:
                                 filled_total += filled_now
                                 remaining_size -= filled_now
@@ -660,7 +772,10 @@ class ExecutionEngine:
                 if remaining_size > 0:
                     logger.warning(f"⚡️ [FALLBACK] Добиваем остаток {remaining_size} Market ордером для {symbol}")
                     try:
-                        fallback_order = await self.exchange.create_order(symbol, 'market', side, remaining_size)
+                        fallback_order = await self._with_time_sync_retry(
+                            lambda: self.exchange.create_order(symbol, 'market', side, remaining_size),
+                            ctx=f"create_market_fallback({symbol})"
+                        )
                         if filled_total == 0:
                             entry_exec = float(fallback_order.get("average") or fallback_order.get("price") or entry_price)
                         filled_total += float(fallback_order.get("filled", remaining_size))
@@ -683,7 +798,10 @@ class ExecutionEngine:
                 if not sl_id:
                     # Best practice: не оставлять открытую позицию без стопа.
                     emergency_side = 'sell' if direction.upper() == "LONG" else 'buy'
-                    await self.exchange.create_order(symbol, 'market', emergency_side, lot_size)
+                    await self._with_time_sync_retry(
+                        lambda: self.exchange.create_order(symbol, 'market', emergency_side, lot_size),
+                        ctx=f"emergency_close_no_sl({symbol})"
+                    )
                     async with async_session() as session:
                         await session.execute(
                             update(PositionModel)

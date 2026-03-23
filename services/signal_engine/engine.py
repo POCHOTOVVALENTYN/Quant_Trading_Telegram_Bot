@@ -4,7 +4,7 @@ import traceback
 from typing import Dict, Any, List, Optional
 import time
 from datetime import datetime, timezone
-from collections import deque
+from collections import defaultdict, deque
 
 from config.settings import settings
 from utils.logger import get_signal_logger, app_logger
@@ -72,6 +72,8 @@ class TradingOrchestrator:
         
         # --- НОВОЕ: Кэш дубликатов сигналов для скорости ---
         self._last_signals_cache: Dict[tuple, float] = {}
+        self._stale_signals_count: Dict[str, int] = defaultdict(int)
+        self._stale_signals_last_log_ts: float = 0.0
         
         # Инфраструктура для Spread Momentum (из статьи)
         self.spreader = SpreadMomentumStrategy()
@@ -257,7 +259,20 @@ class TradingOrchestrator:
                     # Сигнал актуален, если мы внутри свечи ИЛИ прошло не более N секунд после её закрытия
                     candle_age = now_ts - candle_ts  # возраст начала свечи
                     if candle_age > (tf_secs + settings.signal_expiry_seconds):
-                        logger.warning(f"⚠️ Сигнал {symbol} {signal['strategy']} ПРОПУЩЕН: устарел на {int(now_ts - (candle_ts+tf_secs))}с")
+                        stale_by = int(now_ts - (candle_ts + tf_secs))
+                        key = f"{symbol}:{signal['strategy']}"
+                        self._stale_signals_count[key] += 1
+                        # Антишум: агрегированный warning не чаще раза в 60с.
+                        if (now_ts - self._stale_signals_last_log_ts) >= 60:
+                            top = sorted(
+                                self._stale_signals_count.items(),
+                                key=lambda kv: kv[1],
+                                reverse=True
+                            )[:5]
+                            summary = ", ".join([f"{k}={v}" for k, v in top]) if top else "no-data"
+                            logger.warning(f"⚠️ Устаревшие сигналы (60с summary): {summary}. Last stale: {key} by {stale_by}s")
+                            self._stale_signals_last_log_ts = now_ts
+                            self._stale_signals_count.clear()
                         continue
 
                     # 3.2 Проверка даты листинга (Защита от новых монет)

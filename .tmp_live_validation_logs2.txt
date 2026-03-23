@@ -1,0 +1,219 @@
+quant_trading_engine  | 2026-03-23 13:08:21 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:21 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Opening Range ПРОПУЩЕН: устарел на 501с
+quant_trading_engine  | 2026-03-23 13:08:22 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [APT/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:08:24 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [APT/USDT] Тренд слишком слабый (ADX 15m=19.53 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Pullback ПРОПУЩЕН: устарел на 504с
+quant_trading_engine  | 2026-03-23 13:08:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Range Expansion ПРОПУЩЕН: устарел на 504с
+quant_trading_engine  | 2026-03-23 13:08:24 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Opening Range ПРОПУЩЕН: устарел на 4104с
+quant_trading_engine  | 2026-03-23 13:08:26 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:26 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Momentum ATR ПРОПУЩЕН: устарел на 206с
+quant_trading_engine  | 2026-03-23 13:08:29 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [APT/USDT] Тренд слишком слабый (ADX 15m=19.53 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:29 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:30 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Range Expansion ПРОПУЩЕН: устарел на 4110с
+quant_trading_engine  | 2026-03-23 13:08:30 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Williams R ПРОПУЩЕН: устарел на 4110с
+quant_trading_engine  | 2026-03-23 13:08:30 | WARNING  | core.execution.engine:_with_time_sync_retry:80 - ⏱ [TIME_SYNC] Retry after -1021 (metrics.fetch_balance)
+quant_trading_engine  | 2026-03-23 13:08:34 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:34 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Opening Range ПРОПУЩЕН: устарел на 214с
+quant_trading_engine  | 2026-03-23 13:08:34 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Momentum ATR ПРОПУЩЕН: устарел на 514с
+quant_trading_engine  | 2026-03-23 13:08:34 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Range Expansion ПРОПУЩЕН: устарел на 4114с
+quant_trading_engine  | 2026-03-23 13:08:34 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Opening Range ПРОПУЩЕН: устарел на 4114с
+quant_trading_engine  | 2026-03-23 13:08:34 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Williams R ПРОПУЩЕН: устарел на 4114с
+quant_trading_engine  | 2026-03-23 13:08:34 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [APT/USDT] Тренд слишком слабый (ADX 15m=19.53 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:40 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:40 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [APT/USDT] Тренд слишком слабый (ADX 15m=19.53 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:42 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Opening Range ПРОПУЩЕН: устарел на 222с
+quant_trading_engine  | 2026-03-23 13:08:42 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Momentum ATR ПРОПУЩЕН: устарел на 522с
+quant_trading_engine  | 2026-03-23 13:08:42 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Range Expansion ПРОПУЩЕН: устарел на 4122с
+quant_trading_engine  | 2026-03-23 13:08:42 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Williams R ПРОПУЩЕН: устарел на 4122с
+quant_trading_engine  | 2026-03-23 13:08:43 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BTC/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:08:44 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал TRX/USDT Opening Range ПРОПУЩЕН: устарел на 224с
+quant_trading_engine  | 2026-03-23 13:08:46 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:46 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [APT/USDT] Тренд слишком слабый (ADX 15m=19.53 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:50 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал LINK/USDT Opening Range ПРОПУЩЕН: устарел на 530с
+quant_trading_engine  | 2026-03-23 13:08:51 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BCH/USDT] Тренд слишком слабый (ADX 15m=14.88 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:08:51 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [APT/USDT] Тренд слишком слабый (ADX 15m=19.53 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | INFO:     Shutting down
+quant_trading_engine  | !!!!!!!! APP STARTING !!!!!!!!
+quant_trading_engine  | INFO:     Started server process [1]
+quant_trading_engine  | INFO:     Waiting for application startup.
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:25 - 🚀 [1/5] Инициализация базы данных...
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:29 - ✅ База данных готова.
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:49 - ✅ Пользователь ID=1 найден.
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:59 - DEBUG Settings: testnet=True
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:60 - DEBUG Settings: test_api_key_binance=Loaded (ADfQ)
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:61 - DEBUG Settings: api_key_binance=None
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:64 - Используются ТЕСТОВЫЕ API ключи (Binance Testnet)
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:73 - FINAL API Key Selected: ADfQ...pvWY
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:75 - Инициализация клиента Binance API (Testnet: True)...
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:95 - 🚀 WebSocket URL переопределен на: wss://testnet.binancefuture.com/ws-fapi/v1
+quant_trading_engine  | 2026-03-23 13:08:55 | INFO     | api.rest.main:lifespan:97 - API URLs: {'logo': 'https://github.com/user-attachments/assets/e9419b93-ccb0-46aa-9bff-c883f096274b', 'api': {'dapiPublic': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivate': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivateV2': 'https://testnet.binancefuture.com/dapi/v2', 'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3', 'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', 'public': 'https://testnet.binance.vision/api/v3', 'private': 'https://testnet.binance.vision/api/v3', 'v1': 'https://testnet.binance.vision/api/v1', 'ws': {'spot': 'wss://stream.testnet.binance.vision/ws', 'margin': 'wss://stream.testnet.binance.vision/ws', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://dstream.binancefuture.com/ws', 'ws-api': {'spot': 'wss://ws-api.testnet.binance.vision/ws-api/v3', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://testnet.binancefuture.com/ws-dapi/v1'}}}, 'www': 'https://www.binance.com', 'doc': 'https://developers.binance.com/en', 'fees': 'https://www.binance.com/en/fee/schedule', 'test': {'dapiPublic': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivate': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivateV2': 'https://testnet.binancefuture.com/dapi/v2', 'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3', 'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', 'public': 'https://testnet.binance.vision/api/v3', 'private': 'https://testnet.binance.vision/api/v3', 'v1': 'https://testnet.binance.vision/api/v1', 'ws': {'spot': 'wss://stream.testnet.binance.vision/ws', 'margin': 'wss://stream.testnet.binance.vision/ws', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://dstream.binancefuture.com/ws', 'ws-api': {'spot': 'wss://ws-api.testnet.binance.vision/ws-api/v3', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://testnet.binancefuture.com/ws-dapi/v1'}}}, 'referral': {'url': 'https://accounts.binance.com/en/register?ref=D7YA7CLY', 'discount': 0.1}, 'api_management': 'https://www.binance.com/en/usercenter/settings/api-management', 'apiBackup': {'dapiPublic': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivate': 'https://testnet.binancefuture.com/dapi/v1', 'dapiPrivateV2': 'https://testnet.binancefuture.com/dapi/v2', 'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3', 'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1', 'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2', 'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3', 'public': 'https://testnet.binance.vision/api/v3', 'private': 'https://testnet.binance.vision/api/v3', 'v1': 'https://testnet.binance.vision/api/v1', 'ws': {'spot': 'wss://stream.testnet.binance.vision/ws', 'margin': 'wss://stream.testnet.binance.vision/ws', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://dstream.binancefuture.com/ws', 'ws-api': {'spot': 'wss://ws-api.testnet.binance.vision/ws-api/v3', 'future': 'wss://testnet.binancefuture.com/ws-fapi/v1', 'delivery': 'wss://testnet.binancefuture.com/ws-dapi/v1'}}}}
+quant_trading_engine  | 2026-03-23 13:09:08 | WARNING  | api.rest.main:lifespan:139 - ⚠️ [K2] Символы отсутствуют на бирже и пропущены: ['MATIC/USDT', 'SHIB/USDT', 'ICP/USDT']
+quant_trading_engine  | 2026-03-23 13:09:08 | INFO     | api.rest.main:lifespan:140 - ✅ Валидных символов: 16 из 19
+quant_trading_engine  | 2026-03-23 13:09:08 | INFO     | api.rest.main:lifespan:144 - 🚀 [1/6] Запуск мониторинга 16 монет на 5 ТФ...
+quant_trading_engine  | 2026-03-23 13:09:08 | INFO     | services.market_data.market_streamer:__init__:27 - 🔮 MarketDataService: используем PROD WS для графиков: wss://fstream.binance.com/ws
+quant_trading_engine  | 2026-03-23 13:09:08 | INFO     | core.execution.engine:start:165 - 📡 [EXEC] WebSocket ОРДЕРА: OK
+quant_trading_engine  | 2026-03-23 13:09:08 | INFO     | core.execution.engine:start:169 - 📡 [EXEC] WebSocket ПОЗИЦИИ: OK
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | core.execution.engine:reconcile_full:562 - ✅ [RECONCILE] Активных позиций: 0
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | api.rest.main:lifespan:169 - ✅ Синхронизация ExecutionEngine завершена.
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | api.rest.main:lifespan:190 - 🚀 [4/6] Инициализация Оркестратора...
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | api.rest.main:lifespan:197 - 🚀 [5/5] Запуск Торгового Движка (Orchestrator)...
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | api.rest.main:lifespan:200 - 🎉 Платформа успешно запущена!
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | services.signal_engine.engine:start:86 - Запуск Торгового Движка v2 (10 стратегий + AI Layer)...
+quant_trading_engine  | 2026-03-23 13:09:12 | INFO     | services.signal_engine.engine:_prefetch_history:94 - 💾 Загружаем историю свечей (Throttled Prefetching)...
+quant_trading_engine  | INFO:     Application startup complete.
+quant_trading_engine  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+quant_trading_engine  | 2026-03-23 13:09:14 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 5/80
+quant_trading_engine  | 2026-03-23 13:09:15 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 10/80
+quant_trading_engine  | 2026-03-23 13:09:17 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 15/80
+quant_trading_engine  | 2026-03-23 13:09:19 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 20/80
+quant_trading_engine  | 2026-03-23 13:09:20 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 25/80
+quant_trading_engine  | 2026-03-23 13:09:21 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 30/80
+quant_trading_engine  | 2026-03-23 13:09:23 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 35/80
+quant_trading_engine  | 2026-03-23 13:09:24 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 40/80
+quant_trading_engine  | 2026-03-23 13:09:25 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 45/80
+quant_trading_engine  | 2026-03-23 13:09:27 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 50/80
+quant_trading_engine  | 2026-03-23 13:09:28 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 55/80
+quant_trading_engine  | 2026-03-23 13:09:30 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 60/80
+quant_trading_engine  | 2026-03-23 13:09:32 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 65/80
+quant_trading_engine  | 2026-03-23 13:09:33 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 70/80
+quant_trading_engine  | 2026-03-23 13:09:34 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 75/80
+quant_trading_engine  | 2026-03-23 13:09:35 | INFO     | core.execution.engine:execute_signal:592 - ✅ Новые правила входа активированы: max_open_trades=3, margin_per_trade=5%, pyramiding=OFF
+quant_trading_engine  | 2026-03-23 13:09:35 | INFO     | core.execution.engine:execute_signal:603 - ⏭ [BTC/USDT] Сигнал -1 уже обрабатывается или исполнен.
+quant_trading_engine  | INFO:     149.154.166.110:32604 - "POST /api/v1/debug/open-test-position?symbol=BTC_USDT&side=LONG&timeframe=5m HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:09:37 | INFO     | services.signal_engine.engine:sem_fetch:110 - ⏳ Прогресс загрузки истории: 80/80
+quant_trading_engine  | 2026-03-23 13:09:37 | INFO     | services.signal_engine.engine:_prefetch_history:123 - ✅ Загружена история для 80 инструментов.
+quant_trading_engine  | 2026-03-23 13:09:37 | INFO     | services.market_data.market_streamer:start:153 - MarketDataService успешно запущен
+quant_trading_engine  | 2026-03-23 13:09:37 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:37 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:37 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BTC/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ETH/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для SOL/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:38 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BNB/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [BTC/USDT] Тренд слишком слабый (ADX 15m=19.80 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:09:39 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Opening Range ПРОПУЩЕН: устарел на 279с
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:39 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для XRP/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:40 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:40 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:40 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:40 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Pullback ПРОПУЩЕН: устарел на 580с
+quant_trading_engine  | 2026-03-23 13:09:40 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Range Expansion ПРОПУЩЕН: устарел на 580с
+quant_trading_engine  | 2026-03-23 13:09:40 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:40 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOGE/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:41 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BTC/USDT Opening Range ПРОПУЩЕН: устарел на 4181с
+quant_trading_engine  | 2026-03-23 13:09:41 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:41 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:41 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Momentum ATR ПРОПУЩЕН: устарел на 281с
+quant_trading_engine  | 2026-03-23 13:09:41 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Opening Range ПРОПУЩЕН: устарел на 281с
+quant_trading_engine  | 2026-03-23 13:09:41 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:41 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BTC/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:09:41 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:41 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для ADA/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:42 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:42 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:42 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ETH/USDT Range Expansion ПРОПУЩЕН: устарел на 582с
+quant_trading_engine  | 2026-03-23 13:09:43 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:43 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:43 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для TRX/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:43 | INFO     | services.signal_engine.engine:_process_ohlcv:309 - СИГНАЛ: Pullback | Score: 0.70 | AI Win Prob: 0.60
+quant_trading_engine  | 2026-03-23 13:09:44 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:44 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Momentum ATR ПРОПУЩЕН: устарел на 284с
+quant_trading_engine  | 2026-03-23 13:09:44 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Opening Range ПРОПУЩЕН: устарел на 284с
+quant_trading_engine  | 2026-03-23 13:09:44 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:44 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:45 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Pullback ПРОПУЩЕН: устарел на 585с
+quant_trading_engine  | 2026-03-23 13:09:45 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Range Expansion ПРОПУЩЕН: устарел на 585с
+quant_trading_engine  | 2026-03-23 13:09:45 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:45 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LINK/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:46 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал SOL/USDT Williams R ПРОПУЩЕН: устарел на 4186с
+quant_trading_engine  | 2026-03-23 13:09:46 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:47 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Momentum ATR ПРОПУЩЕН: устарел на 287с
+quant_trading_engine  | 2026-03-23 13:09:47 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:47 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [SOL/USDT] Scorer отклонил Range Expansion: 0.22 < 0.65
+quant_trading_engine  | 2026-03-23 13:09:47 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:47 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:48 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для DOT/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:49 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:50 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Pullback ПРОПУЩЕН: устарел на 590с
+quant_trading_engine  | 2026-03-23 13:09:50 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Range Expansion ПРОПУЩЕН: устарел на 590с
+quant_trading_engine  | 2026-03-23 13:09:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:50 | INFO     | core.execution.engine:execute_signal:631 - 🕸 [LIMIT CHASE] Попытка 1: Лимитка buy ETH/USDT по 2143.49
+quant_trading_engine  | 2026-03-23 13:09:50 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:50 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал BNB/USDT Opening Range ПРОПУЩЕН: устарел на 4190с
+quant_trading_engine  | 2026-03-23 13:09:51 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [XRP/USDT] Тренд слишком слабый (ADX 15m=19.08 < 20). Пропускаю Pullback
+quant_trading_engine  | 2026-03-23 13:09:51 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:51 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [BNB/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:09:51 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для LTC/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:53 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Momentum ATR ПРОПУЩЕН: устарел на 293с
+quant_trading_engine  | 2026-03-23 13:09:53 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:53 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:54 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (15m)
+quant_trading_engine  | INFO:     149.154.166.110:24046 - "POST /api/v1/toggle HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:09:54 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:56 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для BCH/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:09:57 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Range Expansion ПРОПУЩЕН: устарел на 4197с
+quant_trading_engine  | 2026-03-23 13:09:57 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал XRP/USDT Williams R ПРОПУЩЕН: устарел на 4197с
+quant_trading_engine  | 2026-03-23 13:09:57 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:09:57 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:09:59 | INFO     | services.signal_engine.engine:_process_ohlcv:224 - 💤 [DOGE/USDT] Тренд слишком слабый (ADX 15m=16.01 < 20). Пропускаю Momentum ATR
+quant_trading_engine  | 2026-03-23 13:09:59 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:09:59 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [XRP/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:09:59 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:09:59 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для UNI/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:10:00 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Momentum ATR ПРОПУЩЕН: устарел на 600с
+quant_trading_engine  | 2026-03-23 13:10:01 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [XRP/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:10:01 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:10:02 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:10:03 | INFO     | core.execution.engine:execute_signal:631 - 🕸 [LIMIT CHASE] Попытка 2: Лимитка buy ETH/USDT по 2143.49
+quant_trading_engine  | 2026-03-23 13:10:03 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:10:03 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:10:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Range Expansion ПРОПУЩЕН: устарел на 4205с
+quant_trading_engine  | 2026-03-23 13:10:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Opening Range ПРОПУЩЕН: устарел на 4205с
+quant_trading_engine  | 2026-03-23 13:10:05 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал DOGE/USDT Williams R ПРОПУЩЕН: устарел на 4205с
+quant_trading_engine  | 2026-03-23 13:10:05 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для NEAR/USDT (4h)
+quant_trading_engine  | INFO:     149.154.166.110:22584 - "POST /api/v1/toggle HTTP/1.1" 200 OK
+quant_trading_engine  | 2026-03-23 13:10:07 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:10:07 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:10:08 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:10:09 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:10:09 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для FIL/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:10:10 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Momentum ATR ПРОПУЩЕН: устарел на 610с
+quant_trading_engine  | 2026-03-23 13:10:10 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (1m)
+quant_trading_engine  | 2026-03-23 13:10:10 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (5m)
+quant_trading_engine  | 2026-03-23 13:10:12 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Range Expansion ПРОПУЩЕН: устарел на 4212с
+quant_trading_engine  | 2026-03-23 13:10:12 | WARNING  | services.signal_engine.engine:_process_ohlcv:249 - ⚠️ Сигнал ADA/USDT Williams R ПРОПУЩЕН: устарел на 4212с
+quant_trading_engine  | 2026-03-23 13:10:12 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (15m)
+quant_trading_engine  | 2026-03-23 13:10:12 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [SOL/USDT] Scorer отклонил Williams R: 0.35 < 0.65
+quant_trading_engine  | 2026-03-23 13:10:12 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [XRP/USDT] Scorer отклонил Williams R: 0.15 < 0.65
+quant_trading_engine  | 2026-03-23 13:10:12 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (1h)
+quant_trading_engine  | 2026-03-23 13:10:14 | INFO     | services.market_data.market_streamer:watch_ohlcv:47 - Начало отслеживания OHLCV для APT/USDT (4h)
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [DOGE/USDT] Scorer отклонил Williams R: 0.15 < 0.65
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.signal_engine.engine:_process_ohlcv:309 - СИГНАЛ: Donchian | Score: 0.73 | AI Win Prob: 0.59
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.signal_engine.engine:_process_ohlcv:313 - 🤖 [SOL/USDT] AI отклонил Donchian: Prob 0.59 < 0.60
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.signal_engine.engine:_process_ohlcv:309 - СИГНАЛ: Momentum ATR | Score: 0.73 | AI Win Prob: 0.59
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.signal_engine.engine:_process_ohlcv:313 - 🤖 [SOL/USDT] AI отклонил Momentum ATR: Prob 0.59 < 0.60
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [DOGE/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.market_data.market_streamer:fetch_avg_prices:106 - Начало мониторинга Average Prices (5m)
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.market_data.market_streamer:fetch_funding_rates:91 - Начало проверки Funding Rates
+quant_trading_engine  | 2026-03-23 13:10:15 | INFO     | services.market_data.market_streamer:_watchdog_loop:181 - 🐕 Watchdog запущен
+quant_trading_engine  | 2026-03-23 13:10:17 | INFO     | services.signal_engine.engine:_process_ohlcv:292 - 💤 [DOGE/USDT] Regime Detection: Низкая волатильность (рынок спит)
+quant_trading_engine  | 2026-03-23 13:10:17 | INFO     | services.signal_engine.engine:_process_ohlcv:298 - 🔍 [ADA/USDT] Scorer отклонил Opening Range: 0.30 < 0.65
+quant_trading_engine  | 2026-03-23 13:10:17 | INFO     | core.execution.engine:execute_signal:603 - ⏭ [BTC/USDT] Сигнал -1 уже обрабатывается или исполнен.
+quant_trading_engine  | INFO:     149.154.166.110:26222 - "POST /api/v1/debug/open-test-position?symbol=BTC_USDT&side=LONG&timeframe=5m HTTP/1.1" 200 OK
