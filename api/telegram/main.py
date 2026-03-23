@@ -1,6 +1,7 @@
 import logging
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, CallbackQueryHandler
+from telegram.error import BadRequest
 import time
 import httpx
 from collections import defaultdict
@@ -12,6 +13,115 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+
+async def _load_runtime_settings(client: httpx.AsyncClient) -> dict:
+    try:
+        response = await client.get(f"{ENGINE_URL}/api/v1/runtime-settings", timeout=5.0)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            data["_runtime_status"] = "OK"
+            return data
+    except Exception as e:
+        logging.warning(f"Runtime settings endpoint unavailable, fallback to local defaults: {e}")
+
+    # Fallback: чтобы меню "Настройки" работало даже если новый REST endpoint ещё не доступен.
+    return {
+        "pyramiding_enabled": settings.pyramiding_enabled,
+        "per_trade_margin_pct": settings.per_trade_margin_pct,
+        "max_open_trades": settings.max_open_trades,
+        "leverage": settings.leverage,
+        "apply_after_flat": settings.apply_new_entry_rules_after_flat,
+        "_runtime_status": "fallback",
+    }
+
+
+async def _safe_answer_callback(query, text: str | None = None, show_alert: bool = False):
+    """
+    Безопасный answerCallbackQuery:
+    - не роняет handler, если callback уже протух/некорректен.
+    """
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+    except BadRequest as e:
+        logging.warning(f"Callback answer skipped: {e}")
+    except Exception as e:
+        logging.warning(f"Callback answer failed: {e}")
+
+
+def _build_settings_menu_text(runtime: dict) -> str:
+    runtime_status = runtime.get("_runtime_status", "fallback")
+    leverage_val = runtime.get("leverage", settings.leverage)
+    return (
+        "⚙️ **ТЕКУЩИЕ НАСТРОЙКИ**\n\n"
+        "🛑 **Stop Loss:**\n"
+        f"🟢 Long: {settings.sl_long_pct*100:.1f}%\n"
+        f"🔴 Short: {settings.sl_short_pct*100:.1f}%\n"
+        f"🛡 Коррекция SL (0.1%): {'✅ Вкл' if settings.sl_correction_enabled else '❌ Выкл'}\n\n"
+        "📊 **Runtime-параметры (без рестарта):**\n"
+        f"🔌 REST runtime: `{runtime_status}`\n"
+        f"⚡ Плечо: {leverage_val}x\n"
+        f"📂 Макс. сделок: {runtime.get('max_open_trades', settings.max_open_trades)}\n"
+        f"💰 Маржа на сделку: {runtime.get('per_trade_margin_pct', settings.per_trade_margin_pct)*100:.1f}%\n"
+        f"💎 Пирамидинг: {'✅ Вкл' if runtime.get('pyramiding_enabled', settings.pyramiding_enabled) else '❌ Выкл'}\n\n"
+        "🎯 **Пресеты риска:**"
+    )
+
+
+def _build_settings_menu_keyboard(runtime: dict, presets: list) -> InlineKeyboardMarkup:
+    buttons = []
+    # Отдельные кнопки runtime-настроек
+    buttons.append([
+        InlineKeyboardButton(
+            f"💎 Пирамидинг: {'ON' if runtime.get('pyramiding_enabled', False) else 'OFF'}",
+            callback_data="rt_toggle_pyramiding",
+        )
+    ])
+    buttons.append([
+        InlineKeyboardButton("💰 Маржа -1%", callback_data="rt_margin_dec"),
+        InlineKeyboardButton("💰 Маржа +1%", callback_data="rt_margin_inc"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("📂 Сделки -1", callback_data="rt_open_trades_dec"),
+        InlineKeyboardButton("📂 Сделки +1", callback_data="rt_open_trades_inc"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("⚡ 10x", callback_data="rt_leverage_10"),
+        InlineKeyboardButton("⚡ 15x", callback_data="rt_leverage_15"),
+        InlineKeyboardButton("⚡ 20x", callback_data="rt_leverage_20"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("⚡ 25x", callback_data="rt_leverage_25"),
+        InlineKeyboardButton("⚡ 50x", callback_data="rt_leverage_50"),
+    ])
+    # Ниже — существующие пресеты
+    for p in presets:
+        label = f"✅ {p['name']}" if p['is_active'] else p['name']
+        buttons.append([InlineKeyboardButton(label, callback_data=f"apply_preset_{p['name']}")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _render_settings_message(message_target, edit: bool = False):
+    timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        presets = []
+        try:
+            presets_resp = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
+            presets_resp.raise_for_status()
+            raw_presets = presets_resp.json()
+            if isinstance(raw_presets, list):
+                presets = raw_presets
+        except Exception as e:
+            logging.warning(f"Presets endpoint unavailable, showing runtime controls only: {e}")
+        runtime = await _load_runtime_settings(client)
+
+    text = _build_settings_menu_text(runtime)
+    keyboard = _build_settings_menu_keyboard(runtime, presets)
+    if edit:
+        await message_target.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
+    else:
+        await message_target.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -118,31 +228,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Система автоматической торговли активирована.")
     elif text == "⚙ Настройки":
         try:
-            async with httpx.AsyncClient() as client:
-                # Получаем список пресетов
-                response = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
-                presets = response.json()
-                
-                settings_text = (
-                    "⚙️ **ТЕКУЩИЕ НАСТРОЙКИ**\n\n"
-                    "🛑 **Stop Loss:**\n"
-                    f"🟢 Long: {settings.sl_long_pct*100:.1f}%\n"
-                    f"🔴 Short: {settings.sl_short_pct*100:.1f}%\n"
-                    f"🛡 Коррекция SL (0.1%): {'✅ Вкл' if settings.sl_correction_enabled else '❌ Выкл'}\n\n"
-                    "📊 **Лимиты:**\n"
-                    f"📂 Макс. позиций: {settings.max_open_positions}\n"
-                    f"⏱ Жизнь сигнала: {settings.signal_expiry_seconds}с\n"
-                    f"🆕 Листинг от: {settings.min_listing_days} дней\n\n"
-                    "🎯 **Выберите пресет риска:**"
-                )
-                
-                # Кнопки пресетов
-                buttons = []
-                for p in presets:
-                    label = f"✅ {p['name']}" if p['is_active'] else p['name']
-                    buttons.append([InlineKeyboardButton(label, callback_data=f"apply_preset_{p['name']}")])
-                
-                await update.message.reply_text(settings_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode='Markdown')
+            await _render_settings_message(update.message, edit=False)
         except Exception as e:
             logging.error(f"Ошибка настроек: {e}")
             await update.message.reply_text("❌ Ошибка при получении настроек.")
@@ -247,7 +333,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Команда не распознана.")
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await _safe_answer_callback(query)
     
     if query.data.startswith("close_"):
         symbol_raw = query.data.replace("close_", "")
@@ -272,16 +358,81 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 response = await client.post(f"{ENGINE_URL}/api/v1/presets/apply/{preset_name}", timeout=5.0)
                 res = response.json()
                 if res.get("status") == "success":
-                    await query.answer(f"✅ Пресет {preset_name} активирован!")
-                    # Можно обновить сообщение, но проще просто уведомить
-                    await query.edit_message_text(f"🎯 Активирован режим: **{preset_name}**\n\nНастройки обновлены в реальном времени.", parse_mode='Markdown')
+                    await _safe_answer_callback(query, f"✅ Пресет {preset_name} активирован!")
+                    await _render_settings_message(query, edit=True)
                 else:
-                    await query.answer(f"❌ Ошибка: {res.get('message')}", show_alert=True)
+                    await _safe_answer_callback(query, f"❌ Ошибка: {res.get('message')}", show_alert=True)
         except Exception as e:
-            await query.answer(f"❌ Ошибка связи: {e}", show_alert=True)
+            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+
+    elif query.data == "rt_toggle_pyramiding":
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/runtime-settings/pyramiding/toggle", timeout=5.0)
+                res = response.json()
+                if res.get("status") == "success":
+                    await _safe_answer_callback(query, "✅ Пирамидинг обновлён")
+                    await _render_settings_message(query, edit=True)
+                else:
+                    await _safe_answer_callback(query, "❌ Ошибка обновления пирамидинга", show_alert=True)
+        except Exception as e:
+            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+
+    elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc"}:
+        try:
+            async with httpx.AsyncClient() as client:
+                runtime = await _load_runtime_settings(client)
+                if query.data.startswith("rt_margin"):
+                    cur = float(runtime.get("per_trade_margin_pct", settings.per_trade_margin_pct))
+                    new_val = cur - 0.01 if query.data.endswith("dec") else cur + 0.01
+                    response = await client.post(
+                        f"{ENGINE_URL}/api/v1/runtime-settings/per-trade-margin",
+                        params={"value": new_val},
+                        timeout=5.0
+                    )
+                    res = response.json()
+                    if res.get("status") == "success":
+                        await _safe_answer_callback(query, f"✅ Маржа: {res.get('per_trade_margin_pct', new_val)*100:.1f}%")
+                        await _render_settings_message(query, edit=True)
+                    else:
+                        await _safe_answer_callback(query, "❌ Не удалось обновить маржу", show_alert=True)
+                else:
+                    cur = int(runtime.get("max_open_trades", settings.max_open_trades))
+                    new_val = cur - 1 if query.data.endswith("dec") else cur + 1
+                    response = await client.post(
+                        f"{ENGINE_URL}/api/v1/runtime-settings/max-open-trades",
+                        params={"value": new_val},
+                        timeout=5.0
+                    )
+                    res = response.json()
+                    if res.get("status") == "success":
+                        await _safe_answer_callback(query, f"✅ Макс. сделок: {res.get('max_open_trades', new_val)}")
+                        await _render_settings_message(query, edit=True)
+                    else:
+                        await _safe_answer_callback(query, "❌ Не удалось обновить лимит сделок", show_alert=True)
+        except Exception as e:
+            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+
+    elif query.data.startswith("rt_leverage_"):
+        try:
+            leverage_value = int(query.data.replace("rt_leverage_", ""))
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{ENGINE_URL}/api/v1/runtime-settings/leverage",
+                    params={"value": leverage_value},
+                    timeout=8.0,
+                )
+                res = response.json()
+                if res.get("status") == "success":
+                    await _safe_answer_callback(query, f"✅ Плечо: {res.get('leverage', leverage_value)}x")
+                    await _render_settings_message(query, edit=True)
+                else:
+                    await _safe_answer_callback(query, f"❌ {res.get('message', 'Не удалось обновить плечо')}", show_alert=True)
+        except Exception as e:
+            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data == "reset_stats":
-        await query.answer("Эта функция будет реализована в следующем обновлении БД.", show_alert=True)
+        await _safe_answer_callback(query, "Эта функция будет реализована в следующем обновлении БД.", show_alert=True)
 
 # ======= ANTI-SPAM & RATE LIMITING (Этап 18) =======
 # Хранилище: {user_id: [timestamp1, timestamp2, ...]}

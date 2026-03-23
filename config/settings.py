@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     signal_expiry_seconds: int = 120  # Защита от старых сигналов (120с)
     min_listing_days: int = 100       # Фильтр новых монет (100 дней)
     max_funding_rate: float = 0.01    # 1% в час (очень высокий)
+    max_open_trades: int = 3          # Новый лимит: не более 3 позиций
+    per_trade_margin_pct: float = 0.05 # 5% маржи на каждую новую позицию
+    apply_new_entry_rules_after_flat: bool = True  # Включать новые правила только после полного закрытия текущих позиций
     
     # Референсные настройки (из скриншотов)
     leverage: int = 10
@@ -47,6 +50,7 @@ class Settings(BaseSettings):
     averaging_step_pct: float = 0.02   # 2%
     averaging_multiplier: float = 1.0  # 1x предыдущего объема
     averaging_max_steps: int = 0       # 0 - выкл
+    pyramiding_enabled: bool = False   # Доливка отключена до отдельного включения
     
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

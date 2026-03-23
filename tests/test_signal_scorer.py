@@ -42,6 +42,27 @@ def test_signal_scorer_trend():
     assert score >= 0.3 # trend contribution
     assert score <= 1.0
 
+def test_signal_scorer_mean_reversion_neutral_trend():
+    """Mean-reversion не штрафуется за отсутствие выравнивания с ema50."""
+    data = []
+    for i in range(60):
+        data.append({
+            "timestamp": i,
+            "open": 100,
+            "high": 120,
+            "low": 80,
+            "close": 100,
+            "volume": 1,
+            "atr": 1,
+            "ema50": 110.0,
+        })
+    data[-1]["close"] = 105  # LONG ниже ema50 — для трендового сетапа trend_score был бы 0
+    df = pd.DataFrame(data)
+    ss = SignalScorer()
+    trend_only = ss.calculate_score(df, {"signal": "LONG", "strategy": "Williams R"})
+    without_name = ss.calculate_score(df, {"signal": "LONG"})
+    assert trend_only >= without_name
+
 def test_signal_scorer_short_trend():
     # Signal SHORT, last close 90, SMA_50 100
     data = []

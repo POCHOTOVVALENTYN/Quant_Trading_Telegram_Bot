@@ -1,5 +1,5 @@
-from contextlib import asynccontextmanager
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import ccxt.pro as ccxtpro
 
@@ -153,7 +153,7 @@ async def lifespan(app: FastAPI):
     risk_manager = RiskManager(
         max_risk_pct=0.02, 
         max_drawdown_pct=0.20, 
-        max_open_trades=5
+        max_open_trades=settings.max_open_trades
     )
     
     execution_engine = ExecutionEngine(
@@ -308,6 +308,91 @@ async def toggle_trading():
     settings.is_trading_enabled = not settings.is_trading_enabled
     return {"status": "success", "is_enabled": settings.is_trading_enabled}
 
+
+@app.get("/api/v1/runtime-settings")
+async def get_runtime_settings():
+    return {
+        "pyramiding_enabled": settings.pyramiding_enabled,
+        "per_trade_margin_pct": settings.per_trade_margin_pct,
+        "max_open_trades": settings.max_open_trades,
+        "leverage": settings.leverage,
+        "apply_after_flat": settings.apply_new_entry_rules_after_flat,
+    }
+
+
+@app.post("/api/v1/runtime-settings/pyramiding/toggle")
+async def toggle_pyramiding_runtime():
+    settings.pyramiding_enabled = not settings.pyramiding_enabled
+    return {"status": "success", "pyramiding_enabled": settings.pyramiding_enabled}
+
+
+@app.post("/api/v1/runtime-settings/per-trade-margin")
+async def set_per_trade_margin_pct_runtime(value: float):
+    # 1%-30% безопасный диапазон для runtime-настроек
+    clamped = max(0.01, min(0.30, float(value)))
+    settings.per_trade_margin_pct = clamped
+    return {"status": "success", "per_trade_margin_pct": settings.per_trade_margin_pct}
+
+
+@app.post("/api/v1/runtime-settings/max-open-trades")
+async def set_max_open_trades_runtime(value: int):
+    clamped = max(1, min(20, int(value)))
+    settings.max_open_trades = clamped
+    # Важно синхронизировать RiskManager уже запущенного оркестратора
+    if orchestrator and orchestrator.execution and orchestrator.execution.risk_manager:
+        orchestrator.execution.risk_manager.max_open_trades = clamped
+    return {"status": "success", "max_open_trades": settings.max_open_trades}
+
+
+@app.post("/api/v1/runtime-settings/leverage")
+async def set_leverage_runtime(value: int):
+    requested = int(value)
+    if requested < 1 or requested > 125:
+        return {"status": "error", "message": "Leverage must be in range 1..125"}
+
+    if not exchange_client:
+        return {"status": "error", "message": "Exchange client not initialized"}
+    try:
+        # Синхронизируем с серверным временем Binance перед приватным запросом.
+        await exchange_client.load_time_difference()
+    except Exception:
+        pass
+
+    # Проверяем применимость плеча на бирже на 1-2 ликвидных символах до изменения runtime-настроек.
+    symbols_to_check = []
+    if orchestrator and orchestrator.market_data and orchestrator.market_data.symbols:
+        symbols_to_check = list(orchestrator.market_data.symbols[:2])
+    elif getattr(exchange_client, "symbols", None):
+        symbols_to_check = [s for s in exchange_client.symbols if s.endswith("/USDT")][:2]
+    if not symbols_to_check:
+        symbols_to_check = ["BTC/USDT"]
+
+    failed = []
+    for sym in symbols_to_check:
+        try:
+            await exchange_client.set_leverage(requested, sym)
+        except Exception as e:
+            err = str(e)
+            # Однократный retry при -1021 (drift/recvWindow)
+            if "-1021" in err:
+                try:
+                    await exchange_client.load_time_difference()
+                    await exchange_client.set_leverage(requested, sym)
+                    continue
+                except Exception as e2:
+                    err = str(e2)
+            failed.append((sym, err))
+
+    if failed:
+        sym, err = failed[0]
+        return {
+            "status": "error",
+            "message": f"Exchange rejected leverage {requested}x for {sym}: {err[:180]}",
+        }
+
+    settings.leverage = requested
+    return {"status": "success", "leverage": settings.leverage, "exchange_check": "ok"}
+
 @app.get("/api/v1/exchange/check")
 async def check_exchange_connection():
     if not exchange_client:
@@ -422,3 +507,115 @@ async def close_trade(symbol: str):
         return {"status": "success", "symbol": normalized_symbol}
     else:
         return {"status": "error", "message": "Trade not found", "symbol": normalized_symbol}
+
+
+@app.post("/api/v1/debug/be/open")
+async def debug_open_be_position(symbol: str = "BTC/USDT", side: str = "LONG", timeframe: str = "1m"):
+    """
+    Controlled BE validation:
+    - открывает отдельную позицию без TP (чтобы исключить ложные reject по TP);
+    - оставляет только SL и дальнейший BE перевод.
+    """
+    if not orchestrator or not exchange_client:
+        return {"status": "error", "message": "Engine not ready"}
+    try:
+        side_u = side.upper()
+        if side_u not in {"LONG", "SHORT"}:
+            return {"status": "error", "message": "side must be LONG or SHORT"}
+
+        ticker = await exchange_client.fetch_ticker(symbol)
+        entry = float(ticker.get("last") or ticker.get("close") or 0.0)
+        if entry <= 0:
+            return {"status": "error", "message": "Cannot fetch market price"}
+
+        from database.session import async_session
+        from database.models.all_models import Signal
+        async with async_session() as session:
+            sig = Signal(
+                symbol=symbol,
+                signal_type=side_u,
+                strategy="BE Debug Validation",
+                confidence=0.99,
+                win_prob=0.99,
+                expected_return=0.2,
+                risk=0.1,
+                entry_price=entry,
+                stop_loss=entry * (0.999 if side_u == "LONG" else 1.001),
+                take_profit=None,
+                status="PENDING",
+            )
+            session.add(sig)
+            await session.commit()
+            await session.refresh(sig)
+
+        signal_data = {
+            "id": sig.id,
+            "symbol": symbol,
+            "signal": side_u,
+            "entry_price": entry,
+            "strategy": "BE Debug Validation",
+            "targets": None,
+            "take_profit": None,
+            "atr": entry * 0.0005,  # небольшой ATR -> умеренный 1R
+            "timeframe": timeframe,
+        }
+        balance, drawdown, open_count = await orchestrator.execution.get_account_metrics()
+        await orchestrator.execution.execute_signal(signal_data, balance, drawdown, open_count)
+
+        trade = orchestrator.execution.active_trades.get(symbol)
+        if not trade:
+            return {"status": "error", "message": "Position not opened"}
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "side": side_u,
+            "entry": trade.get("entry"),
+            "stop": trade.get("stop"),
+            "initial_stop": trade.get("initial_stop"),
+            "be_moved": trade.get("be_moved"),
+            "signal_id": sig.id,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/v1/debug/be/force-cycle")
+async def debug_force_be_cycle(symbol: str, current_price: float, atr: float, adx: float = 30.0):
+    """
+    Принудительный запуск одного цикла schedule_update_positions
+    для контролируемой live-валидации BE.
+    """
+    if not orchestrator or not orchestrator.execution:
+        return {"status": "error", "message": "Engine not ready"}
+    try:
+        await orchestrator.execution.schedule_update_positions(
+            symbol=symbol,
+            current_price=float(current_price),
+            atr=float(atr),
+            adx=float(adx),
+        )
+        trade = orchestrator.execution.active_trades.get(symbol, {})
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "be_moved": bool(trade.get("be_moved", False)),
+            "entry": trade.get("entry"),
+            "stop": trade.get("stop"),
+            "initial_stop": trade.get("initial_stop"),
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/v1/debug/be/allow-new-entry")
+async def debug_allow_new_entry_for_be_validation():
+    """
+    Временный флаг для controlled BE-теста:
+    разрешаем открыть отдельную тестовую позицию, даже если есть открытые.
+    """
+    if not orchestrator or not orchestrator.execution:
+        return {"status": "error", "message": "Engine not ready"}
+    orchestrator.execution._entry_policy_activated = True
+    return {"status": "success", "entry_policy_activated": True}
+
+

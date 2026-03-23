@@ -1,5 +1,14 @@
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, FrozenSet
+
+# Скоринг «тренд vs ema50» для них искажает смысл сетапа (контртренд / разворот).
+MEAN_REVERSION_STRATEGIES: FrozenSet[str] = frozenset({
+    "Williams R",
+    "Bollinger Clusters",
+    "WRD Reversal",
+    "WRD",
+    "Funding Squeeze",
+})
 
 class SignalScorer:
     """
@@ -24,22 +33,27 @@ class SignalScorer:
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         direction = signal.get("signal")
+        strategy_name = signal.get("strategy") or ""
         
         # 1. Trend alignment (M3: используем готовый ema50 вместо дублирующего sma_50)
         trend_score = 0.0
-        trend_col = 'ema50' if 'ema50' in df.columns else None
-        if trend_col:
-            if direction == "LONG" and last_row['close'] > last_row[trend_col]:
-                trend_score = 1.0
-            elif direction == "SHORT" and last_row['close'] < last_row[trend_col]:
-                trend_score = 1.0
+        if strategy_name in MEAN_REVERSION_STRATEGIES:
+            # Нейтральный вклад: mean-reversion не должен штрафоваться за «нет тренда по ema50».
+            trend_score = 0.5
         else:
-            # Fallback без копирования df
-            sma_50_val = df['close'].tail(50).mean()
-            if direction == "LONG" and last_row['close'] > sma_50_val:
-                trend_score = 1.0
-            elif direction == "SHORT" and last_row['close'] < sma_50_val:
-                trend_score = 1.0
+            trend_col = 'ema50' if 'ema50' in df.columns else None
+            if trend_col:
+                if direction == "LONG" and last_row['close'] > last_row[trend_col]:
+                    trend_score = 1.0
+                elif direction == "SHORT" and last_row['close'] < last_row[trend_col]:
+                    trend_score = 1.0
+            else:
+                # Fallback без копирования df
+                sma_50_val = df['close'].tail(50).mean()
+                if direction == "LONG" and last_row['close'] > sma_50_val:
+                    trend_score = 1.0
+                elif direction == "SHORT" and last_row['close'] < sma_50_val:
+                    trend_score = 1.0
             
         # 2. Volatility (Используем ATR рост)
         vol_score = 0.0

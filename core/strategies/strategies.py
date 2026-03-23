@@ -52,6 +52,8 @@ class StrategyATRBreakout(BaseStrategy):
         last_row = df.iloc[-1]
         close = last_row['close']
         atr = last_row['atr']
+        if pd.isna(atr) or atr <= 0:
+            return None
         
         # Берем данные ДО текущей свечи (индексы -21 до -1)
         prev_df = df.iloc[-(self.period+1):-1]
@@ -83,7 +85,7 @@ class StrategyMATrend(BaseStrategy):
         fast_curr, slow_curr = last_row[fast_col], last_row[slow_col]
         fast_prev, slow_prev = prev_row[fast_col], prev_row[slow_col]
         
-        if pd.isna(fast_curr) or pd.isna(slow_curr):
+        if any(pd.isna([fast_curr, slow_curr, fast_prev, slow_prev])):
             return None
 
         # Логика Event-based (пересечение)
@@ -313,7 +315,7 @@ class StrategyBollingerClusters(BaseStrategy):
         return None
 
 class StrategyTripleSMA(BaseStrategy):
-    # Название класса оставлено прежним для обратной совместимости логов
+    # Класс использует EMA (ema9/ema30/ema60); имя класса — историческое.
     def __init__(self, fast=9, medium=30, slow=60):
         self.fast = fast
         self.medium = medium
@@ -344,9 +346,9 @@ class StrategyTripleSMA(BaseStrategy):
         trend_short = slow_c > med_c
         
         if is_cross_up and trend_long:
-            return {"strategy": "Triple SMA Filter", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.8}
+            return {"strategy": "Triple EMA Filter", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.8}
         elif is_cross_down and trend_short:
-            return {"strategy": "Triple SMA Filter", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.8}
+            return {"strategy": "Triple EMA Filter", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.8}
         
         return None
 

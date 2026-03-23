@@ -107,16 +107,19 @@ class RiskManager:
 
     def calculate_position_size(self, account_balance: float, entry_price: float, stop_loss_price: float) -> float:
         """
-        Position size = Account risk / (Entry - Stop)
+        Новый режим размера позиции:
+        - на одну сделку выделяем фиксированную долю маржи (settings.per_trade_margin_pct)
+        - размер позиции считается из выделенной маржи и плеча
         """
-        account_risk_usd = account_balance * self.max_risk_pct
-        risk_per_coin = abs(entry_price - stop_loss_price)
-        
-        if risk_per_coin <= 0:
+        from config.settings import settings
+
+        if account_balance <= 0 or entry_price <= 0:
             return 0.0
-            
-        position_size = account_risk_usd / risk_per_coin
-        return position_size
+
+        margin_usd = account_balance * settings.per_trade_margin_pct
+        notional_usd = margin_usd * max(1, int(settings.leverage))
+        position_size = notional_usd / entry_price
+        return max(0.0, position_size)
 
     @staticmethod
     def calculate_atr_stop(entry_price: float, atr: float, signal_type: str = "LONG", multiplier: float = 2.0) -> float:

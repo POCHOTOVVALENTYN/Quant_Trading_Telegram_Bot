@@ -182,8 +182,19 @@ class TradingOrchestrator:
         # --- НОВОЕ: Обновление Трейлинг-стопов и Пирамидинга (Баг 4.2) ---
         if timeframe == "1m":
             current_price = df.iloc[-1]['close']
-            atr = df.iloc[-1].get('atr', 100.0)
-            asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr))
+            atr = float(df.iloc[-1].get('atr', 0.0) or 0.0)
+            adx = None
+            # Для подтверждения тренда в BE используем ADX с последней закрытой 15m-свечи.
+            df_15m = self.market_history.get(symbol, {}).get("15m")
+            if df_15m is not None and not df_15m.empty and len(df_15m) > 1 and "adx" in df_15m.columns:
+                adx = df_15m.iloc[-2].get("adx", None)
+            elif "adx" in df.columns:
+                adx = df.iloc[-1].get("adx", None)
+            try:
+                adx = float(adx) if adx is not None else None
+            except Exception:
+                adx = None
+            asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx))
 
         if len(df) < 60: 
             return
@@ -197,18 +208,29 @@ class TradingOrchestrator:
             df['funding_rate'] = self.funding_rates.get(symbol, 0.0)    # 2. Внешние данные
             self.market_history[symbol][timeframe] = df
 
-            # Получение текущего ADX (Берем ЗАВЕРШЕННУЮ свечу [-2], чтобы избежать дребезга)
-            current_adx = df.iloc[-1].get('adx', 0)
+            # Сигналы только по закрытым свечам: без последней (возможно незавершённой) — убираем перекрашивание кроссов.
+            if len(df) < 2:
+                return
+            df_eval = df.iloc[:-1].copy()
+            if len(df_eval) < 60:
+                return
+            df_eval = self._calculate_indicators(df_eval)
+            df_eval['funding_rate'] = self.funding_rates.get(symbol, 0.0)
+
+            # ADX по последней завершённой свече текущего TF; на 1m/5m — с 15m (предпоследняя = последняя закрытая 15m).
+            current_adx = df_eval.iloc[-1].get('adx', 0)
             if timeframe in ["1m", "5m"] and "15m" in self.market_history.get(symbol, {}):
                 df_15m = self.market_history[symbol]["15m"]
-                if not df_15m.empty and len(df_15m) > 1:
+                if not df_15m.empty and len(df_15m) > 2:
                     current_adx = df_15m.iloc[-2].get('adx', current_adx)
 
             for strategy in self.strategies:
-                signal = strategy.evaluate(df)
+                signal = strategy.evaluate(df_eval)
                 if signal:
-                    # Включен StrategyPullback в фильтрацию флэта
-                    trend_strategies = ["MA Trend", "Triple SMA Filter", "Donchian", "ATR Breakout", "Pullback"]
+                    # Включен StrategyPullback в фильтрацию флэта; Momentum ATR — тот же режимный фильтр, что и пробои.
+                    trend_strategies = [
+                        "MA Trend", "Triple EMA Filter", "Donchian", "ATR Breakout", "Pullback", "Momentum ATR",
+                    ]
                     if signal['strategy'] in trend_strategies and current_adx < 20:
                         logger.info(f"💤 [{symbol}] Тренд слишком слабый (ADX 15m={current_adx:.2f} < 20). Пропускаю {signal['strategy']}")
                         continue
@@ -226,7 +248,7 @@ class TradingOrchestrator:
                     self._last_signals_cache[cache_key] = now
                     # 3. Фильтрация (НОВОЕ по плану)
                     # 3.1 Защита от старых сигналов (Signal Expiry - Баг 6.3)
-                    candle_time = df.iloc[-1]['timestamp']
+                    candle_time = df_eval.iloc[-1]['timestamp']
                     now_ts = time.time()
                     candle_ts = candle_time if not isinstance(candle_time, datetime) else candle_time.timestamp()
                     if candle_ts > 10**11: candle_ts /= 1000 # ms to s
@@ -277,12 +299,12 @@ class TradingOrchestrator:
                         continue
 
                     # 3.5 Regime Detection (Фильтр волатильности)
-                    if not self.risk_manager.is_volatility_sufficient(df):
+                    if not self.risk_manager.is_volatility_sufficient(df_eval):
                         logger.info(f"💤 [{symbol}] Regime Detection: Низкая волатильность (рынок спит)")
                         continue
 
                     # 4. Скоринг (СТРОГИЙ ФИЛЬТР: Score > 0.65)
-                    score = self.scorer.calculate_score(df, signal)
+                    score = self.scorer.calculate_score(df_eval, signal)
                     if score < 0.65:
                         logger.info(f"🔍 [{symbol}] Scorer отклонил {signal['strategy']}: {score:.2f} < 0.65")
                         continue
@@ -290,7 +312,7 @@ class TradingOrchestrator:
                     # 5. AI FEATURE GENERATION (с учетом внешних данных)
                     fr = self.funding_rates.get(symbol, 0.0)
                     ob = self.orderbooks.get(symbol)
-                    features = FeatureGenerator.generate_features(df, funding_rate=fr, orderbook=ob)
+                    features = FeatureGenerator.generate_features(df_eval, funding_rate=fr, orderbook=ob)
                     
                     # 5. AI PREDICTION (Win Probability / Risk / Expected Return)
                     ai_prediction = self.ai_model.predict_win_probability(features, signal['signal'])
@@ -304,11 +326,11 @@ class TradingOrchestrator:
 
                     # 6. Дополнение данными
                     # 6. Дополнение данными (Баг Step 3 — Rule of 7)
-                    lookback_p = df.tail(20)
+                    lookback_p = df_eval.tail(20)
                     pattern_high = lookback_p['high'].max()
                     pattern_low = lookback_p['low'].min()
                     targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low, signal['signal'])
-                    sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], df['atr'].iloc[-1], signal['signal'])
+                    sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], df_eval['atr'].iloc[-1], signal['signal'])
                     # Берем первую цель из Rule of 7 как основной TP для индикации
                     tp = next(iter(targets.values())) if targets else signal['entry_price'] * (1.05 if signal['signal'] == "LONG" else 0.95)
 
@@ -321,7 +343,7 @@ class TradingOrchestrator:
                         "stop_loss": sl,
                         "take_profit": tp,
                         "score": score,
-                        "atr": df['atr'].iloc[-1],
+                        "atr": df_eval['atr'].iloc[-1],
                         "ai_data": ai_prediction,
                         "timeframe": timeframe
                     }

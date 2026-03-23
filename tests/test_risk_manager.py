@@ -21,14 +21,16 @@ def test_check_trade_allowed():
 
 def test_calculate_position_size():
     rm = RiskManager(max_risk_pct=0.02)
-    # Balance 10000, risk 2% = 200 USD
-    # Entry 100, Stop 90 -> Risk 10 per coin
-    # Pos size = 200 / 10 = 20
+    # Новый режим: 5% маржи на сделку * leverage(settings)
+    # При дефолтных settings.leverage=10:
+    # margin = 10000 * 0.05 = 500 USDT
+    # notional = 500 * 10 = 5000 USDT
+    # size = 5000 / 100 = 50
     size = rm.calculate_position_size(account_balance=10000, entry_price=100, stop_loss_price=90)
-    assert size == 20.0
+    assert size == 50.0
     
-    # Zero risk per coin
-    assert rm.calculate_position_size(10000, 100, 100) == 0.0
+    # stop_loss_price теперь не влияет на размер, но некорректная цена входа должна давать 0
+    assert rm.calculate_position_size(10000, 0, 100) == 0.0
 
 def test_calculate_atr_stop_long():
     rm = RiskManager()
