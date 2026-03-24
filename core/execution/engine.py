@@ -69,17 +69,25 @@ class ExecutionEngine:
 
     async def _with_time_sync_retry(self, op, ctx: str = ""):
         """Единый retry для приватных Binance-запросов при -1021."""
-        try:
-            return await op()
-        except Exception as e:
-            if "-1021" not in str(e):
-                raise
+        max_attempts = 3
+        delay = 0.4
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
             try:
-                await self.exchange.load_time_difference()
-            except Exception:
-                pass
-            logger.warning(f"⏱ [TIME_SYNC] Retry after -1021 ({ctx})")
-            return await op()
+                return await op()
+            except Exception as e:
+                last_err = e
+                if "-1021" not in str(e):
+                    raise
+                try:
+                    await self.exchange.load_time_difference()
+                except Exception:
+                    pass
+                logger.warning(f"⏱ [TIME_SYNC] Retry {attempt}/{max_attempts} after -1021 ({ctx})")
+                if attempt < max_attempts:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2.0, 2.0)
+        raise last_err
 
     async def _prepare_private_ops(self, ctx: str = ""):
         """Preflight sync для серии приватных запросов."""
@@ -220,7 +228,10 @@ class ExecutionEngine:
                     now = time.time()
                     if (now - self._last_ws_reconcile_ts) > 30:
                         self._last_ws_reconcile_ts = now
-                        await self.reconcile_full()
+                        try:
+                            await self.reconcile_full()
+                        except Exception as rec_err:
+                            logger.error(f"❌ [WS_ORDERS] reconcile_full failed: {rec_err}")
                     await asyncio.sleep(5)
 
     async def _watch_user_positions_loop(self):
@@ -239,7 +250,10 @@ class ExecutionEngine:
                     now = time.time()
                     if (now - self._last_ws_reconcile_ts) > 30:
                         self._last_ws_reconcile_ts = now
-                        await self.reconcile_full()
+                        try:
+                            await self.reconcile_full()
+                        except Exception as rec_err:
+                            logger.error(f"❌ [WS_POS] reconcile_full failed: {rec_err}")
                     await asyncio.sleep(5)
 
     async def _handle_order_update(self, order: dict):
@@ -412,12 +426,37 @@ class ExecutionEngine:
                 sl_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
                 sl_p["reduceOnly"] = "true" # В хедж-режиме может быть полезно, но проверим
             
-            res_sl = await self._with_time_sync_retry(
-                lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', sl_p),
-                ctx=f"set_sl({symbol})"
-            )
-            sl_id = str(res_sl.get("algoId"))
-            logger.info(f"🛡 [PROTECT] SL установлен для {symbol}: {sl}")
+            try:
+                res_sl = await self._with_time_sync_retry(
+                    lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', sl_p),
+                    ctx=f"set_sl({symbol})"
+                )
+                sl_id = str(res_sl.get("algoId"))
+                logger.info(f"🛡 [PROTECT] SL установлен для {symbol}: {sl}")
+            except Exception as sl_err:
+                # Если Binance сообщает, что защитный closePosition уже существует,
+                # пробуем подобрать уже выставленный SL и не считаем это фатальной ошибкой.
+                err_text = str(sl_err)
+                if "-4130" in err_text:
+                    try:
+                        raw_existing = await self._with_time_sync_retry(
+                            lambda: self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': clean_sym}),
+                            ctx=f"set_sl.recover_openAlgoOrders({symbol})"
+                        )
+                        existing = raw_existing.get("algoOrders", []) if isinstance(raw_existing, dict) else (raw_existing if isinstance(raw_existing, list) else [])
+                        sl_candidates = [str(eo.get("algoId")) for eo in existing if "STOP" in str(eo.get("type", "")).upper() and eo.get("algoId")]
+                        if sl_candidates:
+                            sl_id = sl_candidates[0]
+                            logger.warning(f"⚠️ [PROTECT] SL already exists for {symbol}, reuse algoId={sl_id}")
+                        else:
+                            logger.error(f"❌ [PROTECT] SL missing after -4130 for {symbol}: {sl_err}")
+                            return None, None
+                    except Exception as rec_err:
+                        logger.error(f"❌ [PROTECT] SL recover failed for {symbol}: {rec_err}")
+                        return None, None
+                else:
+                    logger.error(f"❌ [PROTECT] Ошибка SL {symbol}: {sl_err}")
+                    return None, None
 
             # 2. TAKE PROFIT (Scale-out: Частичная фиксация)
             if tp:
@@ -448,13 +487,16 @@ class ExecutionEngine:
                         }
                         if is_hedge: tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
                         
-                        res_tp = await self._with_time_sync_retry(
-                            lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p),
-                            ctx=f"set_partial_tp({symbol})"
-                        )
-                        if res_tp.get("algoId"):
-                            tp_ids.append(str(res_tp["algoId"]))
-                            logger.info(f"🎯 [PARTIAL TP {i+1}] {symbol} объем {norm_part_amt} по {target_price}")
+                        try:
+                            res_tp = await self._with_time_sync_retry(
+                                lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p),
+                                ctx=f"set_partial_tp({symbol})"
+                            )
+                            if res_tp.get("algoId"):
+                                tp_ids.append(str(res_tp["algoId"]))
+                                logger.info(f"🎯 [PARTIAL TP {i+1}] {symbol} объем {norm_part_amt} по {target_price}")
+                        except Exception as tp_err:
+                            logger.warning(f"⚠️ [PROTECT] Partial TP {i+1} failed for {symbol}: {tp_err}")
                             
                     tp_id = ",".join(tp_ids)
                 else:
@@ -471,12 +513,15 @@ class ExecutionEngine:
                         tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
                         tp_p["reduceOnly"] = "true"
                     
-                    res_tp = await self._with_time_sync_retry(
-                        lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p),
-                        ctx=f"set_tp({symbol})"
-                    )
-                    tp_id = str(res_tp.get("algoId"))
-                    logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
+                    try:
+                        res_tp = await self._with_time_sync_retry(
+                            lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p),
+                            ctx=f"set_tp({symbol})"
+                        )
+                        tp_id = str(res_tp.get("algoId"))
+                        logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
+                    except Exception as tp_err:
+                        logger.warning(f"⚠️ [PROTECT] TP failed for {symbol}, keep SL active: {tp_err}")
 
         except Exception as e:
             logger.error(f"❌ [PROTECT] Ошибка защиты {symbol}: {e}")
@@ -584,8 +629,10 @@ class ExecutionEngine:
                         found_tp = self._pick_better_level(found_tp, trig, kind="TP", is_long=is_long)
                         tp_id = o.get("id")
 
-                # РЕАНИМАЦИЯ: Если нет SL ИЛИ нет TP - восстанавливаем недостающее
-                if (not sl_id and dbp.stop_loss) or (not tp_id and dbp.take_profit):
+                # РЕАНИМАЦИЯ: критично восстанавливать только SL.
+                # TP может отсутствовать временно (частичные выходы, ручные действия, лаг биржи)
+                # и не должен провоцировать цикл постоянного re-create защиты.
+                if (not sl_id and dbp.stop_loss):
                     now_ts = time.time()
                     if now_ts < self._rescue_cooldown_until.get(symbol, 0.0):
                         logger.warning(f"⏭ [RESCUE] Cooldown active for {symbol}, skip retry.")
@@ -1021,7 +1068,7 @@ class ExecutionEngine:
                 
                 await session.commit()
             
-            del self.active_trades[symbol]
+            self.active_trades.pop(symbol, None)
             await send_telegram_msg(f"💰 **ЗАКРЫТО: {symbol}**\nПричина: {reason}")
         except Exception as e: logger.error(f"Error closing {symbol}: {e}")
 

@@ -39,6 +39,7 @@ class MarketDataService:
         self.running = False
         self.callbacks = [] # type: list[Callable]
         self.instrument_info = {} # Кэш инфо об инструментах
+        self._last_ws_error_log_ts: Dict[str, float] = {}
 
     def register_callback(self, cb: Callable):
         self.callbacks.append(cb)
@@ -46,11 +47,12 @@ class MarketDataService:
     async def watch_ohlcv(self, symbol: str, timeframe: str):
         app_logger.info(f"Начало отслеживания OHLCV для {symbol} ({timeframe})")
         reconnect_backoff = 1.0
+        stream_key = f"{symbol}:{timeframe}"
         while self.running:
             try:
                 candles = await self.exchange.watch_ohlcv(symbol, timeframe)
                 reconnect_backoff = 1.0
-                self.last_candle_time[symbol] = asyncio.get_event_loop().time()
+                self.last_candle_time[stream_key] = asyncio.get_event_loop().time()
                 if not candles or len(candles) == 0:
                     await asyncio.sleep(1) # Страховка от беск. цикла при пустых данных
                     continue
@@ -58,7 +60,16 @@ class MarketDataService:
                 for cb in self.callbacks:
                     await cb("ohlcv", symbol, timeframe, candles[-1])
             except Exception as e:
-                app_logger.error(f"Ошибка WebSocket (OHLCV {symbol}): {str(e)}")
+                now = asyncio.get_event_loop().time()
+                err_text = str(e)
+                # Антишум: одинаковые WS-ошибки по потоку логируем не чаще раза в 15с.
+                should_log = (now - self._last_ws_error_log_ts.get(stream_key, 0.0)) >= 15.0
+                if self.running and should_log:
+                    if ("Connection closed by the user" in err_text) or ("Abnormal closure of client" in err_text):
+                        app_logger.warning(f"WS reconnect (OHLCV {symbol}/{timeframe}): {err_text}")
+                    else:
+                        app_logger.error(f"Ошибка WebSocket (OHLCV {symbol}/{timeframe}): {err_text}")
+                    self._last_ws_error_log_ts[stream_key] = now
                 # Жесткий reconnect с экспоненциальным backoff и очисткой WS-клиента.
                 try:
                     target_urls = []
@@ -76,7 +87,8 @@ class MarketDataService:
                             del self.exchange.clients[u]
                 except Exception as close_err:
                     app_logger.debug(f"WS reconnect cleanup error ({symbol}/{timeframe}): {close_err}")
-                await asyncio.sleep(reconnect_backoff)
+                # Небольшой jitter, чтобы десятки потоков не переподключались синхронно.
+                await asyncio.sleep(reconnect_backoff + 0.1)
                 reconnect_backoff = min(reconnect_backoff * 2.0, 20.0)
                 # ccxtpro handles fallback under the hood to REST if WS drops, 
                 # but we can explicitly call fetch_ohlcv if needed.
@@ -115,7 +127,8 @@ class MarketDataService:
                 for cb in self.callbacks:
                     await cb("funding_rate", "ALL", None, rates)
             except Exception as e:
-                app_logger.error(f"Ошибка получения Funding Rates: {str(e)}")
+                # Funding rates не критичны для выживания контура исполнения.
+                app_logger.warning(f"Ошибка получения Funding Rates: {str(e)}")
             await asyncio.sleep(60 * 5) # Раз в 5 минут
 
     async def fetch_avg_prices(self):
@@ -201,9 +214,9 @@ class MarketDataService:
         app_logger.info("🐕 Watchdog запущен")
         while self.running:
             now = asyncio.get_event_loop().time()
-            for sym, last_time in list(self.last_candle_time.items()):
+            for stream_key, last_time in list(self.last_candle_time.items()):
                 if now - last_time > 120:  # 120 секунд без новых данных
-                    app_logger.warning(f"⚠️ [WATCHDOG] Нет данных по {sym} более 2 минут! Очищаю кэш сокетов CCXT.")
+                    app_logger.warning(f"⚠️ [WATCHDOG] Нет данных по {stream_key} более 2 минут! Очищаю кэш сокетов CCXT.")
                     try:
                         url = self.exchange.urls['api']['ws']['future']
                         if url in self.exchange.clients:
@@ -212,8 +225,8 @@ class MarketDataService:
                             del self.exchange.clients[url]
                     except Exception as e:
                         app_logger.error(f"Watchdog error: {e}")
-                    # Сбрасываем время ТОЛЬКО для зависшего символа, чтобы не спамить (K1)
-                    self.last_candle_time[sym] = now
+                    # Сбрасываем время только для зависшего потока, чтобы не спамить.
+                    self.last_candle_time[stream_key] = now
             
             await asyncio.sleep(30)
 

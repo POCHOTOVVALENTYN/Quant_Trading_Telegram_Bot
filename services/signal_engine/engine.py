@@ -74,6 +74,7 @@ class TradingOrchestrator:
         self._last_signals_cache: Dict[tuple, float] = {}
         self._stale_signals_count: Dict[str, int] = defaultdict(int)
         self._stale_signals_last_log_ts: float = 0.0
+        self._last_eval_candle_ts: Dict[tuple, float] = {}
         
         # Инфраструктура для Spread Momentum (из статьи)
         self.spreader = SpreadMomentumStrategy()
@@ -218,6 +219,20 @@ class TradingOrchestrator:
                 return
             df_eval = self._calculate_indicators(df_eval)
             df_eval['funding_rate'] = self.funding_rates.get(symbol, 0.0)
+            # Защита от повторной обработки одной и той же закрытой свечи:
+            # в websocket поток может прийти несколько апдейтов для текущей свечи,
+            # но торговая логика должна выполняться только один раз на закрытую свечу.
+            eval_candle_ts = df_eval.iloc[-1]['timestamp']
+            try:
+                eval_candle_ts = float(eval_candle_ts.timestamp()) if isinstance(eval_candle_ts, datetime) else float(eval_candle_ts)
+            except Exception:
+                eval_candle_ts = 0.0
+            if eval_candle_ts > 10**11:
+                eval_candle_ts /= 1000.0
+            eval_key = (symbol, timeframe)
+            if self._last_eval_candle_ts.get(eval_key) == eval_candle_ts:
+                return
+            self._last_eval_candle_ts[eval_key] = eval_candle_ts
 
             # ADX по последней завершённой свече текущего TF; на 1m/5m — с 15m (предпоследняя = последняя закрытая 15m).
             current_adx = df_eval.iloc[-1].get('adx', 0)
