@@ -40,6 +40,7 @@ class MarketDataService:
         self.callbacks = [] # type: list[Callable]
         self.instrument_info = {} # Кэш инфо об инструментах
         self._last_ws_error_log_ts: Dict[str, float] = {}
+        self._last_ws_global_error_log_ts: float = 0.0
 
     def register_callback(self, cb: Callable):
         self.callbacks.append(cb)
@@ -62,13 +63,28 @@ class MarketDataService:
             except Exception as e:
                 now = asyncio.get_event_loop().time()
                 err_text = str(e)
-                # Антишум: одинаковые WS-ошибки по потоку логируем не чаще раза в 15с.
+                # Антишум:
+                # 1) по каждому потоку не чаще 1 раза в 15с;
+                # 2) глобально не чаще 1 раза в 2с при массовом reconnect storm.
                 should_log = (now - self._last_ws_error_log_ts.get(stream_key, 0.0)) >= 15.0
+                should_log_global = (now - self._last_ws_global_error_log_ts) >= 2.0
                 if self.running and should_log:
-                    if ("Connection closed by the user" in err_text) or ("Abnormal closure of client" in err_text):
+                    if (
+                        ("Connection closed by the user" in err_text)
+                        or ("Abnormal closure of client" in err_text)
+                        or ("ping-pong keepalive missing on time" in err_text)
+                        or ("timed out due to a ping-pong keepalive" in err_text)
+                    ):
+                        if should_log_global:
+                            app_logger.warning(f"WS reconnect (OHLCV {symbol}/{timeframe}): {err_text}")
+                            self._last_ws_global_error_log_ts = now
+                    elif should_log_global:
                         app_logger.warning(f"WS reconnect (OHLCV {symbol}/{timeframe}): {err_text}")
+                        self._last_ws_global_error_log_ts = now
                     else:
-                        app_logger.error(f"Ошибка WebSocket (OHLCV {symbol}/{timeframe}): {err_text}")
+                        if should_log_global:
+                            app_logger.error(f"Ошибка WebSocket (OHLCV {symbol}/{timeframe}): {err_text}")
+                            self._last_ws_global_error_log_ts = now
                     self._last_ws_error_log_ts[stream_key] = now
                 # Жесткий reconnect с экспоненциальным backoff и очисткой WS-клиента.
                 try:

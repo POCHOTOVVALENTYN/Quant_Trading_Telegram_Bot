@@ -116,7 +116,12 @@ class RiskManager:
         if account_balance <= 0 or entry_price <= 0:
             return 0.0
 
-        margin_usd = account_balance * settings.per_trade_margin_pct
+        # Приоритет 1: ручной фиксированный объём (USDT) из Telegram/runtime.
+        fixed_usdt = float(getattr(settings, "position_size_usdt", 0.0) or 0.0)
+        if fixed_usdt > 0:
+            margin_usd = min(fixed_usdt, account_balance)
+        else:
+            margin_usd = account_balance * settings.per_trade_margin_pct
         notional_usd = margin_usd * max(1, int(settings.leverage))
         position_size = notional_usd / entry_price
         return max(0.0, position_size)
@@ -124,24 +129,29 @@ class RiskManager:
     @staticmethod
     def calculate_atr_stop(entry_price: float, atr: float, signal_type: str = "LONG", multiplier: float = 2.0) -> float:
         """
-        Начальный стоп. Теперь учитываем раздельные настройки из Settings.
+        ATR-based stop (Schwager: primary stop method).
+        multiplier=2.0 означает стоп на расстоянии 2 ATR от входа.
+        Fallback на процент только если ATR недоступен.
         """
         from config.settings import settings
-        
-        # Если в сигнале нет ATR, используем фиксированный процент из новых настроек
-        # (это гибридный подход: если есть ATR — по нему, если нет — по % из референса)
+
         if atr > 0:
             raw_stop = entry_price - (multiplier * atr) if signal_type == "LONG" else entry_price + (multiplier * atr)
         else:
             pct = settings.sl_long_pct if signal_type == "LONG" else settings.sl_short_pct
             raw_stop = entry_price * (1 - pct) if signal_type == "LONG" else entry_price * (1 + pct)
-            
-        # Логика коррекции (Этап 2 плана)
+
+        # Минимальная дистанция: не менее 0.5% от цены входа (защита от слишком тесных стопов)
+        min_distance = entry_price * 0.005
+        if signal_type == "LONG":
+            raw_stop = min(raw_stop, entry_price - min_distance)
+        else:
+            raw_stop = max(raw_stop, entry_price + min_distance)
+
         if settings.sl_correction_enabled:
-            # Сдвигаем на 0.1% для гарантии срабатывания биржевого ордера при резком движении
             correction = entry_price * 0.001
             return raw_stop - correction if signal_type == "LONG" else raw_stop + correction
-            
+
         return raw_stop
 
     @staticmethod

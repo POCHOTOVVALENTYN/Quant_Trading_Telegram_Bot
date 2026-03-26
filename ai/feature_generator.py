@@ -17,9 +17,20 @@ class FeatureGenerator:
         last_row = df_window.iloc[-1]
         features = {}
         
-        # 1. Волатильность (Volatility)
-        features['atr_ratio'] = last_row['atr'] / df_window['atr'].tail(20).mean() if 'atr' in df_window else 1.0
-        features['range_relative'] = (last_row['high'] - last_row['low']) / (df_window['high'] - df_window['low']).tail(20).mean()
+        # 1. Волатильность (Volatility) — guard against NaN/zero division
+        atr_mean_20 = df_window['atr'].tail(20).mean() if 'atr' in df_window.columns else 0.0
+        atr_val = last_row.get('atr', 0.0)
+        if pd.isna(atr_mean_20) or atr_mean_20 <= 0 or pd.isna(atr_val):
+            features['atr_ratio'] = 1.0
+        else:
+            features['atr_ratio'] = float(atr_val) / float(atr_mean_20)
+
+        range_mean = (df_window['high'] - df_window['low']).tail(20).mean()
+        bar_range = last_row['high'] - last_row['low']
+        if pd.isna(range_mean) or range_mean <= 0 or pd.isna(bar_range):
+            features['range_relative'] = 1.0
+        else:
+            features['range_relative'] = float(bar_range) / float(range_mean)
         
         # 2. Моментум (Momentum) — L1: используем готовый RSI из df если есть
         if 'RSI_fast' in df_window.columns:
@@ -28,16 +39,18 @@ class FeatureGenerator:
             features['rsi'] = df_window['RSI'].iloc[-1]
         else:
             features['rsi'] = FeatureGenerator._calculate_rsi(df_window['close'], 14).iloc[-1]
-        features['roc_10'] = ((last_row['close'] - df_window.iloc[-10]['close']) / df_window.iloc[-10]['close']) * 100
+        close_10_ago = df_window.iloc[-10]['close'] if len(df_window) >= 10 else last_row['close']
+        features['roc_10'] = ((last_row['close'] - close_10_ago) / close_10_ago * 100) if close_10_ago > 0 else 0.0
         
         # 3. Трендовые (Trend)
         sma_20 = df_window['close'].tail(20).mean()
         sma_50 = df_window['close'].tail(50).mean()
-        features['price_to_sma20'] = last_row['close'] / sma_20
-        features['sma20_to_sma50'] = sma_20 / sma_50
+        features['price_to_sma20'] = (last_row['close'] / sma_20) if sma_20 > 0 else 1.0
+        features['sma20_to_sma50'] = (sma_20 / sma_50) if sma_50 > 0 else 1.0
         
         # 4. Объем (Volume)
-        features['volume_ratio'] = last_row['volume'] / df['volume'].tail(20).mean()
+        vol_avg_20 = df['volume'].tail(20).mean()
+        features['volume_ratio'] = (last_row['volume'] / vol_avg_20) if vol_avg_20 > 0 else 1.0
         
         # 5. Новое: Внешние данные (Funding & Orderbook)
         features['funding_rate'] = funding_rate

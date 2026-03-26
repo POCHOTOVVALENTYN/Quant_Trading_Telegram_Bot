@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, CallbackQueryHandler
 from telegram.error import BadRequest
@@ -9,10 +10,35 @@ from config.settings import settings
 
 ENGINE_URL = "http://trading-engine:8000" # URL внутри Docker сети
 
+BTN_AUTOTRADE_SETTINGS = "⚙️ Настройки автоторговли"
+BTN_API_SETTINGS = "⚙️ Настройки API"
+BTN_TOGGLE = "🔄 Вкл/Выкл"
+BTN_ACTIVE = "💼 Активные позиции"
+BTN_HISTORY = "📜 История сделок"
+BTN_STATS = "📈 Статистика"
+BTN_SIGNALS = "📉 Сигналы"
+BTN_STRATEGIES = "📚 Стратегии"
+BTN_HOME = "🏠 Главное меню"
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+_action_cooldowns: dict[str, float] = {}
+_ACTION_COOLDOWN_BY_TYPE = {
+    "refresh": 0.8,
+    "reduce25": 2.5,
+    "reduce50": 2.5,
+    "close": 2.5,
+}
+_ACTION_COOLDOWN_DEFAULT = 1.2
+_ACTION_COOLDOWN_MAX_KEYS = 2000
+_ACTION_ADAPTIVE_MAX_MULTIPLIER = 3.0
+_ACTION_ADAPTIVE_STEP = 0.35
+_ACTION_SPAM_DECAY_SECONDS = 12.0
+_action_spam_score: dict[str, int] = {}
+_action_spam_last_ts: dict[str, float] = {}
 
 
 async def _load_runtime_settings(client: httpx.AsyncClient) -> dict:
@@ -50,11 +76,94 @@ async def _safe_answer_callback(query, text: str | None = None, show_alert: bool
         logging.warning(f"Callback answer failed: {e}")
 
 
+async def _get_json_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict | None = None,
+    timeout: float = 8.0,
+    retries: int = 1,
+) -> dict:
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            response = await client.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            last_exc = e
+            if attempt >= retries:
+                raise
+            await asyncio.sleep(0.35 * (attempt + 1))
+    raise last_exc
+
+
+def _cooldown_key(user_id: int, action: str, symbol_raw: str) -> str:
+    return f"{user_id}:{action}:{symbol_raw}"
+
+
+def _cleanup_cooldown_map(now_ts: float):
+    # Ленивая уборка: удаляем устаревшие ключи и защищаемся от бесконечного роста словаря.
+    expired_keys = [k for k, until in _action_cooldowns.items() if float(until or 0.0) <= now_ts]
+    for k in expired_keys:
+        _action_cooldowns.pop(k, None)
+    stale_spam = [k for k, ts in _action_spam_last_ts.items() if (now_ts - float(ts or 0.0)) > (_ACTION_SPAM_DECAY_SECONDS * 4.0)]
+    for k in stale_spam:
+        _action_spam_last_ts.pop(k, None)
+        _action_spam_score.pop(k, None)
+    if len(_action_cooldowns) > _ACTION_COOLDOWN_MAX_KEYS:
+        # На всякий случай жёсткая очистка, если поток callback слишком большой.
+        _action_cooldowns.clear()
+        _action_spam_score.clear()
+        _action_spam_last_ts.clear()
+
+
+def _is_action_on_cooldown(user_id: int, action: str, symbol_raw: str) -> bool:
+    now = time.time()
+    _cleanup_cooldown_map(now)
+    key = _cooldown_key(user_id, action, symbol_raw)
+    base_cd = float(_ACTION_COOLDOWN_BY_TYPE.get(action, _ACTION_COOLDOWN_DEFAULT))
+    until = float(_action_cooldowns.get(key, 0.0) or 0.0)
+
+    score = int(_action_spam_score.get(key, 0) or 0)
+    last_ts = float(_action_spam_last_ts.get(key, now) or now)
+    if now - last_ts > _ACTION_SPAM_DECAY_SECONDS:
+        score = max(0, score - 2)
+
+    if now < until:
+        score = min(score + 1, 8)
+        _action_spam_score[key] = score
+        _action_spam_last_ts[key] = now
+        return True
+
+    # Если спама нет, постепенно возвращаемся к базовому cooldown.
+    if score > 0:
+        score -= 1
+    _action_spam_score[key] = score
+    _action_spam_last_ts[key] = now
+
+    adaptive_multiplier = min(_ACTION_ADAPTIVE_MAX_MULTIPLIER, 1.0 + (_ACTION_ADAPTIVE_STEP * score))
+    _action_cooldowns[key] = now + (base_cd * adaptive_multiplier)
+    return False
+
+
+def _spam_level_badge(user_id: int, action: str, symbol_raw: str) -> str:
+    """Возвращает компактный индикатор anti-spam уровня: lvl N/5."""
+    key = _cooldown_key(user_id, action, symbol_raw)
+    score = int(_action_spam_score.get(key, 0) or 0)
+    lvl = max(1, min(5, 1 + (score // 2)))
+    return f"lvl {lvl}/5"
+
+
 def _build_settings_menu_text(runtime: dict) -> str:
     runtime_status = runtime.get("_runtime_status", "fallback")
     leverage_val = runtime.get("leverage", settings.leverage)
     return (
-        "⚙️ **ТЕКУЩИЕ НАСТРОЙКИ**\n\n"
+        "⚙️ **НАСТРОЙКИ АВТОТОРГОВЛИ**\n\n"
+        f"🔄 Автоторговля: {'✅ ВКЛ' if runtime.get('is_trading_enabled', settings.is_trading_enabled) else '❌ ВЫКЛ'}\n"
+        f"↕️ Тип позиции: {runtime.get('allowed_position_side', getattr(settings, 'allowed_position_side', 'BOTH'))}\n"
+        f"💵 Объём позиции (USDT): {runtime.get('position_size_usdt', getattr(settings, 'position_size_usdt', 0.0)):.2f} (0 = авто)\n"
         "🛑 **Stop Loss:**\n"
         f"🟢 Long: {settings.sl_long_pct*100:.1f}%\n"
         f"🔴 Short: {settings.sl_short_pct*100:.1f}%\n"
@@ -62,6 +171,8 @@ def _build_settings_menu_text(runtime: dict) -> str:
         "📊 **Runtime-параметры (без рестарта):**\n"
         f"🔌 REST runtime: `{runtime_status}`\n"
         f"⚡ Плечо: {leverage_val}x\n"
+        f"🎯 TP: {runtime.get('tp_pct', settings.tp_pct)*100:.2f}%\n"
+        f"⏱ Защита от устаревших сигналов: {runtime.get('signal_expiry_seconds', settings.signal_expiry_seconds)}с\n"
         f"📂 Макс. сделок: {runtime.get('max_open_trades', settings.max_open_trades)}\n"
         f"💰 Маржа на сделку: {runtime.get('per_trade_margin_pct', settings.per_trade_margin_pct)*100:.1f}%\n"
         f"💎 Пирамидинг: {'✅ Вкл' if runtime.get('pyramiding_enabled', settings.pyramiding_enabled) else '❌ Выкл'}\n\n"
@@ -71,6 +182,21 @@ def _build_settings_menu_text(runtime: dict) -> str:
 
 def _build_settings_menu_keyboard(runtime: dict, presets: list) -> InlineKeyboardMarkup:
     buttons = []
+    buttons.append([
+        InlineKeyboardButton(
+            f"🔄 Автоторговля: {'ON' if runtime.get('is_trading_enabled', settings.is_trading_enabled) else 'OFF'}",
+            callback_data="rt_toggle_trading",
+        )
+    ])
+    buttons.append([
+        InlineKeyboardButton("↕️ LONG", callback_data="rt_side_long"),
+        InlineKeyboardButton("↕️ SHORT", callback_data="rt_side_short"),
+        InlineKeyboardButton("↕️ BOTH", callback_data="rt_side_both"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("💵 Объём -1$", callback_data="rt_pos_usdt_dec"),
+        InlineKeyboardButton("💵 Объём +1$", callback_data="rt_pos_usdt_inc"),
+    ])
     # Отдельные кнопки runtime-настроек
     buttons.append([
         InlineKeyboardButton(
@@ -94,6 +220,14 @@ def _build_settings_menu_keyboard(runtime: dict, presets: list) -> InlineKeyboar
     buttons.append([
         InlineKeyboardButton("⚡ 25x", callback_data="rt_leverage_25"),
         InlineKeyboardButton("⚡ 50x", callback_data="rt_leverage_50"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("🎯 TP -0.1%", callback_data="rt_tp_dec"),
+        InlineKeyboardButton("🎯 TP +0.1%", callback_data="rt_tp_inc"),
+    ])
+    buttons.append([
+        InlineKeyboardButton("⏱ Expiry -10s", callback_data="rt_expiry_dec"),
+        InlineKeyboardButton("⏱ Expiry +10s", callback_data="rt_expiry_inc"),
     ])
     # Ниже — существующие пресеты
     for p in presets:
@@ -123,6 +257,46 @@ async def _render_settings_message(message_target, edit: bool = False):
     else:
         await message_target.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
 
+
+def _build_main_menu_markup() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(BTN_AUTOTRADE_SETTINGS), KeyboardButton(BTN_API_SETTINGS)],
+        [KeyboardButton(BTN_TOGGLE), KeyboardButton(BTN_ACTIVE)],
+        [KeyboardButton(BTN_HISTORY), KeyboardButton(BTN_STATS)],
+        [KeyboardButton(BTN_SIGNALS), KeyboardButton(BTN_STRATEGIES)],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+async def _render_main_menu(message_target):
+    await message_target.reply_text(
+        "🤖 **Algo Quant Bot**\n\nВыберите раздел для управления ботом:",
+        reply_markup=_build_main_menu_markup(),
+        parse_mode='Markdown',
+    )
+
+
+async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with httpx.AsyncClient() as client:
+            ex = await client.get(f"{ENGINE_URL}/api/v1/exchange/check", timeout=6.0)
+            st = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=6.0)
+            ex_data = ex.json() if ex.status_code == 200 else {"status": "error", "message": ex.text}
+            st_data = st.json() if st.status_code == 200 else {"status": "error", "message": st.text}
+            is_ok = ex_data.get("status") == "success"
+            mode = "Testnet" if st_data.get("testnet", settings.testnet) else "Real"
+            msg = (
+                "⚙️ **НАСТРОЙКИ API**\n\n"
+                f"🔗 Биржа: `Binance Futures`\n"
+                f"🧪 Режим: `{mode}`\n"
+                f"📡 Соединение: {'✅ OK' if is_ok else '❌ Ошибка'}\n"
+                f"📝 Детали: `{(ex_data.get('message') or 'n/a')[:140]}`\n\n"
+                "Для смены ключей используйте `.env` и перезапуск контейнеров."
+            )
+            await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка проверки API: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Этап 14-15: Главное меню
@@ -134,13 +308,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔️ Доступ запрещен. Вы не являетесь администратором.")
         return
 
-    keyboard = [
-        [KeyboardButton("💼 Активные позиции"), KeyboardButton("📈 Статистика")],
-        [KeyboardButton("📉 Сигналы"), KeyboardButton("📜 История")],
-        [KeyboardButton("📚 Стратегии"), KeyboardButton("⚙ Настройки")]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Добро пожаловать в Algo Quant Bot! Выберите действие:", reply_markup=reply_markup)
+    await _render_main_menu(update.message)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -165,11 +333,102 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Please provide your Binance API keys (Use secure config or settings menu!).")
 
+
+def _risk_tag_for_trade(is_long: bool, entry: float, stop: float, current_price: float | None) -> str:
+    """Оценка близости цены к стопу для UX-индикатора."""
+    try:
+        if current_price is None:
+            return "⚪️ N/A"
+        cp = float(current_price)
+        if entry <= 0 or stop <= 0 or cp <= 0 or abs(entry - stop) <= 1e-9:
+            return "⚪️ N/A"
+        if is_long:
+            progress = (cp - stop) / (entry - stop)
+        else:
+            progress = (stop - cp) / (stop - entry)
+        if progress <= 0.3:
+            return "🔴 Высокий"
+        if progress <= 0.8:
+            return "🟡 Средний"
+        return "🟢 Низкий"
+    except Exception:
+        return "⚪️ N/A"
+
+
+def _sorted_positions_by_risk(trades: dict) -> list[tuple[int, str, dict, str]]:
+    enriched = []
+    for symbol, info in trades.items():
+        is_lg = info.get('signal_type') == "LONG"
+        curr_p = info.get('current_price')
+        entry = float(info.get('entry', 0.0) or 0.0)
+        stop = float(info.get('stop', 0.0) or 0.0)
+        risk_tag = _risk_tag_for_trade(is_lg, entry, stop, curr_p)
+        risk_rank = {"🔴 Высокий": 0, "🟡 Средний": 1, "🟢 Низкий": 2, "⚪️ N/A": 3}.get(risk_tag, 3)
+        enriched.append((risk_rank, symbol, info, risk_tag))
+    enriched.sort(key=lambda x: (x[0], x[1]))
+    return enriched
+
+
+def _build_positions_list_view(trades: dict) -> tuple[str, InlineKeyboardMarkup]:
+    enriched = _sorted_positions_by_risk(trades)
+    list_lines = ["📌 **СПИСОК ПОЗИЦИЙ (приоритет по риску):**"]
+    keyboard_rows = []
+    for _, symbol, info, risk_tag in enriched:
+        side_emoji = "🟢 LONG" if info.get('signal_type') == "LONG" else "🔴 SHORT"
+        pnl_usd = float(info.get('pnl_usd', 0.0) or 0.0)
+        pnl_badge = "🟢" if pnl_usd >= 0 else "🔴"
+        list_lines.append(f"• `{symbol}` · {side_emoji} · {risk_tag} · {pnl_badge} `{pnl_usd:+.2f}$`")
+        sraw = symbol.replace("/", "_")
+        keyboard_rows.append([
+            InlineKeyboardButton(f"ℹ️ {symbol}", callback_data=f"pos_view_{sraw}"),
+            InlineKeyboardButton("❌", callback_data=f"close_{sraw}"),
+        ])
+    return "\n".join(list_lines), InlineKeyboardMarkup(keyboard_rows)
+
+
+def _build_position_details_view(symbol: str, info: dict) -> str:
+    is_lg = info.get('signal_type') == "LONG"
+    side_emoji = "🟢 LONG" if is_lg else "🔴 SHORT"
+    curr_p = info.get('current_price')
+    curr_p_str = "🔍 ожидание..." if curr_p is None else f"`{float(curr_p):.6f}`"
+
+    pnl_usd = float(info.get('pnl_usd', 0.0) or 0.0)
+    pnl_pct = float(info.get('pnl_pct', 0.0) or 0.0)
+    if curr_p is not None:
+        pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+        pnl_str = f"{pnl_emoji} `{pnl_usd:+.2f} USDT / {pnl_pct:+.2f}%`"
+    else:
+        pnl_str = "⏳ `расчет...`"
+
+    entry = float(info.get('entry', 0.0) or 0.0)
+    stop = float(info.get('stop', 0.0) or 0.0)
+    risk_tag = _risk_tag_for_trade(is_lg, entry, stop, curr_p)
+
+    opened_for = time.time() - float(info.get('opened_at', time.time()))
+    if opened_for < 3600:
+        opened_ago = f"{int(opened_for // 60)}м"
+    elif opened_for < 86400:
+        opened_ago = f"{int(opened_for // 3600)}ч {int((opened_for % 3600) // 60)}м"
+    else:
+        opened_ago = f"{int(opened_for // 86400)}д {int((opened_for % 86400) // 3600)}ч"
+
+    return (
+        f"🔹 **{symbol}**\n"
+        f"📌 {side_emoji}\n"
+        f"💰 Вход: `{entry:.6f}`\n"
+        f"📈 Текущая: {curr_p_str}\n"
+        f"📊 Объем: `{float(info.get('current_size', 0.0) or 0.0):.4f}`\n"
+        f"🛡 Стоп: `{stop:.6f}`\n"
+        f"📉 PnL: {pnl_str}\n"
+        f"🚨 Риск до стопа: {risk_tag}\n"
+        f"⏱ В позиции: `{opened_ago}`"
+    )
+
+
 async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{ENGINE_URL}/api/v1/trades", timeout=8.0)
-            data = response.json()
+            data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
             logging.info(f"🕵️‍♂️ DEBUG: Получено данных от движка: {data}")
             trades = data.get("trades", {})
 
@@ -177,42 +436,77 @@ async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TY
                 await update.message.reply_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
                 return
 
-            await update.message.reply_text(f"💼 **ВАШИ ОТКРЫТЫЕ ПОЗИЦИИ ({len(trades)}):**", parse_mode='Markdown')
+            # Портфельная сводка до списка карточек.
+            total_pnl_usd = 0.0
+            total_pnl_pct = 0.0
+            counted = 0
+            for _, info in trades.items():
+                cp = info.get('current_price')
+                if cp is None:
+                    continue
+                total_pnl_usd += float(info.get('pnl_usd', 0.0) or 0.0)
+                total_pnl_pct += float(info.get('pnl_pct', 0.0) or 0.0)
+                counted += 1
 
-            for symbol, info in trades.items():
-                is_lg = info['signal_type'] == "LONG"
-                side_emoji = "🟢 LONG" if is_lg else "🔴 SHORT"
-                
-                curr_p = info.get('current_price')
-                curr_p_str = f"`{curr_p:+.4f}`" if curr_p else "🔍 Ожидаем..."
-                
-                pnl_usd = info.get('pnl_usd', 0.0)
-                pnl_pct = info.get('pnl_pct', 0.0)
-                
-                if curr_p:
-                    pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
-                    pnl_str = f"{pnl_emoji} **PnL: {pnl_usd:+.2f} USDT ({pnl_pct:+.2f}%)**"
-                else:
-                    pnl_str = "⏳ **PnL: расчет...**"
+            sum_emoji = "🟢" if total_pnl_usd >= 0 else "🔴"
+            avg_pnl_pct = (total_pnl_pct / counted) if counted > 0 else 0.0
+            summary_msg = (
+                f"💼 **ОТКРЫТЫЕ ПОЗИЦИИ: {len(trades)}**\n"
+                f"{sum_emoji} Суммарный PnL: `{total_pnl_usd:+.2f} USDT`\n"
+                f"📊 Средний PnL: `{avg_pnl_pct:+.2f}%`\n"
+                f"🧮 Рассчитано по позициям: `{counted}/{len(trades)}`"
+            )
+            await update.message.reply_text(summary_msg, parse_mode='Markdown')
 
-                msg = (
-                    f"🔹 **{symbol}** ({side_emoji})\n"
-                    f"💰 Вход: `{info['entry']:.4f}`\n"
-                    f"📈 Тек. цена: {curr_p_str}\n"
-                    f"📊 Объем: `{info['current_size']}`\n"
-                    f"🛡 Стоп: `{info['stop']:.4f}`\n"
-                    f"{pnl_str}\n"
-                    f"⏱ Открыта: {time.strftime('%H:%M:%S', time.gmtime(time.time() - info['opened_at']))} назад"
-                )
-
-                keyboard = [[InlineKeyboardButton("❌ Закрыть позицию", callback_data=f"close_{symbol.replace('/', '_')}")]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-
-                await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode='Markdown')
+            list_text, list_kb = _build_positions_list_view(trades)
+            await update.message.reply_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
 
     except Exception as e:
-        logging.error(f"Ошибка получения позиций: {e}")
+        logging.error(f"Ошибка получения позиций: {e!r}")
         await update.message.reply_text("❌ Не удалось связаться с движком торгов.")
+
+
+async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with httpx.AsyncClient() as client:
+            data = await _get_json_with_retry(
+                client,
+                f"{ENGINE_URL}/api/v1/history",
+                params={"limit": 20},
+                timeout=8.0,
+                retries=1,
+            )
+            items = data.get("items", [])
+            if not items:
+                await update.message.reply_text("📜 История сделок пуста.")
+                return
+
+            await update.message.reply_text(f"📜 **ИСТОРИЯ СДЕЛОК ({len(items)}):**", parse_mode='Markdown')
+            for it in items:
+                pnl_usd = float(it.get("pnl_usd", 0.0) or 0.0)
+                pnl_pct = float(it.get("pnl_pct", 0.0) or 0.0)
+                emoji = "🟢" if pnl_usd >= 0 else "🔴"
+                ts = (it.get("closed_at") or "").replace("T", " ")[:19] if it.get("closed_at") else "N/A"
+                reason = str(it.get('reason', 'AUTO') or 'AUTO').upper()
+                reason_map = {
+                    "STOP": "🛑 стоп",
+                    "TAKE": "🎯 тейк",
+                    "MANUAL": "🖐 ручное",
+                    "TIME": "⏱ тайм-аут",
+                    "EXTERNAL": "🔄 внешнее",
+                    "AUTO": "⚙️ авто",
+                }
+                reason_ru = reason_map.get(reason, f"⚙️ {reason.lower()}")
+                msg = (
+                    f"🧾 **{it.get('symbol', 'N/A')}**\n"
+                    f"{emoji} Результат: `{pnl_usd:+.2f} USDT / {pnl_pct:+.2f}%`\n"
+                    f"🏁 Закрытие: {reason_ru}\n"
+                    f"🕒 Время: `{ts} UTC`"
+                )
+                await update.message.reply_text(msg, parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Ошибка истории сделок: {e!r}")
+        await update.message.reply_text("❌ Не удалось получить историю сделок.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -222,17 +516,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text
     logging.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
-    if text == "💼 Активные позиции":
+    if text == BTN_ACTIVE:
         await show_active_positions(update, context)
-    elif text == "📈 Начать торговлю":
-        await update.message.reply_text("Система автоматической торговли активирована.")
-    elif text == "⚙ Настройки":
+    elif text == BTN_TOGGLE:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
+                res = response.json()
+                st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
+                await update.message.reply_text(f"🔄 Автоторговля: {st}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка переключения: {e}")
+    elif text in {"⚙ Настройки", BTN_AUTOTRADE_SETTINGS}:
         try:
             await _render_settings_message(update.message, edit=False)
         except Exception as e:
             logging.error(f"Ошибка настроек: {e}")
             await update.message.reply_text("❌ Ошибка при получении настроек.")
-    elif text == "📉 Сигналы":
+    elif text == BTN_API_SETTINGS:
+        await show_api_settings(update, context)
+    elif text == BTN_SIGNALS:
         from database.session import async_session
         from database.models.all_models import Signal
         from sqlalchemy import select
@@ -288,7 +591,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error(f"Ошибка получения сигналов из БД: {e}")
             await update.message.reply_text("❌ Ошибка при обращении к базе данных.")
-    elif text == "📚 Стратегии":
+    elif text == BTN_STRATEGIES:
         strategy_text = (
             "📖 **МЕТОДОЛОГИЯ БОТА (Schwager v2 + AI)**\n\n"
             "🛡 **РИСК-МЕНЕДЖМЕНТ (Осторожный)**\n"
@@ -305,7 +608,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• **Фильтр листинга:** > 100 дней.\n"
         )
         await update.message.reply_text(strategy_text, parse_mode='Markdown')
-    elif text == "📈 Статистика":
+    elif text == BTN_STATS:
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
@@ -327,16 +630,162 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Ошибка статистики: {e}")
             await update.message.reply_text("❌ Ошибка при получении статистики.")
 
-    elif text == "📜 История":
-        await update.message.reply_text("Последние сделки: ...")
+    elif text in {"📜 История", BTN_HISTORY}:
+        await show_trade_history(update, context)
+    elif text == BTN_HOME:
+        await _render_main_menu(update.message)
     else:
-        await update.message.reply_text("Команда не распознана.")
+        await update.message.reply_text("Команда не распознана. Нажмите кнопку из меню 👇", reply_markup=_build_main_menu_markup())
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await _safe_answer_callback(query)
-    
-    if query.data.startswith("close_"):
+    user_id = update.effective_user.id if update and update.effective_user else 0
+
+    if query.data.startswith("pos_view_") or query.data.startswith("pos_nav_") or query.data == "pos_back_list":
+        symbol_raw = ""
+        if query.data.startswith("pos_view_"):
+            symbol_raw = query.data.replace("pos_view_", "")
+        elif query.data.startswith("pos_nav_"):
+            symbol_raw = query.data.replace("pos_nav_", "")
+        symbol = symbol_raw.replace("_", "/") if symbol_raw else ""
+        try:
+            async with httpx.AsyncClient() as client:
+                data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
+                trades = data.get("trades", {})
+                if not trades:
+                    await query.edit_message_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                    return
+
+                if query.data == "pos_back_list":
+                    list_text, list_kb = _build_positions_list_view(trades)
+                    await query.edit_message_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+                    return
+
+                ordered = [sym for _, sym, _, _ in _sorted_positions_by_risk(trades)]
+                if symbol not in trades:
+                    list_text, list_kb = _build_positions_list_view(trades)
+                    await query.edit_message_text(
+                        f"⚪️ Позиция `{symbol}` уже закрыта.\n\n{list_text}",
+                        parse_mode='Markdown',
+                        reply_markup=list_kb
+                    )
+                    return
+
+                idx = ordered.index(symbol) if symbol in ordered else 0
+                prev_symbol = ordered[idx - 1]
+                next_symbol = ordered[(idx + 1) % len(ordered)]
+                cur_raw = symbol.replace("/", "_")
+                details_text = _build_position_details_view(symbol, trades[symbol])
+                details_text = f"{details_text}\n\n🧭 `{idx + 1}/{len(ordered)}`"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("◀️", callback_data=f"pos_nav_{prev_symbol.replace('/', '_')}"),
+                        InlineKeyboardButton("📋 К списку", callback_data="pos_back_list"),
+                        InlineKeyboardButton("▶️", callback_data=f"pos_nav_{next_symbol.replace('/', '_')}"),
+                    ],
+                    [
+                        InlineKeyboardButton("🔄 Обновить", callback_data=f"pos_refresh_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Reduce 25%", callback_data=f"pos_reduce25_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Reduce 50%", callback_data=f"pos_reduce50_{cur_raw}"),
+                    ],
+                    [InlineKeyboardButton("❌ Закрыть позицию", callback_data=f"close_{cur_raw}")]
+                ]
+                await query.edit_message_text(
+                    details_text,
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка загрузки позиции `{symbol}`: {e}", parse_mode='Markdown')
+
+    elif query.data.startswith("pos_refresh_") or query.data.startswith("pos_reduce25_") or query.data.startswith("pos_reduce50_"):
+        if query.data.startswith("pos_refresh_"):
+            symbol_raw = query.data.replace("pos_refresh_", "")
+            action = "refresh"
+        elif query.data.startswith("pos_reduce25_"):
+            symbol_raw = query.data.replace("pos_reduce25_", "")
+            action = "reduce25"
+        else:
+            symbol_raw = query.data.replace("pos_reduce50_", "")
+            action = "reduce50"
+
+        if _is_action_on_cooldown(user_id, action, symbol_raw):
+            lvl = _spam_level_badge(user_id, action, symbol_raw)
+            if action == "refresh":
+                wait_txt = "чуть-чуть"
+            else:
+                wait_txt = "2-3 сек"
+            await _safe_answer_callback(query, f"⏱ Слишком часто, подожди {wait_txt} · {lvl}", show_alert=False)
+            return
+
+        symbol = symbol_raw.replace("_", "/")
+        try:
+            async with httpx.AsyncClient() as client:
+                if action in {"reduce25", "reduce50"}:
+                    fraction = 0.25 if action == "reduce25" else 0.50
+                    r = await client.post(
+                        f"{ENGINE_URL}/api/v1/trades/reduce/{symbol_raw}",
+                        params={"fraction": fraction},
+                        timeout=10.0
+                    )
+                    res = r.json()
+                    if res.get("status") == "success":
+                        await _safe_answer_callback(query, f"✅ Reduce {int(fraction*100)}% отправлен")
+                    else:
+                        await _safe_answer_callback(
+                            query,
+                            f"❌ Reduce не выполнен: {str(res.get('message', 'unknown error'))[:80]}",
+                            show_alert=True
+                        )
+
+                data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
+                trades = data.get("trades", {})
+                if not trades:
+                    await query.edit_message_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                    return
+                ordered = [sym for _, sym, _, _ in _sorted_positions_by_risk(trades)]
+                if symbol not in trades:
+                    list_text, list_kb = _build_positions_list_view(trades)
+                    await query.edit_message_text(
+                        f"⚪️ Позиция `{symbol}` уже закрыта.\n\n{list_text}",
+                        parse_mode='Markdown',
+                        reply_markup=list_kb
+                    )
+                    return
+
+                idx = ordered.index(symbol) if symbol in ordered else 0
+                prev_symbol = ordered[idx - 1]
+                next_symbol = ordered[(idx + 1) % len(ordered)]
+                cur_raw = symbol.replace("/", "_")
+                details_text = _build_position_details_view(symbol, trades[symbol])
+                details_text = f"{details_text}\n\n🧭 `{idx + 1}/{len(ordered)}`"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("◀️", callback_data=f"pos_nav_{prev_symbol.replace('/', '_')}"),
+                        InlineKeyboardButton("📋 К списку", callback_data="pos_back_list"),
+                        InlineKeyboardButton("▶️", callback_data=f"pos_nav_{next_symbol.replace('/', '_')}"),
+                    ],
+                    [
+                        InlineKeyboardButton("🔄 Обновить", callback_data=f"pos_refresh_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Reduce 25%", callback_data=f"pos_reduce25_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Reduce 50%", callback_data=f"pos_reduce50_{cur_raw}"),
+                    ],
+                    [InlineKeyboardButton("❌ Закрыть позицию", callback_data=f"close_{cur_raw}")]
+                ]
+                await query.edit_message_text(
+                    details_text,
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка Pro-действия для `{symbol}`: {e}", parse_mode='Markdown')
+
+    elif query.data.startswith("close_"):
         symbol_raw = query.data.replace("close_", "")
+        if _is_action_on_cooldown(user_id, "close", symbol_raw):
+            lvl = _spam_level_badge(user_id, "close", symbol_raw)
+            await _safe_answer_callback(query, f"⏱ Закрытие уже отправлено, подожди 2-3 сек... · {lvl}", show_alert=False)
+            return
         symbol = symbol_raw.replace("_", "/")
         
         try:
@@ -350,6 +799,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"❌ Ошибка закрытия **{symbol}**: {res.get('message')}")
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
+
+    elif query.data == "rt_toggle_trading":
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
+                res = response.json()
+                st = "ВКЛ" if res.get("is_enabled") else "ВЫКЛ"
+                await _safe_answer_callback(query, f"🔄 Автоторговля: {st}")
+                await _render_settings_message(query, edit=True)
+        except Exception as e:
+            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data.startswith("apply_preset_"):
         preset_name = query.data.replace("apply_preset_", "")
@@ -378,7 +838,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
 
-    elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc"}:
+    elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc", "rt_pos_usdt_dec", "rt_pos_usdt_inc", "rt_tp_dec", "rt_tp_inc", "rt_expiry_dec", "rt_expiry_inc"}:
         try:
             async with httpx.AsyncClient() as client:
                 runtime = await _load_runtime_settings(client)
@@ -396,7 +856,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await _render_settings_message(query, edit=True)
                     else:
                         await _safe_answer_callback(query, "❌ Не удалось обновить маржу", show_alert=True)
-                else:
+                elif query.data.startswith("rt_open_trades"):
                     cur = int(runtime.get("max_open_trades", settings.max_open_trades))
                     new_val = cur - 1 if query.data.endswith("dec") else cur + 1
                     response = await client.post(
@@ -410,6 +870,70 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await _render_settings_message(query, edit=True)
                     else:
                         await _safe_answer_callback(query, "❌ Не удалось обновить лимит сделок", show_alert=True)
+                elif query.data.startswith("rt_pos_usdt"):
+                    cur = float(runtime.get("position_size_usdt", getattr(settings, "position_size_usdt", 0.0)) or 0.0)
+                    new_val = cur - 1.0 if query.data.endswith("dec") else cur + 1.0
+                    new_val = max(0.0, min(100000.0, new_val))
+                    response = await client.post(
+                        f"{ENGINE_URL}/api/v1/runtime-settings/position-size-usdt",
+                        params={"value": new_val},
+                        timeout=5.0
+                    )
+                    res = response.json()
+                    if res.get("status") == "success":
+                        await _safe_answer_callback(query, f"✅ Объём: {res.get('position_size_usdt', new_val):.2f} USDT")
+                        await _render_settings_message(query, edit=True)
+                    else:
+                        await _safe_answer_callback(query, "❌ Не удалось обновить объём", show_alert=True)
+                elif query.data.startswith("rt_tp"):
+                    cur = float(runtime.get("tp_pct", settings.tp_pct) or settings.tp_pct)
+                    step = 0.001
+                    new_val = cur - step if query.data.endswith("dec") else cur + step
+                    response = await client.post(
+                        f"{ENGINE_URL}/api/v1/runtime-settings/tp-pct",
+                        params={"value": new_val},
+                        timeout=5.0
+                    )
+                    res = response.json()
+                    if res.get("status") == "success":
+                        await _safe_answer_callback(query, f"✅ TP: {res.get('tp_pct', new_val)*100:.2f}%")
+                        await _render_settings_message(query, edit=True)
+                    else:
+                        await _safe_answer_callback(query, "❌ Не удалось обновить TP", show_alert=True)
+                else:
+                    cur = int(runtime.get("signal_expiry_seconds", settings.signal_expiry_seconds))
+                    new_val = cur - 10 if query.data.endswith("dec") else cur + 10
+                    response = await client.post(
+                        f"{ENGINE_URL}/api/v1/runtime-settings/signal-expiry",
+                        params={"value": new_val},
+                        timeout=5.0
+                    )
+                    res = response.json()
+                    if res.get("status") == "success":
+                        await _safe_answer_callback(query, f"✅ Expiry: {res.get('signal_expiry_seconds', new_val)}с")
+                        await _render_settings_message(query, edit=True)
+                    else:
+                        await _safe_answer_callback(query, "❌ Не удалось обновить expiry", show_alert=True)
+        except Exception as e:
+            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+
+    elif query.data in {"rt_side_long", "rt_side_short", "rt_side_both"}:
+        value = query.data.replace("rt_side_", "").upper()
+        if value == "BOTH":
+            value = "BOTH"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{ENGINE_URL}/api/v1/runtime-settings/allowed-side",
+                    params={"value": value},
+                    timeout=5.0
+                )
+                res = response.json()
+                if res.get("status") == "success":
+                    await _safe_answer_callback(query, f"✅ Тип позиции: {res.get('allowed_position_side', value)}")
+                    await _render_settings_message(query, edit=True)
+                else:
+                    await _safe_answer_callback(query, f"❌ {res.get('message', 'Не удалось обновить тип позиции')}", show_alert=True)
         except Exception as e:
             await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
 
@@ -432,7 +956,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data == "reset_stats":
-        await _safe_answer_callback(query, "Эта функция будет реализована в следующем обновлении БД.", show_alert=True)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟡 Binance", callback_data="reset_stats_binance")],
+            [InlineKeyboardButton("🌐 Все биржи", callback_data="reset_stats_all")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="reset_stats_cancel")],
+        ])
+        await query.edit_message_text(
+            "⚠️ **Сброс статистики**\n\nВыберите биржу, для которой нужно сбросить статистику.",
+            reply_markup=kb,
+            parse_mode='Markdown'
+        )
+    elif query.data in {"reset_stats_binance", "reset_stats_all"}:
+        scope = "binance" if query.data.endswith("binance") else "all"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/stats/reset", params={"scope": scope}, timeout=8.0)
+                res = response.json()
+                if res.get("status") == "success":
+                    await query.edit_message_text(f"✅ Статистика успешно сброшена (`{scope}`).", parse_mode='Markdown')
+                else:
+                    await query.edit_message_text(f"❌ Ошибка сброса: {res.get('message')}")
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
+    elif query.data == "reset_stats_cancel":
+        await query.edit_message_text("❎ Сброс статистики отменён.")
 
 # ======= ANTI-SPAM & RATE LIMITING (Этап 18) =======
 # Хранилище: {user_id: [timestamp1, timestamp2, ...]}

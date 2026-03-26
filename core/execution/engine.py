@@ -41,6 +41,17 @@ class ExecutionEngine:
         self._metrics_cache: Optional[Tuple[float, float, int]] = None
         self._metrics_cache_ts: float = 0
         self._METRICS_CACHE_TTL: float = 30.0
+        self._metrics_lock: asyncio.Lock = asyncio.Lock()
+        self._metrics_fail_streak: int = 0
+        self._metrics_backoff_until: float = 0.0
+        self._balance_cache: Optional[Tuple[float, float]] = None  # (free, total)
+        self._balance_cache_ts: float = 0.0
+        self._balance_backoff_until: float = 0.0
+        self._balance_fail_streak: int = 0
+        self._positions_cache: Optional[Tuple[float, int]] = None  # (drawdown, open_count)
+        self._positions_cache_ts: float = 0.0
+        self._positions_backoff_until: float = 0.0
+        self._positions_fail_streak: int = 0
         self._last_ws_reconcile_ts: float = 0.0
         self._entry_policy_activated: bool = False
         self._rescue_cooldown_until: Dict[str, float] = {}
@@ -162,7 +173,7 @@ class ExecutionEngine:
         # TP: LONG — ближайшая цель сверху; SHORT — ближайшая цель снизу.
         return min(current, candidate) if is_long else max(current, candidate)
 
-    async def _get_live_position(self, symbol: str) -> Tuple[float, Optional[str]]:
+    async def _get_live_position(self, symbol: str, preferred_side: Optional[str] = None) -> Tuple[float, Optional[str]]:
         """
         Возвращает актуальный размер позиции и сторону из биржи:
         - size: абсолютный размер (0.0 если позиции нет)
@@ -179,6 +190,8 @@ class ExecutionEngine:
                 ctx="fetch_positions(all)"
             )
 
+        norm_pref = (preferred_side or "").upper()
+        candidates: List[Tuple[float, str]] = []
         for pos in (positions or []):
             if self._norm_sym(pos.get("symbol")) != symbol:
                 continue
@@ -193,10 +206,19 @@ class ExecutionEngine:
 
             side = str(pos.get("side", "")).upper()
             if side in ("LONG", "SHORT"):
-                return abs(contracts), side
-            return abs(contracts), ("LONG" if contracts > 0 else "SHORT")
+                candidates.append((abs(contracts), side))
+            else:
+                candidates.append((abs(contracts), ("LONG" if contracts > 0 else "SHORT")))
 
-        return 0.0, None
+        if not candidates:
+            return 0.0, None
+        if norm_pref in ("LONG", "SHORT"):
+            for sz, sd in candidates:
+                if sd == norm_pref:
+                    return sz, sd
+        # fallback: самая крупная позиция по символу
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0]
 
     async def start(self):
         """Запуск фоновых задач"""
@@ -444,13 +466,82 @@ class ExecutionEngine:
                             ctx=f"set_sl.recover_openAlgoOrders({symbol})"
                         )
                         existing = raw_existing.get("algoOrders", []) if isinstance(raw_existing, dict) else (raw_existing if isinstance(raw_existing, list) else [])
-                        sl_candidates = [str(eo.get("algoId")) for eo in existing if "STOP" in str(eo.get("type", "")).upper() and eo.get("algoId")]
-                        if sl_candidates:
-                            sl_id = sl_candidates[0]
+                        sl_trigger_f = float(sl_trigger)
+                        ref_f = float(ref_price) if ref_price is not None else None
+                        # Толеранс на округления/нормализацию триггеров.
+                        tol = max(abs(sl_trigger_f) * 1e-5, abs(ref_f) * 1e-7 if ref_f else 1e-8)
+
+                        def _close_pos(v) -> bool:
+                            vv = str(v).lower().strip()
+                            return vv in {"1", "true", "yes", "y"}
+
+                        def _get_trig(eo) -> float:
+                            for k in ("stopPrice", "triggerPrice"):
+                                try:
+                                    v = eo.get(k)
+                                    if v is None:
+                                        continue
+                                    fv = float(v)
+                                    if fv > 0:
+                                        return fv
+                                except Exception:
+                                    continue
+                            return 0.0
+
+                        entry_side_is_buy = side.upper() == "BUY"
+                        correct_side = lambda trig: (trig < ref_f) if (entry_side_is_buy and ref_f is not None) else ((trig > ref_f) if (not entry_side_is_buy and ref_f is not None) else True)
+
+                        stop_like = []
+                        for eo in existing:
+                            algo_id = eo.get("algoId")
+                            if not algo_id:
+                                continue
+                            type_str = str(eo.get("type", "")).upper()
+                            trig = _get_trig(eo)
+                            if trig <= 0:
+                                continue
+                            if not correct_side(trig):
+                                continue
+                            is_stop = "STOP" in type_str or "STOP_MARKET" in type_str
+                            is_close_pos = _close_pos(eo.get("closePosition"))
+                            near = abs(trig - sl_trigger_f) <= tol
+                            # Приоритет: STOP* + близко к нашему sl_trigger.
+                            if is_stop and near:
+                                stop_like.append((0, algo_id))
+                            elif is_stop and is_close_pos and near:
+                                stop_like.append((1, algo_id))
+                            elif is_stop and is_close_pos:
+                                stop_like.append((2, algo_id))
+                            elif near:
+                                # Иногда Binance отдаёт тип не содержащий STOP в точности.
+                                stop_like.append((3, algo_id))
+
+                        if stop_like:
+                            stop_like.sort(key=lambda x: x[0])
+                            sl_id = str(stop_like[0][1])
                             logger.warning(f"⚠️ [PROTECT] SL already exists for {symbol}, reuse algoId={sl_id}")
                         else:
-                            logger.error(f"❌ [PROTECT] SL missing after -4130 for {symbol}: {sl_err}")
-                            return None, None
+                            # Если конкретного SL-кандидата не нашлось — повторно попробуем поставить SL,
+                            # но уводим триггер чуть дальше от рынка (уменьшаем шанс на -4130/немедленный триггер).
+                            if ref_f is not None:
+                                extra = max(ref_f * 0.0005, 1e-8)
+                                sl_trigger2 = (sl_trigger_f - extra) if entry_side_is_buy else (sl_trigger_f + extra)
+                                sl_trigger2 = await self._normalize_price(symbol, sl_trigger2)
+                                if ref_f and self._is_valid_stop_side(sl_trigger2, ref_f, side):
+                                    sl_p["triggerPrice"] = str(sl_trigger2)
+                                    sl_p2 = dict(sl_p)
+                                    res_sl = await self._with_time_sync_retry(
+                                        lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', sl_p2),
+                                        ctx=f"set_sl.recover_retry({symbol})"
+                                    )
+                                    sl_id = str(res_sl.get("algoId"))
+                                    logger.warning(f"⟳ [PROTECT] SL recover retry success for {symbol}, algoId={sl_id}")
+                                else:
+                                    logger.error(f"❌ [PROTECT] SL recover retry invalid for {symbol}: {sl_trigger2}")
+                                    return None, None
+                            else:
+                                logger.error(f"❌ [PROTECT] SL missing after -4130 for {symbol}: {sl_err}")
+                                return None, None
                     except Exception as rec_err:
                         logger.error(f"❌ [PROTECT] SL recover failed for {symbol}: {rec_err}")
                         return None, None
@@ -545,7 +636,6 @@ class ExecutionEngine:
             )
             algo_orders = algo_raw.get("algoOrders", []) if isinstance(algo_raw, dict) else (algo_raw if isinstance(algo_raw, list) else [])
 
-            # Маппинг ордеров биржи
             ex_orders_by_symbol = {}
             for o in (std_orders or []):
                 s = self._norm_sym(o.get("symbol"))
@@ -560,156 +650,143 @@ class ExecutionEngine:
                     "stopPrice": (o.get("triggerPrice") or o.get("stopPrice")),
                 })
 
-            # Читаем БД
+            # Единая сессия для всех операций с БД
             async with async_session() as session:
                 res = await session.execute(select(PositionModel).where(PositionModel.status == PositionStatus.OPEN))
                 db_positions_raw = res.scalars().all()
                 db_positions = {self._norm_sym(p.symbol): p for p in db_positions_raw}
 
-            new_active = {}
-            for p in (pos_data or []):
-                contracts = float(p.get("contracts", 0) or p.get("pa", 0) or 0)
-                symbol = self._norm_sym(p.get("symbol", ""))
-                if not symbol or abs(contracts) <= 1e-8: continue
-
-                entry = float(p.get("entryPrice") or 0.0)
-                # K2: Проверка направления (CCXT возвращает строковое поле side: long/short)
-                is_long = p.get("side", "").lower() == "long"
-                contracts = abs(contracts) # Гарантируем абсолютный объем для дальнейших расчетов
-                
-                # Ищем ВСЕ записи в БД для этого символа (Этап: Очистка дублей)
-                matching_db = [p_db for p_db in db_positions_raw if self._norm_sym(p_db.symbol) == symbol and p_db.status == PositionStatus.OPEN]
-                
-                dbp = None
-                if not matching_db:
-                    # Это позиция открытая вручную или до перезапуска
-                    sl_def = entry * (0.95 if is_long else 1.05)
-                    tp_def = entry * (1.10 if is_long else 0.90)
-                    dbp = PositionModel(
-                        user_id=1, symbol=symbol,
-                        side=SignalType.LONG if is_long else SignalType.SHORT,
-                        size=contracts, entry_price=entry,
-                        status=PositionStatus.OPEN,
-                        stop_loss=sl_def, take_profit=tp_def,
-                        opened_at=datetime.datetime.utcnow()
-                    )
-                    session.add(dbp); await session.commit(); await session.refresh(dbp)
-                else:
-                    # Берем самую последнюю запись, остальные гасим (если One-way режим)
-                    dbp = matching_db[-1]
-                    if len(matching_db) > 1:
-                        for extra in matching_db[:-1]: 
-                            extra.status = PositionStatus.CLOSED
-                            extra.closed_at = datetime.datetime.utcnow()
-                        await session.commit()
-                    
-                    # ПРИНУДИТЕЛЬНО СИНХРОНИЗИРУЕМ ОБЪЕМ ИЗ БИРЖИ В БД
-                    if abs(float(dbp.size) - contracts) > 1e-6:
-                        logger.info(f"📊 [SYNC] Обновлен объем {symbol}: {dbp.size} -> {contracts}")
-                        dbp.size = contracts
-                        await session.commit()
-
-                # Ищем SL и TP на бирже (K9: Независимый поиск в ex_orders)
-                found_sl, found_tp = None, None
-                sl_id, tp_id = None, None
-                for o in ex_orders_by_symbol.get(symbol, []):
-                    trig = float(o.get("stopPrice") or 0.0)
-                    if trig <= 0:
+                new_active = {}
+                for p in (pos_data or []):
+                    contracts = float(p.get("contracts", 0) or p.get("pa", 0) or 0)
+                    symbol = self._norm_sym(p.get("symbol", ""))
+                    if not symbol or abs(contracts) <= 1e-8:
                         continue
-                    kind = self._classify_protective_order(
-                        str(o.get("type", "")),
-                        trig,
-                        entry,
-                        is_long
-                    )
-                    if kind == "SL":
-                        found_sl = self._pick_better_level(found_sl, trig, kind="SL", is_long=is_long)
-                        sl_id = o.get("id")
-                    elif kind == "TP":
-                        found_tp = self._pick_better_level(found_tp, trig, kind="TP", is_long=is_long)
-                        tp_id = o.get("id")
 
-                # РЕАНИМАЦИЯ: критично восстанавливать только SL.
-                # TP может отсутствовать временно (частичные выходы, ручные действия, лаг биржи)
-                # и не должен провоцировать цикл постоянного re-create защиты.
-                if (not sl_id and dbp.stop_loss):
-                    now_ts = time.time()
-                    if now_ts < self._rescue_cooldown_until.get(symbol, 0.0):
-                        logger.warning(f"⏭ [RESCUE] Cooldown active for {symbol}, skip retry.")
-                    else:
-                        live_size, live_side = await self._get_live_position(symbol)
-                        if live_size <= 0 or (live_side and ((is_long and live_side != "LONG") or ((not is_long) and live_side != "SHORT"))):
-                            logger.warning(f"⏭ [RESCUE] Skip for {symbol}: no live position or side mismatch.")
-                            continue
-                        logger.warning(f"🛡 [RESCUE] Восстанавливаю защиту для {symbol} (SL: {sl_id}, TP: {tp_id})")
-                        # Если stop на неправильной стороне, не шлем его в биржу как есть.
-                        safe_stop = dbp.stop_loss
-                        if safe_stop:
-                            invalid_for_side = (is_long and float(safe_stop) >= entry) or ((not is_long) and float(safe_stop) <= entry)
-                            if invalid_for_side:
-                                safe_stop = entry * (0.995 if is_long else 1.005)
-                                logger.warning(f"⚠️ [RESCUE] Adjust stop for {symbol}: {dbp.stop_loss} -> {safe_stop}")
+                    entry = float(p.get("entryPrice") or 0.0)
+                    is_long = p.get("side", "").lower() == "long"
+                    contracts = abs(contracts)
 
-                        # Пересоздаем оба для гарантии консистентности.
-                        res_sl_id, res_tp_id = await self._set_protective_orders(
-                            symbol, "BUY" if is_long else "SELL", contracts, safe_stop, dbp.take_profit
+                    matching_db = [p_db for p_db in db_positions_raw if self._norm_sym(p_db.symbol) == symbol and p_db.status == PositionStatus.OPEN]
+
+                    dbp = None
+                    if not matching_db:
+                        sl_def = entry * (0.95 if is_long else 1.05)
+                        tp_def = entry * (1.10 if is_long else 0.90)
+                        dbp = PositionModel(
+                            user_id=1, symbol=symbol,
+                            side=SignalType.LONG if is_long else SignalType.SHORT,
+                            size=contracts, entry_price=entry,
+                            status=PositionStatus.OPEN,
+                            stop_loss=sl_def, take_profit=tp_def,
+                            opened_at=datetime.datetime.utcnow()
                         )
-                        if res_sl_id:
-                            sl_id = res_sl_id
-                            dbp.sl_order_id = sl_id
-                            self._rescue_cooldown_until.pop(symbol, None)
+                        session.add(dbp)
+                        await session.flush()
+                    else:
+                        dbp = matching_db[-1]
+                        if len(matching_db) > 1:
+                            for extra in matching_db[:-1]:
+                                extra.status = PositionStatus.CLOSED
+                                extra.closed_at = datetime.datetime.utcnow()
+                            await session.flush()
+
+                        if abs(float(dbp.size) - contracts) > 1e-6:
+                            logger.info(f"[SYNC] Volume {symbol}: {dbp.size} -> {contracts}")
+                            dbp.size = contracts
+                            await session.flush()
+
+                    found_sl, found_tp = None, None
+                    sl_id, tp_id = None, None
+                    for o in ex_orders_by_symbol.get(symbol, []):
+                        trig = float(o.get("stopPrice") or 0.0)
+                        if trig <= 0:
+                            continue
+                        kind = self._classify_protective_order(
+                            str(o.get("type", "")), trig, entry, is_long
+                        )
+                        if kind == "SL":
+                            found_sl = self._pick_better_level(found_sl, trig, kind="SL", is_long=is_long)
+                            sl_id = o.get("id")
+                        elif kind == "TP":
+                            found_tp = self._pick_better_level(found_tp, trig, kind="TP", is_long=is_long)
+                            tp_id = o.get("id")
+
+                    # RESCUE: восстановление SL если отсутствует на бирже
+                    if not sl_id and dbp.stop_loss:
+                        now_ts = time.time()
+                        if now_ts < self._rescue_cooldown_until.get(symbol, 0.0):
+                            logger.warning(f"[RESCUE] Cooldown active for {symbol}")
                         else:
-                            # Не спамим RESCUE при невалидных рыночных условиях.
-                            self._rescue_cooldown_until[symbol] = now_ts + 60
-                            logger.warning(f"⏳ [RESCUE] Failed for {symbol}. Set cooldown 60s.")
-                        if res_tp_id:
-                            tp_id = res_tp_id
-                            dbp.tp_order_id = tp_id
-                        await session.commit()
+                            live_size, live_side = await self._get_live_position(symbol, preferred_side=("LONG" if is_long else "SHORT"))
+                            if live_size <= 0 or (live_side and ((is_long and live_side != "LONG") or ((not is_long) and live_side != "SHORT"))):
+                                logger.warning(f"[RESCUE] Skip {symbol}: no live position or side mismatch")
+                                continue
+                            logger.warning(f"[RESCUE] Restoring protection for {symbol}")
+                            safe_stop = dbp.stop_loss
+                            if safe_stop:
+                                invalid_for_side = (is_long and float(safe_stop) >= entry) or ((not is_long) and float(safe_stop) <= entry)
+                                if invalid_for_side:
+                                    safe_stop = entry * (0.995 if is_long else 1.005)
+                                    logger.warning(f"[RESCUE] Adjusted stop for {symbol}: {dbp.stop_loss} -> {safe_stop}")
 
-                        if res_sl_id or res_tp_id:
-                            await send_telegram_msg(
-                                f"🛡 **RESCUE: Восстановление защиты**\n\n"
-                                f"🔸 Символ: {symbol}\n"
-                                f"🎯 TP: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}\n"
-                                f"✅ Защитные ордера успешно выставлены на бирже."
+                            res_sl_id, res_tp_id = await self._set_protective_orders(
+                                symbol, "BUY" if is_long else "SELL", contracts, safe_stop, dbp.take_profit
                             )
+                            if res_sl_id:
+                                sl_id = res_sl_id
+                                self._rescue_cooldown_until.pop(symbol, None)
+                            else:
+                                self._rescue_cooldown_until[symbol] = now_ts + 60
+                                logger.warning(f"[RESCUE] Failed for {symbol}. Cooldown 60s.")
+                            if res_tp_id:
+                                tp_id = res_tp_id
 
-                # Санити для кеша: для LONG stop < entry, для SHORT stop > entry.
-                cache_stop = found_sl or dbp.stop_loss
-                if cache_stop:
-                    bad_stop = (is_long and float(cache_stop) >= entry) or ((not is_long) and float(cache_stop) <= entry)
-                    if bad_stop:
-                        fallback_stop = dbp.stop_loss if dbp.stop_loss else (entry * (0.95 if is_long else 1.05))
-                        logger.warning(f"⚠️ [RECONCILE] Invalid stop for {symbol}: {cache_stop} vs entry={entry}. Use fallback={fallback_stop}")
-                        cache_stop = fallback_stop
+                            if res_sl_id or res_tp_id:
+                                await send_telegram_msg(
+                                    f"**RESCUE: Protection restored**\n\n"
+                                    f"Symbol: {symbol}\n"
+                                    f"TP: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}"
+                                )
 
-                new_active[symbol] = {
-                    "entry": entry, 
-                    "stop": cache_stop,
-                    "take_profit_live": found_tp or dbp.take_profit,
-                    "stage": 0, 
-                    "opened_at": dbp.opened_at.timestamp(),
-                    "signal_type": "LONG" if is_long else "SHORT", 
-                    "current_size": contracts,
-                    "position_db_id": dbp.id, 
-                    "stop_order_id": sl_id,
-                    "tp_order_id": tp_id,
-                    "initial_stop": float(dbp.stop_loss or cache_stop or 0.0),
-                    "be_moved": (float(cache_stop) >= entry) if is_long else (float(cache_stop) <= entry),
-                }
+                    cache_stop = found_sl or dbp.stop_loss
+                    if cache_stop:
+                        bad_stop = (is_long and float(cache_stop) >= entry) or ((not is_long) and float(cache_stop) <= entry)
+                        if bad_stop:
+                            fallback_stop = dbp.stop_loss if dbp.stop_loss else (entry * (0.95 if is_long else 1.05))
+                            logger.warning(f"[RECONCILE] Invalid stop for {symbol}: {cache_stop} vs entry={entry}. Fallback={fallback_stop}")
+                            cache_stop = fallback_stop
 
-            # Закрываем в БД "призраков"
-            for sym, dbp in db_positions.items():
-                if sym not in new_active:
-                    async with async_session() as session:
-                        await session.execute(update(PositionModel).where(PositionModel.id == dbp.id).values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow()))
-                        await session.commit()
-            
+                    new_active[symbol] = {
+                        "entry": entry,
+                        "stop": cache_stop,
+                        "take_profit_live": found_tp or dbp.take_profit,
+                        "stage": 0,
+                        "opened_at": dbp.opened_at.timestamp(),
+                        "signal_type": "LONG" if is_long else "SHORT",
+                        "current_size": contracts,
+                        "position_db_id": dbp.id,
+                        "stop_order_id": sl_id,
+                        "tp_order_id": tp_id,
+                        "initial_stop": float(dbp.stop_loss or cache_stop or 0.0),
+                        "be_moved": (float(cache_stop) >= entry) if is_long else (float(cache_stop) <= entry),
+                    }
+
+                # Закрываем "призраков" (позиции в БД без живой позиции на бирже)
+                for sym, dbp in db_positions.items():
+                    if sym not in new_active:
+                        await session.execute(
+                            update(PositionModel)
+                            .where(PositionModel.id == dbp.id)
+                            .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
+                        )
+
+                await session.commit()
+
             self.active_trades = new_active
-            logger.info(f"✅ [RECONCILE] Активных позиций: {len(self.active_trades)}")
+            logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
         except Exception as e:
-            logger.error(f"❌ Reconcile Error: {e}")
+            logger.error(f"Reconcile Error: {e}\n{traceback.format_exc()}")
 
     async def execute_signal(self, signal_data: dict, account_balance: float, drawdown: float, open_count: int):
         symbol = signal_data['symbol']
@@ -755,7 +832,12 @@ class ExecutionEngine:
                 await self._prepare_private_ops(ctx=f"execute_signal({symbol})")
                 # 3. Расчет параметров входа
                 entry_price = float(signal_data['entry_price'])
-                stop_price = self.risk_manager.calculate_atr_stop(entry_price, signal_data.get('atr', 100.0), direction)
+                raw_atr = signal_data.get('atr', 0.0)
+                safe_atr = float(raw_atr) if raw_atr and not (isinstance(raw_atr, float) and raw_atr != raw_atr) else 0.0
+                if safe_atr <= 0:
+                    logger.error(f"[{symbol}] ATR invalid ({raw_atr}), cannot enter — aborting")
+                    raise Exception(f"Invalid ATR={raw_atr}, cannot compute stop-loss")
+                stop_price = self.risk_manager.calculate_atr_stop(entry_price, safe_atr, direction)
                 lot_size = self.risk_manager.calculate_position_size(account_balance, entry_price, stop_price)
                 lot_size = await self._normalize_amount(symbol, lot_size)
                 
@@ -832,15 +914,20 @@ class ExecutionEngine:
                 
                 lot_size = filled_total
 
-                # 6. БД Позиция
+                # 6. Пересчёт стопа от ФАКТИЧЕСКОЙ цены входа (а не теоретической из сигнала)
+                if abs(entry_exec - entry_price) > entry_price * 0.0001:
+                    stop_price = self.risk_manager.calculate_atr_stop(entry_exec, safe_atr, direction)
+                    logger.info(f"[{symbol}] SL recalculated for actual fill: entry {entry_price:.6f} → {entry_exec:.6f}, stop → {stop_price:.6f}")
+
+                # 7. БД Позиция
                 async with async_session() as session:
                     pos = PositionModel(user_id=1, signal_id=signal_id, symbol=symbol, side=SignalType.LONG if direction.upper() == "LONG" else SignalType.SHORT,
                                         entry_price=entry_exec, size=lot_size, stop_loss=stop_price, take_profit=signal_data.get("take_profit"),
                                         status=PositionStatus.OPEN, opened_at=datetime.datetime.utcnow())
                     session.add(pos); await session.commit(); await session.refresh(pos)
 
-                # 7. Защитные ордера
-                targets = signal_data.get("targets", signal_data.get("take_profit"))
+                # 8. Защитные ордера
+                targets = signal_data.get("targets") or signal_data.get("take_profit")
                 sl_id, tp_id = await self._set_protective_orders(symbol, direction, lot_size, stop_price, targets)
                 if not sl_id:
                     # Best practice: не оставлять открытую позицию без стопа.
@@ -888,7 +975,7 @@ class ExecutionEngine:
             if symbol not in self.active_trades: return
             trade = self.active_trades[symbol]
             # Синхронизируем размер из биржи: после partial TP локальный current_size может устареть.
-            live_size, _ = await self._get_live_position(symbol)
+            live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
             if live_size <= 1e-8:
                 await self._close_position(symbol, reason="EXTERNAL")
                 return
@@ -951,9 +1038,11 @@ class ExecutionEngine:
                                     f"Trigger: 1R + {'ADX' if adx_ok else 'Breakout'}"
                                 )
             
-            # Трейлинг-стоп
+            # Трейлинг-стоп (skip if ATR is invalid to prevent stop jump to current price)
+            if atr <= 0:
+                return
             new_stop = self.risk_manager.calculate_trailing_stop(trade['stop'], current_price, atr, trade['signal_type'])
-            if abs(new_stop - trade['stop']) > (current_price * 0.0002):
+            if abs(new_stop - trade['stop']) > (current_price * 0.001):
                 logger.info(f"🔄 [TRAILING] Moving {symbol} stop: {trade['stop']} -> {new_stop}")
                 # Перевыставляем ордер
                 await self._cancel_all_orders(symbol)
@@ -1027,7 +1116,7 @@ class ExecutionEngine:
             await self._cancel_all_orders(symbol)
             if reason != "EXTERNAL":
                 side = 'sell' if trade['signal_type'] == "LONG" else 'buy'
-                live_size, live_side = await self._get_live_position(symbol)
+                live_size, live_side = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
                 close_amount = live_size if live_size > 1e-8 else trade['current_size']
                 # Если направление на бирже не совпадает с локальным кешем, не отправляем рыночный close, чтобы не перевернуть позицию.
                 if live_side and live_side != trade['signal_type']:
@@ -1079,38 +1168,141 @@ class ExecutionEngine:
             return True
         return False
 
+    async def manual_reduce(self, symbol: str, fraction: float) -> Dict[str, Any]:
+        """Частичное ручное закрытие позиции (reduce-only market)."""
+        if symbol not in self.active_trades:
+            return {"status": "error", "message": "Trade not found"}
+        try:
+            frac = float(fraction)
+        except Exception:
+            return {"status": "error", "message": "Invalid fraction"}
+        if frac <= 0 or frac >= 1:
+            return {"status": "error", "message": "Fraction must be in (0,1)"}
+
+        trade = self.active_trades[symbol]
+        side = 'sell' if trade.get('signal_type') == "LONG" else 'buy'
+
+        try:
+            live_size, live_side = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
+            if live_side and live_side != trade.get('signal_type'):
+                logger.warning(f"⚠️ [REDUCE] Side mismatch for {symbol}: local={trade.get('signal_type')} live={live_side}")
+                return {"status": "error", "message": "Side mismatch with live position"}
+
+            base_size = live_size if live_size > 1e-8 else float(trade.get('current_size') or 0.0)
+            if base_size <= 1e-8:
+                return {"status": "error", "message": "Position size is too small"}
+
+            reduce_amount = max(base_size * frac, 0.0)
+            market = self.exchange.market(symbol) if hasattr(self.exchange, "market") else None
+            min_amount = float((market or {}).get("limits", {}).get("amount", {}).get("min") or 0.0)
+            if min_amount > 0 and reduce_amount < min_amount:
+                return {"status": "error", "message": f"Reduce amount below minimum ({min_amount})"}
+
+            params = {"reduceOnly": True}
+            await self._with_time_sync_retry(
+                lambda: self.exchange.create_order(symbol, 'market', side, reduce_amount, None, params),
+                ctx=f"manual_reduce({symbol})"
+            )
+            await asyncio.sleep(0.25)
+            await self.reconcile_full()
+            return {
+                "status": "success",
+                "symbol": symbol,
+                "reduced_fraction": frac,
+                "requested_amount": reduce_amount
+            }
+        except Exception as e:
+            logger.error(f"❌ [REDUCE] {symbol} failed: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def get_account_metrics(self):
-        """K4: Метрики с кэшированием (TTL 30с). При ошибке возвращает последнее известное значение."""
+        """K4: Метрики с кэшированием + anti-storm backoff при деградации API."""
         now = time.time()
+        # Fast path: свежий кэш.
         if self._metrics_cache and (now - self._metrics_cache_ts) < self._METRICS_CACHE_TTL:
             return self._metrics_cache
-        
-        try:
-            balance = await self._with_time_sync_retry(
-                lambda: self.exchange.fetch_balance(),
-                ctx="metrics.fetch_balance"
-            )
-            total = balance.get('USDT', {}).get('total', 0.0)
-            free = balance.get('USDT', {}).get('free', total)
-            pos = await self._with_time_sync_retry(
-                lambda: self.exchange.fetch_positions(),
-                ctx="metrics.fetch_positions"
-            )
-            active_p = [p for p in pos if abs(float(p.get('contracts', 0) or p.get('pa', 0) or 0)) > 1e-8]
-            pnl = sum([float(p.get('unrealizedPnl', 0)) for p in active_p])
-            dd = (abs(min(0, pnl)) / total) if total > 0 else 0.0
-            result = (free, dd, len(active_p))
-            # Обновляем кэш
-            self._metrics_cache = result
-            self._metrics_cache_ts = now
-            return result
-        except Exception as e:
-            logger.warning(f"⚠️ [METRICS] Ошибка получения метрик: {e}")
-            # K4: Возвращаем последнее известное значение вместо нулей
-            if self._metrics_cache:
-                logger.info("[METRICS] Используем кэшированные метрики")
+
+        # API в деградации: не штурмим биржу из параллельных задач.
+        if now < self._metrics_backoff_until and self._metrics_cache:
+            return self._metrics_cache
+
+        # Single-flight: только один concurrent запрос метрик наружу.
+        async with self._metrics_lock:
+            now = time.time()
+            if self._metrics_cache and (now - self._metrics_cache_ts) < self._METRICS_CACHE_TTL:
                 return self._metrics_cache
-            return 0.0, 0.0, 0
+            if now < self._metrics_backoff_until and self._metrics_cache:
+                return self._metrics_cache
+
+            try:
+                # Component 1: Balance (имеет свой backoff/cache).
+                if now < self._balance_backoff_until and self._balance_cache:
+                    free, total = self._balance_cache
+                else:
+                    try:
+                        balance = await self._with_time_sync_retry(
+                            lambda: self.exchange.fetch_balance(),
+                            ctx="metrics.fetch_balance"
+                        )
+                        total = float(balance.get('USDT', {}).get('total', 0.0) or 0.0)
+                        free = float(balance.get('USDT', {}).get('free', total) or total)
+                        self._balance_cache = (free, total)
+                        self._balance_cache_ts = now
+                        self._balance_fail_streak = 0
+                        self._balance_backoff_until = 0.0
+                    except Exception as be:
+                        self._balance_fail_streak = min(self._balance_fail_streak + 1, 8)
+                        b_backoff = min(90.0, float(2 ** self._balance_fail_streak))
+                        self._balance_backoff_until = now + b_backoff
+                        logger.warning(f"⚠️ [METRICS] Balance fetch failed: {be} (backoff {b_backoff:.0f}s)")
+                        if self._balance_cache:
+                            free, total = self._balance_cache
+                        else:
+                            raise
+
+                # Component 2: Positions (имеет свой backoff/cache).
+                if now < self._positions_backoff_until and self._positions_cache:
+                    dd, open_cnt = self._positions_cache
+                else:
+                    try:
+                        pos = await self._with_time_sync_retry(
+                            lambda: self.exchange.fetch_positions(),
+                            ctx="metrics.fetch_positions"
+                        )
+                        active_p = [p for p in pos if abs(float(p.get('contracts', 0) or p.get('pa', 0) or 0)) > 1e-8]
+                        pnl = sum([float(p.get('unrealizedPnl', 0)) for p in active_p])
+                        dd = (abs(min(0, pnl)) / total) if total > 0 else 0.0
+                        open_cnt = len(active_p)
+                        self._positions_cache = (dd, open_cnt)
+                        self._positions_cache_ts = now
+                        self._positions_fail_streak = 0
+                        self._positions_backoff_until = 0.0
+                    except Exception as pe:
+                        self._positions_fail_streak = min(self._positions_fail_streak + 1, 8)
+                        p_backoff = min(60.0, float(2 ** self._positions_fail_streak))
+                        self._positions_backoff_until = now + p_backoff
+                        logger.warning(f"⚠️ [METRICS] Positions fetch failed: {pe} (backoff {p_backoff:.0f}s)")
+                        if self._positions_cache:
+                            dd, open_cnt = self._positions_cache
+                        else:
+                            raise
+
+                result = (free, dd, int(open_cnt))
+                self._metrics_cache = result
+                self._metrics_cache_ts = now
+                self._metrics_fail_streak = 0
+                self._metrics_backoff_until = 0.0
+                return result
+            except Exception as e:
+                self._metrics_fail_streak = min(self._metrics_fail_streak + 1, 8)
+                # Экспоненциальный backoff: 2,4,8,...,60 сек.
+                backoff = min(60.0, float(2 ** self._metrics_fail_streak))
+                self._metrics_backoff_until = now + backoff
+                logger.warning(f"⚠️ [METRICS] Ошибка получения метрик: {e} (backoff {backoff:.0f}s)")
+                if self._metrics_cache:
+                    logger.info("[METRICS] Используем кэшированные метрики")
+                    return self._metrics_cache
+                return 0.0, 0.0, 0
 
     async def _set_leverage_best_effort(self, symbol: str, leverage: int):
         try: await self.exchange.set_leverage(int(leverage), symbol)

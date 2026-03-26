@@ -11,12 +11,11 @@ from utils.logger import get_signal_logger, app_logger
 from utils.notifier import send_telegram_msg
 from services.market_data.market_streamer import MarketDataService
 from core.strategies.strategies import (
-    StrategyWRD, StrategyATRBreakout, StrategyMATrend, 
-    StrategyDonchian, StrategyMomentum, StrategyPullback, 
-    StrategyVolContraction, StrategyRangeExpansion, 
-    StrategyOpeningRange, StrategyWideRangeReversal,
-    StrategyRuleOf7, StrategyBollingerClusters, StrategyTripleSMA, StrategyFundingSqueeze, 
-    StrategyWilliamsR, get_timeframe_seconds
+    StrategyWRD, StrategyDonchian, StrategyMATrend,
+    StrategyPullback, StrategyVolContraction,
+    StrategyWideRangeReversal, StrategyWilliamsR,
+    StrategyFundingSqueeze, StrategyRuleOf7,
+    get_timeframe_seconds
 )
 from core.indicators.indicators import (
     calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma,
@@ -24,12 +23,12 @@ from core.indicators.indicators import (
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
-from ai.model import AIModel
+from ai.model import AIModel, ExternalAIAdapter
+from ai.scoring_learner import ScoringLearner, learning_loop
 from core.risk.risk_manager import RiskManager
 from core.execution.engine import ExecutionEngine
 from database.session import async_session
 from database.models.all_models import Signal
-from core.strategies.spread_strategy import SpreadMomentumStrategy
 from utils.exporter import exporter
 
 logger = get_signal_logger()
@@ -39,79 +38,85 @@ class TradingOrchestrator:
         self.market_data = market_data
         self.execution = execution_engine
         self.risk_manager = execution_engine.risk_manager
-        
-        # Инициализация полного ансамбля из 10 стратегий (Группы 1-4)
+
+        # Консолидированный ансамбль: 8 стратегий в 4 группах (по Швагеру)
+        # Breakout (3): Donchian, WRD, VolContraction
+        # Trend (2): MATrend, Pullback
+        # Mean Reversion (2): WilliamsR, WideRangeReversal
+        # Crypto-specific (1): FundingSqueeze
         self.strategies = [
-            StrategyWRD(atr_multiplier=1.6),
-            StrategyATRBreakout(period=20, multiplier=0.5),
-            StrategyMATrend(fast_ma=20, slow_ma=50),
             StrategyDonchian(period=20),
-            StrategyMomentum(period=10, threshold_multiplier=1.5),
-            StrategyPullback(ma_period=20),
-            StrategyVolContraction(threshold=0.6),
-            StrategyRangeExpansion(),
-            StrategyOpeningRange(),
+            StrategyWRD(atr_multiplier=1.6),
+            StrategyVolContraction(lookback=300, contraction_ratio=0.6),
+            StrategyMATrend(fast_ma=20, slow_ma=50, global_ma=200),
+            StrategyPullback(ma_period=20, global_period=200),
+            StrategyWilliamsR(),
             StrategyWideRangeReversal(),
-            StrategyBollingerClusters(bb_period=40, rsi_limit=60, min_cluster=3),
-            StrategyTripleSMA(fast=9, medium=30, slow=60),
             StrategyFundingSqueeze(),
-            StrategyWilliamsR()  # Фаза 3 (U5): Williams %R Mean-Reversion
         ]
-        
+
         self.scorer = SignalScorer()
-        self.ai_model = AIModel()
+        self.scoring_learner = ScoringLearner(weights_file=settings.scoring_weights_file)
+        self.ai_model = AIModel(weights=self.scoring_learner.get_weights())
+        self.external_ai = self._init_external_ai()
         self.market_history: Dict[str, Dict[str, pd.DataFrame]] = {}
-        
-        # Кэш внешних данных для AI
+
         self.funding_rates: Dict[str, float] = {}
         self.orderbooks: Dict[str, Any] = {}
-        # Статистика для Heartbeat (Этап 6)
         self.processed_candles = 0
         self.start_time = time.time()
         self.errors_count = 0
-        
-        # --- НОВОЕ: Кэш дубликатов сигналов для скорости ---
+
         self._last_signals_cache: Dict[tuple, float] = {}
         self._stale_signals_count: Dict[str, int] = defaultdict(int)
         self._stale_signals_last_log_ts: float = 0.0
         self._last_eval_candle_ts: Dict[tuple, float] = {}
-        
-        # Инфраструктура для Spread Momentum (из статьи)
-        self.spreader = SpreadMomentumStrategy()
-        self.last_avg_prices: Dict[str, float] = {}
-        
+
+        self._recent_error_ts = deque(maxlen=200)
+        self._instrument_info_cache: Dict[str, Any] = {}
+
         self.market_data.register_callback(self.on_market_data)
 
-        # Circuit breaker: если идет лавина ошибок - отключаем торговлю
-        self._recent_error_ts = deque(maxlen=200)
+    @staticmethod
+    def _init_external_ai() -> ExternalAIAdapter:
+        adapter = ExternalAIAdapter(
+            backend=settings.external_ai_backend or "ollama",
+            base_url=settings.external_ai_url,
+            api_key=settings.external_ai_api_key,
+            model_name=settings.external_ai_model,
+        )
+        if settings.external_ai_backend:
+            adapter.enable()
+        return adapter
 
     async def start(self):
-        logger.info("Запуск Торгового Движка v2 (10 стратегий + AI Layer)...")
+        logger.info(f"Запуск Торгового Движка (8 стратегий, Schwager-based ensemble)...")
         await self._prefetch_history()
-        # Запуск Heartbeat задачи (Этап 6)
         asyncio.create_task(self._heartbeat_loop())
+        if settings.scoring_learner_enabled:
+            asyncio.create_task(learning_loop(
+                self.scoring_learner, self.ai_model,
+                interval_hours=settings.scoring_learn_interval_hours
+            ))
+            logger.info(f"ScoringLearner: background learning every {settings.scoring_learn_interval_hours}h")
         await self.market_data.start()
-    
+
     async def _prefetch_history(self):
-        """Загрузка истории с ограничением параллелизма (чтобы не банил Binance)"""
-        logger.info("💾 Загружаем историю свечей (Throttled Prefetching)...")
-        
+        logger.info("Загружаем историю свечей...")
         symbols = self.market_data.symbols
         timeframes = self.market_data.timeframes
         total_tasks = len(symbols) * len(timeframes)
         processed = 0
-        
-        # Ограничиваем до 5 одновременных запросов
         semaphore = asyncio.Semaphore(5)
-        
+
         async def sem_fetch(s, t):
             nonlocal processed
             async with semaphore:
                 res = await self._fetch_and_store_history(s, t)
                 processed += 1
                 if processed % 5 == 0 or processed == total_tasks:
-                    logger.info(f"⏳ Прогресс загрузки истории: {processed}/{total_tasks}")
-                await asyncio.sleep(0.3) # Маленькая пауза между запросами
+                    logger.info(f"Прогресс загрузки истории: {processed}/{total_tasks}")
+                await asyncio.sleep(0.3)
                 return res
 
         tasks = []
@@ -120,14 +125,13 @@ class TradingOrchestrator:
                 self.market_history[symbol] = {}
             for tf in timeframes:
                 tasks.append(sem_fetch(symbol, tf))
-        
+
         results = await asyncio.gather(*tasks)
         loaded_count = sum(1 for r in results if r)
-        logger.info(f"✅ Загружена история для {loaded_count} инструментов.")
+        logger.info(f"Загружена история для {loaded_count} инструментов.")
 
     async def _fetch_and_store_history(self, symbol: str, tf: str):
         try:
-            # Для RSI 450 и CSI нам нужно минимум 500 свечей
             history = await self.market_data.fetch_ohlcv(symbol, tf, limit=600)
             if history:
                 df = pd.DataFrame(history, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -147,13 +151,12 @@ class TradingOrchestrator:
         elif data_type == "orderbook":
             self.orderbooks[symbol] = data
         elif data_type == "funding_rate":
-            # data здесь - словарь всех ставок
             if isinstance(data, dict):
                 for sym, rate_info in data.items():
                     if isinstance(rate_info, dict):
                         self.funding_rates[sym] = rate_info.get('fundingRate', 0.0)
         elif data_type == "avg_price":
-            self.last_avg_prices[symbol] = data
+            pass
 
     async def _process_ohlcv(self, symbol: str, timeframe: str, new_candle: list):
         if symbol not in self.market_history:
@@ -172,46 +175,50 @@ class TradingOrchestrator:
             'close': float(new_candle[4]),
             'volume': float(new_candle[5])
         }
-        
+
         if not df.empty and df.iloc[-1]['timestamp'] == new_candle[0]:
             df.iloc[-1] = new_row
         else:
             df.loc[len(df)] = new_row
-            
-        if len(df) > 1000: 
+
+        if len(df) > 1000:
             df = df.tail(1000).reset_index(drop=True)
         self.market_history[symbol][timeframe] = df
 
-        # --- НОВОЕ: Обновление Трейлинг-стопов и Пирамидинга (Баг 4.2) ---
-        if timeframe == "1m":
+        # Обновление трейлинг-стопов по 1-минутным свечам.
+        # CRITICAL: используем ATR из ПРЕДЫДУЩЕЙ (уже рассчитанной) свечи,
+        # т.к. индикаторы для текущей свечи ещё не рассчитаны.
+        if timeframe == "1m" and len(df) >= 3:
             current_price = df.iloc[-1]['close']
-            atr = float(df.iloc[-1].get('atr', 0.0) or 0.0)
-            adx = None
-            # Для подтверждения тренда в BE используем ADX с последней закрытой 15m-свечи.
-            df_15m = self.market_history.get(symbol, {}).get("15m")
-            if df_15m is not None and not df_15m.empty and len(df_15m) > 1 and "adx" in df_15m.columns:
-                adx = df_15m.iloc[-2].get("adx", None)
-            elif "adx" in df.columns:
-                adx = df.iloc[-1].get("adx", None)
-            try:
-                adx = float(adx) if adx is not None else None
-            except Exception:
+            atr = float(df.iloc[-2].get('atr', 0.0) or 0.0)
+            if atr <= 0:
+                atr = float(df.iloc[-3].get('atr', 0.0) or 0.0) if len(df) >= 4 else 0.0
+            if atr <= 0:
+                pass  # Skip trailing if no valid ATR
+            else:
                 adx = None
-            asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx))
+                df_15m = self.market_history.get(symbol, {}).get("15m")
+                if df_15m is not None and not df_15m.empty and len(df_15m) > 1 and "adx" in df_15m.columns:
+                    adx = df_15m.iloc[-2].get("adx", None)
+                elif "adx" in df.columns:
+                    adx = df.iloc[-2].get("adx", None)
+                try:
+                    adx = float(adx) if adx is not None else None
+                except Exception:
+                    adx = None
+                asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx))
 
-        if len(df) < 60: 
+        if len(df) < 60:
             return
 
-        # 1. Расчет индикаторов (Vectorized Engine)
         try:
-            # Небольшая пауза для разгрузки Event Loop (предотвращает 100% CPU при запуске)
             await asyncio.sleep(0.05)
             self.processed_candles += 1
-            df = self._calculate_indicators(df)                         # 1. Индикаторы (Баг 6.1)
-            df['funding_rate'] = self.funding_rates.get(symbol, 0.0)    # 2. Внешние данные
+            df = self._calculate_indicators(df)
+            df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
             self.market_history[symbol][timeframe] = df
 
-            # Сигналы только по закрытым свечам: без последней (возможно незавершённой) — убираем перекрашивание кроссов.
+            # Сигналы только по закрытым свечам
             if len(df) < 2:
                 return
             df_eval = df.iloc[:-1].copy()
@@ -219,9 +226,7 @@ class TradingOrchestrator:
                 return
             df_eval = self._calculate_indicators(df_eval)
             df_eval['funding_rate'] = self.funding_rates.get(symbol, 0.0)
-            # Защита от повторной обработки одной и той же закрытой свечи:
-            # в websocket поток может прийти несколько апдейтов для текущей свечи,
-            # но торговая логика должна выполняться только один раз на закрытую свечу.
+
             eval_candle_ts = df_eval.iloc[-1]['timestamp']
             try:
                 eval_candle_ts = float(eval_candle_ts.timestamp()) if isinstance(eval_candle_ts, datetime) else float(eval_candle_ts)
@@ -234,7 +239,7 @@ class TradingOrchestrator:
                 return
             self._last_eval_candle_ts[eval_key] = eval_candle_ts
 
-            # ADX по последней завершённой свече текущего TF; на 1m/5m — с 15m (предпоследняя = последняя закрытая 15m).
+            # ADX-фильтр для трендовых стратегий
             current_adx = df_eval.iloc[-1].get('adx', 0)
             if timeframe in ["1m", "5m"] and "15m" in self.market_history.get(symbol, {}):
                 df_15m = self.market_history[symbol]["15m"]
@@ -244,124 +249,139 @@ class TradingOrchestrator:
             for strategy in self.strategies:
                 signal = strategy.evaluate(df_eval)
                 if signal:
-                    # Включен StrategyPullback в фильтрацию флэта; Momentum ATR — тот же режимный фильтр, что и пробои.
-                    trend_strategies = [
-                        "MA Trend", "Triple EMA Filter", "Donchian", "ATR Breakout", "Pullback", "Momentum ATR",
-                    ]
+                    # ADX-фильтр: трендовые стратегии требуют ADX >= 20
+                    trend_strategies = ["MA Trend", "Donchian", "Pullback"]
                     if signal['strategy'] in trend_strategies and current_adx < 20:
-                        logger.info(f"💤 [{symbol}] Тренд слишком слабый (ADX 15m={current_adx:.2f} < 20). Пропускаю {signal['strategy']}")
+                        logger.info(f"[{symbol}] ADX={current_adx:.1f}<20, skip {signal['strategy']}")
                         continue
 
-                    # DEDUPE: если за последние N секунд уже был свежий сигнал по символу — пропускаем
-                    # --- Усовершенствованный DEDUPE (In-memory) ---
+                    # DEDUPE
                     now = time.time()
                     cooldown = max(30, settings.signal_expiry_seconds)
                     cache_key = (symbol, signal['strategy'], signal['signal'])
-                    
                     last_ts = self._last_signals_cache.get(cache_key, 0)
                     if (now - last_ts) < cooldown:
-                        continue # Пропускаем дубликат без запроса к БД
-                    
+                        continue
                     self._last_signals_cache[cache_key] = now
-                    # 3. Фильтрация (НОВОЕ по плану)
-                    # 3.1 Защита от старых сигналов (Signal Expiry - Баг 6.3)
+
+                    # Фильтр направления
+                    allowed_side = str(getattr(settings, "allowed_position_side", "BOTH") or "BOTH").upper()
+                    signal_side = str(signal.get("signal", "")).upper()
+                    if allowed_side in {"LONG", "SHORT"} and signal_side != allowed_side:
+                        continue
+
+                    # Фильтр Signal Expiry
                     candle_time = df_eval.iloc[-1]['timestamp']
                     now_ts = time.time()
                     candle_ts = candle_time if not isinstance(candle_time, datetime) else candle_time.timestamp()
-                    if candle_ts > 10**11: candle_ts /= 1000 # ms to s
-                    
+                    if candle_ts > 10**11:
+                        candle_ts /= 1000
                     tf_secs = get_timeframe_seconds(timeframe)
-                    # Сигнал актуален, если мы внутри свечи ИЛИ прошло не более N секунд после её закрытия
-                    candle_age = now_ts - candle_ts  # возраст начала свечи
+                    candle_age = now_ts - candle_ts
                     if candle_age > (tf_secs + settings.signal_expiry_seconds):
-                        stale_by = int(now_ts - (candle_ts + tf_secs))
                         key = f"{symbol}:{signal['strategy']}"
                         self._stale_signals_count[key] += 1
-                        # Антишум: агрегированный warning не чаще раза в 60с.
                         if (now_ts - self._stale_signals_last_log_ts) >= 60:
-                            top = sorted(
-                                self._stale_signals_count.items(),
-                                key=lambda kv: kv[1],
-                                reverse=True
-                            )[:5]
+                            top = sorted(self._stale_signals_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
                             summary = ", ".join([f"{k}={v}" for k, v in top]) if top else "no-data"
-                            logger.warning(f"⚠️ Устаревшие сигналы (60с summary): {summary}. Last stale: {key} by {stale_by}s")
+                            logger.warning(f"Stale signals (60s summary): {summary}")
                             self._stale_signals_last_log_ts = now_ts
                             self._stale_signals_count.clear()
                         continue
 
-                    # 3.2 Проверка даты листинга (Защита от новых монет)
-                    info = await self.market_data.fetch_instrument_info(symbol)
+                    # Листинг-фильтр (cached — один запрос на символ)
+                    if symbol not in self._instrument_info_cache:
+                        self._instrument_info_cache[symbol] = await self.market_data.fetch_instrument_info(symbol)
+                    info = self._instrument_info_cache[symbol]
                     if info and 'info' in info and 'onboardDate' in info['info']:
-                        # onboardDate в Binance обычно в ms
                         onboard_ts = int(info['info']['onboardDate']) / 1000
                         onboard_date_str = datetime.fromtimestamp(onboard_ts).isoformat()
                         if not self.risk_manager.check_listing_days(onboard_date_str, settings.min_listing_days):
                             logger.warning(f"Монета {symbol} слишком новая. Листинг {onboard_date_str}")
                             continue
 
-                    # 3.3 Проверка лимита позиций (ПРЯМОЙ запрос к RiskManager)
-                    # M1: Сохраняем метрики для повторного использования при исполнении
+                    # Лимит позиций
                     cached_balance, cached_drawdown, cached_open_trades = await self.execution.get_account_metrics()
                     if cached_open_trades >= self.risk_manager.max_open_trades:
-                        logger.warning(f"Лимит позиций достигнут ({cached_open_trades} >= {self.risk_manager.max_open_trades})")
-                        # Уведомление в TG (раз в 15 минут, чтобы не спамить)
+                        logger.warning(f"Лимит позиций ({cached_open_trades} >= {self.risk_manager.max_open_trades})")
                         now = time.time()
                         if not hasattr(self, '_last_limit_notify') or (now - self._last_limit_notify) > 900:
                             self._last_limit_notify = now
                             await send_telegram_msg(
-                                f"⚠️ **ВХОД ПРОПУЩЕН**\n\n"
+                                f"**ВХОД ПРОПУЩЕН**\n\n"
                                 f"Символ: {symbol}\n"
-                                f"Причина: Достигнут лимит позиций ({cached_open_trades}/{self.risk_manager.max_open_trades})\n"
-                                f"Закройте одну из открытых позиций, чтобы открыть новую."
+                                f"Причина: Лимит позиций ({cached_open_trades}/{self.risk_manager.max_open_trades})"
                             )
-                        return # Прекращаем обработку символа
+                        return
 
-                    # 3.4 R3: Корреляционный фильтр (не открывать 3+ лонга на BTC/ETH/SOL)
+                    # Корреляционный фильтр
                     if not self.risk_manager.check_correlation_limit(symbol, signal['signal'], self.execution.active_trades):
-                        logger.info(f"🔗 [{symbol}] Корреляционный лимит: слишком много {signal['signal']} в группе")
                         continue
 
-                    # 3.5 Проверка Funding Rate (Защита от списаний)
+                    # Funding Rate фильтр
                     fr = self.funding_rates.get(symbol, 0.0)
                     if abs(fr) > settings.max_funding_rate:
-                        logger.warning(f"Слишком высокий Funding Rate для {symbol}: {fr*100:.4f}% > {settings.max_funding_rate*100:.2f}%")
+                        logger.warning(f"Высокий Funding Rate {symbol}: {fr*100:.4f}%")
                         continue
 
-                    # 3.5 Regime Detection (Фильтр волатильности)
+                    # Regime Detection
                     if not self.risk_manager.is_volatility_sufficient(df_eval):
-                        logger.info(f"💤 [{symbol}] Regime Detection: Низкая волатильность (рынок спит)")
                         continue
 
-                    # 4. Скоринг (СТРОГИЙ ФИЛЬТР: Score > 0.65)
+                    # Скоринг (порог 0.55 — снижен с 0.65 т.к. стратегий меньше и они качественнее)
                     score = self.scorer.calculate_score(df_eval, signal)
-                    if score < 0.65:
-                        logger.info(f"🔍 [{symbol}] Scorer отклонил {signal['strategy']}: {score:.2f} < 0.65")
+                    if score < 0.55:
+                        logger.info(f"[{symbol}] Score {score:.2f} < 0.55, skip {signal['strategy']}")
                         continue
 
-                    # 5. AI FEATURE GENERATION (с учетом внешних данных)
-                    fr = self.funding_rates.get(symbol, 0.0)
+                    # AI/Statistical prediction
                     ob = self.orderbooks.get(symbol)
                     features = FeatureGenerator.generate_features(df_eval, funding_rate=fr, orderbook=ob)
-                    
-                    # 5. AI PREDICTION (Win Probability / Risk / Expected Return)
                     ai_prediction = self.ai_model.predict_win_probability(features, signal['signal'])
-                    
-                    logger.info(f"СИГНАЛ: {signal['strategy']} | Score: {score:.2f} | AI Win Prob: {ai_prediction['win_prob']:.2f}")
 
-                    # AI FILTER (СТРОГИЙ: Probability > 60%)
-                    if ai_prediction['win_prob'] < 0.60:
-                        logger.info(f"🤖 [{symbol}] AI отклонил {signal['strategy']}: Prob {ai_prediction['win_prob']:.2f} < 0.60")
+                    logger.info(f"SIGNAL: {signal['strategy']} | {symbol} {signal['signal']} | Score: {score:.2f} | WinProb: {ai_prediction['win_prob']:.2f}")
+
+                    # AI фильтр (порог 0.55 — снижен: модель статистическая, не настоящий ML)
+                    if ai_prediction['win_prob'] < 0.55:
+                        logger.info(f"[{symbol}] AI prob {ai_prediction['win_prob']:.2f} < 0.55, skip")
                         continue
 
-                    # 6. Дополнение данными
-                    # 6. Дополнение данными (Баг Step 3 — Rule of 7)
+                    # External AI filter (optional — Ollama/OpenAI/Custom)
+                    if self.external_ai.is_enabled:
+                        try:
+                            market_ctx = {
+                                "atr": float(df_eval['atr'].iloc[-1]) if 'atr' in df_eval.columns else None,
+                                "rsi": float(df_eval['RSI_fast'].iloc[-1]) if 'RSI_fast' in df_eval.columns else None,
+                                "adx": float(current_adx) if current_adx else None,
+                                "volume_ratio": features.get('volume_ratio'),
+                                "funding_rate": fr,
+                                "trend": "UP" if df_eval.iloc[-1]['close'] > df_eval.iloc[-1].get('ema50', 0) else "DOWN"
+                            }
+                            ext_result = await self.external_ai.analyze_signal(
+                                {**signal, "score": score, "stop_loss": None, "take_profit": None},
+                                market_ctx
+                            )
+                            if ext_result.get("recommendation") == "SKIP" and ext_result.get("confidence", 0) > 0.6:
+                                logger.info(f"[{symbol}] External AI SKIP: {ext_result.get('reasoning', '')[:100]}")
+                                continue
+                        except Exception as ext_err:
+                            logger.warning(f"[{symbol}] External AI error (non-blocking): {ext_err}")
+
+                    # Расчёт SL/TP (guard against NaN ATR)
+                    raw_atr = df_eval['atr'].iloc[-1] if 'atr' in df_eval.columns else 0.0
+                    if pd.isna(raw_atr) or raw_atr <= 0:
+                        raw_atr = df_eval['atr'].dropna().iloc[-1] if 'atr' in df_eval.columns and not df_eval['atr'].dropna().empty else 0.0
+                    safe_atr = float(raw_atr) if not pd.isna(raw_atr) and raw_atr > 0 else 0.0
+
+                    if safe_atr <= 0:
+                        logger.warning(f"[{symbol}] ATR=0/NaN, skip signal (cannot compute stop)")
+                        continue
+
                     lookback_p = df_eval.tail(20)
                     pattern_high = lookback_p['high'].max()
                     pattern_low = lookback_p['low'].min()
                     targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low, signal['signal'])
-                    sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], df_eval['atr'].iloc[-1], signal['signal'])
-                    # Берем первую цель из Rule of 7 как основной TP для индикации
+                    sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], safe_atr, signal['signal'])
                     tp = next(iter(targets.values())) if targets else signal['entry_price'] * (1.05 if signal['signal'] == "LONG" else 0.95)
 
                     enrich_signal = {
@@ -373,12 +393,12 @@ class TradingOrchestrator:
                         "stop_loss": sl,
                         "take_profit": tp,
                         "score": score,
-                        "atr": df_eval['atr'].iloc[-1],
+                        "atr": safe_atr,
                         "ai_data": ai_prediction,
                         "timeframe": timeframe
                     }
-                    
-                    # 7. Сохранение в БД расширенных данных
+
+                    # БД
                     async with async_session() as session:
                         new_sig_model = Signal(
                             symbol=symbol,
@@ -397,105 +417,87 @@ class TradingOrchestrator:
                         await session.commit()
                         enrich_signal["id"] = new_sig_model.id
 
-                    # 7.5 Формирование премиум-визуала сигнала (Запрос пользователя)
+                    # Уведомление
                     now_utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
-                    dir_emoji = "🟢 LONG" if enrich_signal['signal'] == "LONG" else "🔴 SHORT"
-                    
+                    dir_label = "LONG" if enrich_signal['signal'] == "LONG" else "SHORT"
                     status_msg = (
-                        f"🚀 **СИГНАЛ: {enrich_signal['strategy']}**\n\n"
-                        f"🔸 Символ: {symbol}\n"
-                        f"🔸 Направление: {dir_emoji}\n\n"
-                        f"💰 Цена входа: {enrich_signal['entry_price']:.4f}\n"
-                        f"🛡 **Stop Loss:** {enrich_signal['stop_loss']:.4f}\n"
-                        f"🎯 **Take Profit:** {enrich_signal['take_profit']:.4f}\n\n"
-                        f"🕒 Время (UTC): {now_utc}\n\n"
-                        f"🤖 **AI ВЕРДИКТ:**\n"
-                        f"📈 Вероятность успеха: {ai_prediction.get('win_prob', 0)*100:.1f}%\n"
-                        f"💰 Ож. доходность: {ai_prediction.get('expected_return', 0):.2f}%\n"
-                        f"⚠️ Уровень риска: {ai_prediction.get('risk', 0):.2f}\n"
-                        f"📊 AI Score: {score:.2f}\n\n"
-                        f"ℹ️ Статус: ⌛️ **В ОЖИДАНИИ**"
+                        f"**SIGNAL: {enrich_signal['strategy']}**\n\n"
+                        f"Symbol: {symbol}\n"
+                        f"Direction: {dir_label}\n\n"
+                        f"Entry: {enrich_signal['entry_price']:.4f}\n"
+                        f"Stop Loss: {enrich_signal['stop_loss']:.4f}\n"
+                        f"Take Profit: {enrich_signal['take_profit']:.4f}\n\n"
+                        f"Time (UTC): {now_utc}\n\n"
+                        f"Win Prob: {ai_prediction.get('win_prob', 0)*100:.1f}%\n"
+                        f"Exp Return: {ai_prediction.get('expected_return', 0):.2f}%\n"
+                        f"Risk: {ai_prediction.get('risk', 0):.2f}\n"
+                        f"Score: {score:.2f}\n\n"
+                        f"Status: PENDING"
                     )
-                    
-                    # Отправляем уведомление
                     await send_telegram_msg(status_msg)
 
-                    # 8. Исполнение (M1: переиспользуем метрики из шага 3.3)
+                    # Исполнение
                     if settings.is_trading_enabled:
                         asyncio.create_task(
                             self.execution.execute_signal(enrich_signal, cached_balance, cached_drawdown, cached_open_trades)
                         )
                     else:
-                        logger.info(f"Трейдинг отключен (is_trading_enabled=False). Сигнал {symbol} сохранен, но не исполнен.")
+                        logger.info(f"Trading disabled. Signal {symbol} saved but not executed.")
         except Exception as e:
             self.errors_count += 1
-            app_logger.error(f"❌ Ошибка в Resilient Loop для {symbol}: {e}\n{traceback.format_exc()}")
+            app_logger.error(f"Error in signal loop for {symbol}: {e}\n{traceback.format_exc()}")
 
-            # Circuit breaker: если ошибок много за короткое время — отключаем торговлю
             now = time.time()
             self._recent_error_ts.append(now)
-            window_sec = 600  # 10 минут
+            window_sec = 600
             errors_in_window = sum(1 for ts in self._recent_error_ts if (now - ts) <= window_sec)
             if errors_in_window >= 20 and settings.is_trading_enabled:
                 settings.is_trading_enabled = False
                 await send_telegram_msg(
-                    f"🛑 **CIRCUIT BREAKER**\n\n"
-                    f"За последние 10 минут слишком много ошибок: {errors_in_window}.\n"
-                    f"Торговля автоматически отключена (is_trading_enabled=False)."
+                    f"**CIRCUIT BREAKER**\n\n"
+                    f"Too many errors in 10min: {errors_in_window}.\n"
+                    f"Trading disabled automatically."
                 )
 
-            # Уведомляем админа о критическом сбое (раз в 30 минут)
             if not hasattr(self, '_last_error_notify') or (now - self._last_error_notify) > 1800:
                 self._last_error_notify = now
-                await send_telegram_msg(f"⚠️ **КРИТИЧЕСКИЙ СБОЙ: Resilient Loop**\n\nСимвол: {symbol}\nОшибка: {str(e)[:200]}")
+                await send_telegram_msg(f"**CRITICAL ERROR**\n\nSymbol: {symbol}\nError: {str(e)[:200]}")
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Единый векторный движок расчета всех индикаторов. 
-        """
-        # Тренды (EMA вместо SMA для снижения задержки)
         df['ema9'] = calculate_ema(df['close'], 9)
         df['ema20'] = calculate_ema(df['close'], 20)
         df['ema30'] = calculate_ema(df['close'], 30)
         df['ema50'] = calculate_ema(df['close'], 50)
         df['ema60'] = calculate_ema(df['close'], 60)
-        df['ema200'] = calculate_ema(df['close'], 200) # Глобальный тренд-фильтр
-        
-        # Волатильность и Импульс
+        df['ema200'] = calculate_ema(df['close'], 200)
+
         df['atr'] = calculate_atr(df, period=14)
-        df['RSI'] = calculate_rsi(df['close'], period=21)    # медленный RSI
+        df['RSI'] = calculate_rsi(df['close'], period=21)
         df['RSI_fast'] = calculate_rsi(df['close'], period=14)
-        
-        # Полосы Боллинджера (Стандарт 40/1.0 как в Bollinger Clusters)
-        upper, ma, lower = calculate_bollinger_bands(df['close'], period=40, std=1.0)
+
+        upper, ma, lower = calculate_bollinger_bands(df['close'], period=20, std=2.0)
         df['upper'] = upper
         df['lower'] = lower
-        
-        # Кластерная сила
-        df['CSI'] = calculate_csi(df, atr_period=14)
-        
-        # Тренд-фильтр ADX
+
         adx_df = calculate_adx(df, period=14)
         df['adx'] = adx_df['adx']
         df['+di'] = adx_df['+di']
         df['-di'] = adx_df['-di']
-        
-        # Фаза 3: Williams %R (из статьи xcritical) и VWAP
+
         df['williams_r'] = calculate_williams_r(df, period=14)
-        df['vwap'] = calculate_vwap(df)
-        
+
         return df
 
     async def _heartbeat_loop(self):
-        """Задача 'Пульс' (Этап 6) - отчет раз в час"""
         while True:
             await asyncio.sleep(3600)
             uptime_hours = (time.time() - self.start_time) / 3600
             msg = (
-                f"💓 **HEARTBEAT: БОТ АКТИВЕН**\n\n"
-                f"⏱ Аптайм: {uptime_hours:.1f} ч\n"
-                f"📊 Обработано свечей: {self.processed_candles}\n"
-                f"⚠️ Ошибок за сессию: {self.errors_count}\n"
-                f"🛡 Монет в мониторинге: {len(self.market_history)}\n"
+                f"**HEARTBEAT**\n\n"
+                f"Uptime: {uptime_hours:.1f}h\n"
+                f"Candles processed: {self.processed_candles}\n"
+                f"Errors: {self.errors_count}\n"
+                f"Symbols monitored: {len(self.market_history)}\n"
+                f"Strategies: {len(self.strategies)}"
             )
             await send_telegram_msg(msg)

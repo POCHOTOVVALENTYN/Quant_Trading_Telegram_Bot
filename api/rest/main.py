@@ -312,10 +312,15 @@ async def toggle_trading():
 @app.get("/api/v1/runtime-settings")
 async def get_runtime_settings():
     return {
+        "is_trading_enabled": settings.is_trading_enabled,
         "pyramiding_enabled": settings.pyramiding_enabled,
         "per_trade_margin_pct": settings.per_trade_margin_pct,
+        "position_size_usdt": settings.position_size_usdt,
         "max_open_trades": settings.max_open_trades,
         "leverage": settings.leverage,
+        "tp_pct": settings.tp_pct,
+        "signal_expiry_seconds": settings.signal_expiry_seconds,
+        "allowed_position_side": settings.allowed_position_side,
         "apply_after_flat": settings.apply_new_entry_rules_after_flat,
     }
 
@@ -334,6 +339,14 @@ async def set_per_trade_margin_pct_runtime(value: float):
     return {"status": "success", "per_trade_margin_pct": settings.per_trade_margin_pct}
 
 
+@app.post("/api/v1/runtime-settings/position-size-usdt")
+async def set_position_size_usdt_runtime(value: float):
+    # 0 = выключить фикс и вернуться к расчету по % маржи.
+    clamped = max(0.0, min(100000.0, float(value)))
+    settings.position_size_usdt = clamped
+    return {"status": "success", "position_size_usdt": settings.position_size_usdt}
+
+
 @app.post("/api/v1/runtime-settings/max-open-trades")
 async def set_max_open_trades_runtime(value: int):
     clamped = max(1, min(20, int(value)))
@@ -342,6 +355,31 @@ async def set_max_open_trades_runtime(value: int):
     if orchestrator and orchestrator.execution and orchestrator.execution.risk_manager:
         orchestrator.execution.risk_manager.max_open_trades = clamped
     return {"status": "success", "max_open_trades": settings.max_open_trades}
+
+
+@app.post("/api/v1/runtime-settings/tp-pct")
+async def set_tp_pct_runtime(value: float):
+    # 0.1%..20%
+    clamped = max(0.001, min(0.20, float(value)))
+    settings.tp_pct = clamped
+    return {"status": "success", "tp_pct": settings.tp_pct}
+
+
+@app.post("/api/v1/runtime-settings/signal-expiry")
+async def set_signal_expiry_runtime(value: int):
+    # 60..600 сек
+    clamped = max(60, min(600, int(value)))
+    settings.signal_expiry_seconds = clamped
+    return {"status": "success", "signal_expiry_seconds": settings.signal_expiry_seconds}
+
+
+@app.post("/api/v1/runtime-settings/allowed-side")
+async def set_allowed_side_runtime(value: str):
+    norm = str(value or "").upper()
+    if norm not in {"LONG", "SHORT", "BOTH"}:
+        return {"status": "error", "message": "allowed side must be LONG, SHORT or BOTH"}
+    settings.allowed_position_side = norm
+    return {"status": "success", "allowed_position_side": settings.allowed_position_side}
 
 
 @app.post("/api/v1/runtime-settings/leverage")
@@ -430,6 +468,47 @@ async def get_stats():
             }
         }
 
+
+@app.post("/api/v1/stats/reset")
+async def reset_stats(scope: str = "all"):
+    from database.session import async_session
+    from database.models.all_models import PnLRecord as PnLModel
+    from sqlalchemy import delete
+
+    # Сейчас поддерживаем только binance/all.
+    if scope.lower() not in {"all", "binance"}:
+        return {"status": "error", "message": "Unsupported scope. Use all or binance."}
+
+    async with async_session() as session:
+        await session.execute(delete(PnLModel))
+        await session.commit()
+    return {"status": "success", "scope": scope.lower()}
+
+
+@app.get("/api/v1/history")
+async def get_trade_history(limit: int = 20):
+    from database.session import async_session
+    from database.models.all_models import PnLRecord as PnLModel
+    from sqlalchemy import select
+
+    clamped = max(1, min(200, int(limit)))
+    async with async_session() as session:
+        stmt = select(PnLModel).order_by(PnLModel.closed_at.desc()).limit(clamped)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    items = []
+    for r in rows:
+        items.append({
+            "id": r.id,
+            "symbol": r.symbol,
+            "pnl_usd": float(r.pnl_usd or 0.0),
+            "pnl_pct": float(r.pnl_pct or 0.0),
+            "reason": r.reason or "AUTO",
+            "closed_at": r.closed_at.isoformat() if r.closed_at else None,
+        })
+    return {"items": items, "count": len(items)}
+
 @app.get("/api/v1/trades")
 async def get_active_trades():
     if not orchestrator:
@@ -507,6 +586,18 @@ async def close_trade(symbol: str):
         return {"status": "success", "symbol": normalized_symbol}
     else:
         return {"status": "error", "message": "Trade not found", "symbol": normalized_symbol}
+
+
+@app.post("/api/v1/trades/reduce/{symbol}")
+async def reduce_trade(symbol: str, fraction: float):
+    normalized_symbol = symbol.replace("_", "/")
+    if not orchestrator:
+        return {"status": "error", "message": "Engine not ready", "symbol": normalized_symbol}
+    result = await orchestrator.execution.manual_reduce(normalized_symbol, float(fraction))
+    if isinstance(result, dict):
+        result.setdefault("symbol", normalized_symbol)
+        return result
+    return {"status": "error", "message": "Unexpected reduce response", "symbol": normalized_symbol}
 
 
 
