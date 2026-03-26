@@ -18,6 +18,7 @@ BTN_HISTORY = "📜 История сделок"
 BTN_STATS = "📈 Статистика"
 BTN_SIGNALS = "📉 Сигналы"
 BTN_STRATEGIES = "📚 Стратегии"
+BTN_FAQ = "❓ FAQ"
 BTN_HOME = "🏠 Главное меню"
 
 logging.basicConfig(
@@ -229,8 +230,15 @@ def _build_main_menu_markup() -> ReplyKeyboardMarkup:
         [KeyboardButton(BTN_TOGGLE), KeyboardButton(BTN_ACTIVE)],
         [KeyboardButton(BTN_HISTORY), KeyboardButton(BTN_STATS)],
         [KeyboardButton(BTN_SIGNALS), KeyboardButton(BTN_STRATEGIES)],
+        [KeyboardButton(BTN_FAQ)],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+async def _load_runtime_settings_for_menu() -> dict:
+    timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await _load_runtime_settings(client)
 
 
 async def _render_main_menu(message_target):
@@ -584,6 +592,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Корреляция: макс. 2 в группе"
         )
         await update.message.reply_text(strategy_text, parse_mode='Markdown')
+    elif text == BTN_FAQ:
+        faq_text = (
+            "❓ **FAQ: ПОЛНОЕ ОПИСАНИЕ БОТА**\n\n"
+            "1) **УПРАВЛЕНИЕ**\n"
+            "• `🔄 Вкл/Выкл` — мгновенно включает/выключает автоторговлю.\n"
+            "• `💼 Активные позиции` — список позиций, карточки, refresh, reduce, ручное закрытие.\n"
+            "• `📜 История сделок` — последние закрытия с причиной и PnL.\n\n"
+            "2) **НАСТРОЙКИ АВТОТОРГОВЛИ**\n"
+            "• `⚡ Плечо` — runtime-плечо (без рестарта).\n"
+            "• `💰 Маржа` — доля капитала на сделку (%).\n"
+            "• `📂 Позиции` — лимит одновременных сделок.\n"
+            "• `🎯 TP / SL` — TP runtime; SL берётся из риск-логики (ATR/направление).\n"
+            "• `↕️ Направление` — LONG / SHORT / BOTH.\n"
+            "• `💵 Объём` — фикс USDT на сделку (0 = авто по марже).\n"
+            "• `💎 Пирамидинг` — разрешение поэтапного добора.\n"
+            "• `⏱ Expiry` — защита от старых сигналов.\n\n"
+            "3) **РИСК-ЛОГИКА**\n"
+            "• Стоп-лосс: ATR-логика + минимальная дистанция.\n"
+            "• Трейлинг: подтяжка только в сторону уменьшения риска.\n"
+            "• Безубыток: перенос SL при 1R + подтверждение.\n"
+            "• Daily halt: остановка входов при дневной просадке.\n"
+            "• Корреляционный фильтр: ограничение однотипных позиций в кластерах.\n\n"
+            "4) **СИГНАЛЫ И AI**\n"
+            "• Сигнал проходит скоринг и AI-фильтр перед входом.\n"
+            "• В карточке сигнала: стратегия, вход, SL/TP, win probability, score.\n"
+            "• Внешний AI работает каскадом по доступным провайдерам.\n\n"
+            "5) **ПОЧЕМУ НЕТ ВХОДА**\n"
+            "• лимит позиций,\n"
+            "• выключена торговля,\n"
+            "• слабый score/win_prob,\n"
+            "• сигнал устарел,\n"
+            "• фильтр листинга/корреляции/funding,\n"
+            "• достигнут дневной стоп по просадке.\n\n"
+            "6) **ПРИЧИНЫ ЗАКРЫТИЯ ПОЗИЦИИ**\n"
+            "• `🔄 Биржа (TP/SL)` — защитный ордер сработал на бирже.\n"
+            "• `🖐 Ручное` — закрытие из Telegram.\n"
+            "• `⏱ Тайм-аут` — time-exit.\n"
+            "• `⚙️ Авто` — внутренняя логика управления.\n\n"
+            "7) **СИНХРОНИЗАЦИЯ**\n"
+            "• Бот регулярно синхронизирует биржу, БД и память (`reconcile`).\n"
+            "• Если позиция закрыта внешне, она должна исчезнуть из активных.\n"
+            "• В разделе позиций показываются только актуальные данные после синхронизации."
+        )
+        await update.message.reply_text(faq_text, parse_mode='Markdown')
     elif text == BTN_STATS:
         try:
             async with httpx.AsyncClient() as client:
@@ -661,8 +713,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ],
                     [
                         InlineKeyboardButton("🔄 Обновить", callback_data=f"pos_refresh_{cur_raw}"),
-                        InlineKeyboardButton("🧯 Reduce 25%", callback_data=f"pos_reduce25_{cur_raw}"),
-                        InlineKeyboardButton("🧯 Reduce 50%", callback_data=f"pos_reduce50_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Сократить 25%", callback_data=f"pos_reduce25_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Сократить 50%", callback_data=f"pos_reduce50_{cur_raw}"),
                     ],
                     [InlineKeyboardButton("❌ Закрыть позицию", callback_data=f"close_{cur_raw}")]
                 ]
@@ -706,11 +758,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = r.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ Reduce {int(fraction*100)}% отправлен")
+                        await _safe_answer_callback(query, f"✅ Сокращение {int(fraction*100)}% отправлено")
                     else:
                         await _safe_answer_callback(
                             query,
-                            f"❌ Reduce не выполнен: {str(res.get('message', 'unknown error'))[:80]}",
+                            f"❌ Сокращение не выполнено: {str(res.get('message', 'unknown error'))[:80]}",
                             show_alert=True
                         )
 
@@ -743,8 +795,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ],
                     [
                         InlineKeyboardButton("🔄 Обновить", callback_data=f"pos_refresh_{cur_raw}"),
-                        InlineKeyboardButton("🧯 Reduce 25%", callback_data=f"pos_reduce25_{cur_raw}"),
-                        InlineKeyboardButton("🧯 Reduce 50%", callback_data=f"pos_reduce50_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Сократить 25%", callback_data=f"pos_reduce25_{cur_raw}"),
+                        InlineKeyboardButton("🧯 Сократить 50%", callback_data=f"pos_reduce50_{cur_raw}"),
                     ],
                     [InlineKeyboardButton("❌ Закрыть позицию", callback_data=f"close_{cur_raw}")]
                 ]
@@ -777,7 +829,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
 
     elif query.data == "menu_leverage":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         lev = runtime.get("leverage", settings.leverage)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{'✅ ' if lev == v else ''}{v}x", callback_data=f"rt_leverage_{v}") for v in [5, 10, 15]],
@@ -790,7 +842,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_margin":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         margin = runtime.get("per_trade_margin_pct", settings.per_trade_margin_pct)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("➖ 1%", callback_data="rt_margin_dec"),
@@ -804,7 +856,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_positions":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         max_t = runtime.get("max_open_trades", settings.max_open_trades)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("➖ 1", callback_data="rt_open_trades_dec"),
@@ -818,7 +870,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_tp_sl":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         tp = runtime.get("tp_pct", settings.tp_pct)
         sl_l = settings.sl_long_pct
         sl_s = settings.sl_short_pct
@@ -839,7 +891,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_side":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         side = runtime.get('allowed_position_side', getattr(settings, 'allowed_position_side', 'BOTH'))
         _mark = lambda v: "✅ " if side.upper() == v else ""
         kb = InlineKeyboardMarkup([
@@ -854,7 +906,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_volume":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         pos_usdt = runtime.get('position_size_usdt', getattr(settings, 'position_size_usdt', 0.0)) or 0.0
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("➖ 1$", callback_data="rt_pos_usdt_dec"),
@@ -871,7 +923,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_expiry":
-        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        runtime = await _load_runtime_settings_for_menu()
         exp = runtime.get("signal_expiry_seconds", settings.signal_expiry_seconds)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("➖ 10с", callback_data="rt_expiry_dec"),

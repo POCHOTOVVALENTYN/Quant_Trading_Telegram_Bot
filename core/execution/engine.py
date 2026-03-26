@@ -55,6 +55,7 @@ class ExecutionEngine:
         self._last_ws_reconcile_ts: float = 0.0
         self._entry_policy_activated: bool = False
         self._rescue_cooldown_until: Dict[str, float] = {}
+        self._soft_cleanup_last_ts: float = 0.0
 
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self._symbol_locks:
@@ -293,6 +294,7 @@ class ExecutionEngine:
             ex_id = str(order.get('id'))
             
             if status in ['closed', 'filled']:
+                is_protective_fill = False
                 async with async_session() as session:
                     stmt = select(OrderModel).where(OrderModel.exchange_order_id == ex_id)
                     res = await session.execute(stmt)
@@ -310,8 +312,22 @@ class ExecutionEngine:
                                 if any(x in ot for x in ["STOP", "TAKE", "TRAILING"]):
                                     db_pos.status = PositionStatus.CLOSED
                                     db_pos.closed_at = datetime.datetime.utcnow()
+                                    is_protective_fill = True
                                     logger.info(f"💾 [WS_DB] Позиция {symbol} закрыта по {ot}")
                         await session.commit()
+
+                if is_protective_fill and symbol in self.active_trades:
+                    logger.info(f"🔄 [WS_ORDERS] Удаляю {symbol} из active_trades (SL/TP сработал)")
+                    await self._close_position(symbol, reason="EXTERNAL")
+
+                if not is_protective_fill and symbol in self.active_trades:
+                    order_type = str(order.get('type', '')).upper()
+                    reduce_only = order.get('reduceOnly', False) or order.get('info', {}).get('reduceOnly', False)
+                    if reduce_only or any(x in order_type for x in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "TRAILING_STOP"]):
+                        live_size, _ = await self._get_live_position(symbol, preferred_side=self.active_trades[symbol].get('signal_type'))
+                        if live_size <= 1e-8:
+                            logger.info(f"🔄 [WS_ORDERS] Позиция {symbol} полностью закрыта на бирже")
+                            await self._close_position(symbol, reason="EXTERNAL")
         except Exception as e:
             logger.error(f"Error handling order update: {e}")
 
@@ -1353,6 +1369,22 @@ class ExecutionEngine:
                             ctx="metrics.fetch_positions"
                         )
                         active_p = [p for p in pos if abs(float(p.get('contracts', 0) or p.get('pa', 0) or 0)) > 1e-8]
+                        live_positions_map: Dict[str, Dict[str, Any]] = {}
+                        for p in active_p:
+                            sym = self._norm_sym(p.get("symbol"))
+                            contracts_raw = float(p.get('contracts', 0) or p.get('pa', 0) or 0)
+                            if not sym or abs(contracts_raw) <= 1e-8:
+                                continue
+                            side = str(p.get("side", "")).upper()
+                            if side not in ("LONG", "SHORT"):
+                                side = "LONG" if contracts_raw > 0 else "SHORT"
+                            size = abs(float(contracts_raw))
+                            # Если пришло несколько legs по символу, берем крупнейшую.
+                            prev = live_positions_map.get(sym)
+                            if (not prev) or (size > float(prev.get("size", 0.0) or 0.0)):
+                                live_positions_map[sym] = {"size": size, "side": side}
+
+                        await self._soft_cleanup_active_trades(live_positions_map)
                         pnl = sum([float(p.get('unrealizedPnl', 0)) for p in active_p])
                         dd = (abs(min(0, pnl)) / total) if total > 0 else 0.0
                         open_cnt = len(active_p)
@@ -1390,3 +1422,52 @@ class ExecutionEngine:
     async def _set_leverage_best_effort(self, symbol: str, leverage: int):
         try: await self.exchange.set_leverage(int(leverage), symbol)
         except: pass
+
+    async def _soft_cleanup_active_trades(self, live_positions_map: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Мягкая очистка локального кеша позиций:
+        - удаляет из memory позиции, которых уже нет на бирже;
+        - синхронизирует размер/сторону для существующих.
+        Делает best-effort обновление БД только для явно "призрачных" записей.
+        """
+        now = time.time()
+        if (now - self._soft_cleanup_last_ts) < 5.0:
+            return
+        self._soft_cleanup_last_ts = now
+
+        if not self.active_trades:
+            return
+
+        stale_symbols: List[str] = []
+        for symbol in list(self.active_trades.keys()):
+            local = self.active_trades.get(symbol) or {}
+            live = live_positions_map.get(symbol)
+            if not live:
+                stale_symbols.append(symbol)
+                self.active_trades.pop(symbol, None)
+                continue
+
+            live_size = float(live.get("size") or 0.0)
+            if live_size > 0 and abs(float(local.get("current_size", 0.0) or 0.0) - live_size) > 1e-8:
+                local["current_size"] = live_size
+
+            live_side = str(live.get("side") or "").upper()
+            if live_side in ("LONG", "SHORT") and str(local.get("signal_type", "")).upper() != live_side:
+                local["signal_type"] = live_side
+
+        if stale_symbols:
+            logger.warning(f"🧹 [SOFT_CLEANUP] Removed stale active_trades: {stale_symbols}")
+            try:
+                async with async_session() as session:
+                    for sym in stale_symbols:
+                        await session.execute(
+                            update(PositionModel)
+                            .where(
+                                PositionModel.symbol == sym,
+                                PositionModel.status == PositionStatus.OPEN
+                            )
+                            .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
+                        )
+                    await session.commit()
+            except Exception as e:
+                logger.warning(f"⚠️ [SOFT_CLEANUP] DB close sync failed: {e}")

@@ -175,7 +175,7 @@ async def lifespan(app: FastAPI):
     async def _reconcile_loop():
         # Testnet algo orders expire fast (~2-5 min), so reconcile more frequently.
         # On production, 300s is fine since algo orders persist until triggered.
-        RECONCILE_INTERVAL = 120 if settings.testnet else 300
+        RECONCILE_INTERVAL = 60 if settings.testnet else 120
         while True:
             # Сначала ждем интервал, т.к. первичный reconcile уже сделан выше
             await asyncio.sleep(RECONCILE_INTERVAL)
@@ -515,7 +515,14 @@ async def get_trade_history(limit: int = 20):
 async def get_active_trades():
     if not orchestrator:
         return {"trades": {}}
-    
+
+    # Принудительная синхронизация перед отдачей в UI:
+    # убирает "призрачные" позиции в Telegram/дашборде после внешних закрытий.
+    try:
+        await orchestrator.execution.reconcile_full()
+    except Exception as e:
+        app_logger.warning(f"⚠️ reconcile_full before /trades failed: {e}")
+
     trades = orchestrator.execution.active_trades.copy()
     if not trades:
         return {"trades": {}}

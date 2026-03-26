@@ -341,9 +341,11 @@ class TradingOrchestrator:
                             logger.warning(f"Монета {symbol} слишком новая. Листинг {onboard_date_str}")
                             continue
 
-                    # Лимит позиций (real-time count from active_trades dict to avoid race conditions)
-                    live_open_count = len(self.execution.active_trades)
-                    cached_balance, cached_drawdown, _ = await self.execution.get_account_metrics()
+                    # Лимит позиций:
+                    # берем максимум из live-метрик биржи и локального кэша,
+                    # чтобы избежать ложной блокировки входов при рассинхроне active_trades.
+                    cached_balance, cached_drawdown, metrics_open_count = await self.execution.get_account_metrics()
+                    live_open_count = max(int(metrics_open_count or 0), len(self.execution.active_trades))
                     if live_open_count >= self.risk_manager.max_open_trades:
                         logger.warning(f"Лимит позиций ({live_open_count} >= {self.risk_manager.max_open_trades})")
                         now = time.time()
