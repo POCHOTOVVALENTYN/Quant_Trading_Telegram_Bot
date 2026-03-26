@@ -136,7 +136,9 @@ class ExecutionEngine:
         order_type: str,
         trigger_price: float,
         entry_price: float,
-        is_long: bool
+        is_long: bool,
+        db_stop: float = 0.0,
+        db_tp: float = 0.0,
     ) -> Optional[str]:
         """
         Возвращает тип защиты:
@@ -149,9 +151,15 @@ class ExecutionEngine:
         if "STOP" in t and "TAKE_PROFIT" not in t:
             return "SL"
 
-        # Fallback для случаев, когда биржа не прислала type.
         if trigger_price <= 0 or entry_price <= 0:
             return None
+
+        # Fallback: type unknown (testnet algo orders). Match by proximity to DB values first.
+        if db_stop > 0 and db_tp > 0:
+            dist_sl = abs(trigger_price - db_stop)
+            dist_tp = abs(trigger_price - db_tp)
+            return "SL" if dist_sl <= dist_tp else "TP"
+
         if is_long:
             return "SL" if trigger_price < entry_price else "TP"
         return "SL" if trigger_price > entry_price else "TP"
@@ -698,12 +706,15 @@ class ExecutionEngine:
 
                     found_sl, found_tp = None, None
                     sl_id, tp_id = None, None
+                    db_sl_val = float(dbp.stop_loss or 0.0)
+                    db_tp_val = float(dbp.take_profit or 0.0)
                     for o in ex_orders_by_symbol.get(symbol, []):
                         trig = float(o.get("stopPrice") or 0.0)
                         if trig <= 0:
                             continue
                         kind = self._classify_protective_order(
-                            str(o.get("type", "")), trig, entry, is_long
+                            str(o.get("type", "")), trig, entry, is_long,
+                            db_stop=db_sl_val, db_tp=db_tp_val,
                         )
                         if kind == "SL":
                             found_sl = self._pick_better_level(found_sl, trig, kind="SL", is_long=is_long)
@@ -744,18 +755,24 @@ class ExecutionEngine:
 
                             if res_sl_id or res_tp_id:
                                 await send_telegram_msg(
-                                    f"**RESCUE: Protection restored**\n\n"
-                                    f"Symbol: {symbol}\n"
-                                    f"TP: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}"
+                                    f"🛟 **ВОССТАНОВЛЕНИЕ ЗАЩИТЫ**\n\n"
+                                    f"🔹 Символ: {symbol}\n"
+                                    f"🛡 Стоп: {f'{dbp.stop_loss:.4f}' if dbp.stop_loss else 'N/A'}\n"
+                                    f"🎯 Тейк: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}"
                                 )
 
                     cache_stop = found_sl or dbp.stop_loss
                     if cache_stop:
-                        bad_stop = (is_long and float(cache_stop) >= entry) or ((not is_long) and float(cache_stop) <= entry)
-                        if bad_stop:
-                            fallback_stop = dbp.stop_loss if dbp.stop_loss else (entry * (0.95 if is_long else 1.05))
-                            logger.warning(f"[RECONCILE] Invalid stop for {symbol}: {cache_stop} vs entry={entry}. Fallback={fallback_stop}")
-                            cache_stop = fallback_stop
+                        cache_f = float(cache_stop)
+                        wrong_side = (is_long and cache_f >= entry) or ((not is_long) and cache_f <= entry)
+                        if wrong_side:
+                            be_moved = (is_long and cache_f >= entry) or ((not is_long) and cache_f <= entry)
+                            if be_moved and found_sl:
+                                pass  # trailing stop crossed BE — this is valid, keep it
+                            else:
+                                fallback_stop = dbp.stop_loss if dbp.stop_loss else (entry * (0.95 if is_long else 1.05))
+                                logger.warning(f"[RECONCILE] Invalid stop for {symbol}: {cache_stop} vs entry={entry}. Fallback={fallback_stop}")
+                                cache_stop = fallback_stop
 
                     new_active[symbol] = {
                         "entry": entry,
@@ -782,6 +799,32 @@ class ExecutionEngine:
                         )
 
                 await session.commit()
+
+            # Orphan cleanup: cancel algo/standard orders for symbols with no active position
+            orphan_symbols = set(ex_orders_by_symbol.keys()) - set(new_active.keys())
+            for orphan_sym in orphan_symbols:
+                for o in ex_orders_by_symbol[orphan_sym]:
+                    oid = o.get("id")
+                    if not oid:
+                        continue
+                    try:
+                        clean = orphan_sym.replace("/", "").split(":")[0]
+                        await self._with_time_sync_retry(
+                            lambda _oid=oid, _cs=clean: self.exchange.request(
+                                'algoOrder', 'fapiPrivate', 'DELETE', {'algoId': str(_oid)}
+                            ),
+                            ctx=f"orphan_cleanup({orphan_sym}:{oid})"
+                        )
+                        logger.info(f"🧹 [ORPHAN] Cancelled stale order {oid} for {orphan_sym}")
+                    except Exception as e:
+                        try:
+                            await self._with_time_sync_retry(
+                                lambda _oid=oid, _sym=orphan_sym: self.exchange.cancel_order(str(_oid), _sym),
+                                ctx=f"orphan_cleanup_std({orphan_sym}:{oid})"
+                            )
+                            logger.info(f"🧹 [ORPHAN] Cancelled standard order {oid} for {orphan_sym}")
+                        except Exception:
+                            logger.warning(f"⚠️ [ORPHAN] Could not cancel {oid} for {orphan_sym}: {e}")
 
             self.active_trades = new_active
             logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
@@ -961,7 +1004,20 @@ class ExecutionEngine:
                     await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED"))
                     await session.commit()
 
-                await send_telegram_msg(f"✅ **ВХОД: {symbol}** ({direction})\nЦена: {entry_exec:.4f}\nСтоп: {stop_price:.4f}")
+                _strat = signal_data.get("strategy", "?")
+                _tp_val = signal_data.get("take_profit")
+                _tp_str = f"{float(_tp_val):.4f}" if _tp_val else "—"
+                _dir_emoji = "🟢 LONG" if direction.upper() == "LONG" else "🔴 SHORT"
+                await send_telegram_msg(
+                    f"✅ **НОВАЯ ПОЗИЦИЯ**\n\n"
+                    f"🔹 Символ: `{symbol}`\n"
+                    f"📌 Направление: {_dir_emoji}\n"
+                    f"📊 Стратегия: {_strat}\n"
+                    f"💰 Цена входа: `{entry_exec:.4f}`\n"
+                    f"🛡 Стоп-лосс: `{stop_price:.4f}`\n"
+                    f"🎯 Тейк-профит: `{_tp_str}`\n"
+                    f"📦 Объём: `{lot_size}`"
+                )
 
             except Exception as e:
                 logger.error(f"❌ Entry Error {symbol}: {e}")
@@ -1033,9 +1089,9 @@ class ExecutionEngine:
                                     )
                                     await session.commit()
                                 await send_telegram_msg(
-                                    f"🟡 **BE MOVE: {symbol}**\n"
-                                    f"Stop -> {be_stop:.6f}\n"
-                                    f"Trigger: 1R + {'ADX' if adx_ok else 'Breakout'}"
+                                    f"🟡 **БЕЗУБЫТОК: {symbol}**\n\n"
+                                    f"🛡 Стоп перенесён на: `{be_stop:.6f}`\n"
+                                    f"📈 Триггер: 1R + {'ADX ≥ 20' if adx_ok else 'Пробой'}"
                                 )
             
             # Трейлинг-стоп (skip if ATR is invalid to prevent stop jump to current price)
@@ -1102,9 +1158,11 @@ class ExecutionEngine:
                                 trade['tp_order_id'] = tp_id
                             
                             await send_telegram_msg(
-                                f"💎 **ДОБОР: {symbol}** (Этап {next_stage})\n"
-                                f"📈 Новый объем: {new_size:.4f}\n"
-                                f"💰 Новая средняя: {new_entry:.4f}"
+                                f"💎 **ПИРАМИДИНГ (ДОБОР)**\n\n"
+                                f"🔹 Символ: `{symbol}`\n"
+                                f"📊 Этап: {next_stage}\n"
+                                f"📦 Новый объём: `{new_size:.4f}`\n"
+                                f"💰 Средняя цена: `{new_entry:.4f}`"
                             )
                         except Exception as e:
                             logger.error(f"Pyramid error for {symbol}: {e}")
@@ -1132,7 +1190,8 @@ class ExecutionEngine:
                     .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
                 )
                 
-                # Добавить PnL-запись (Баг 4.3)
+                pnl_usd = 0.0
+                pnl_pct = 0.0
                 if reason != "EXTERNAL":
                     try:
                         ticker = await self.exchange.fetch_ticker(symbol)
@@ -1152,13 +1211,37 @@ class ExecutionEngine:
                             reason=reason
                         )
                         session.add(pnl_rec)
+
+                        try:
+                            bal, _, _ = await self.get_account_metrics()
+                            self.risk_manager.record_closed_pnl(pnl_usd, bal)
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning(f"PnL record error: {e}")
                 
                 await session.commit()
             
+            _pnl_msg = ""
+            _reason_map = {
+                "EXTERNAL": "🔄 Биржа (TP/SL)",
+                "MANUAL": "🖐 Ручное",
+                "TIME": "⏱ Тайм-аут",
+                "AUTO": "⚙️ Авто",
+            }
+            _reason_ru = _reason_map.get(reason, f"⚙️ {reason}")
+            if reason != "EXTERNAL":
+                try:
+                    _pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+                    _pnl_msg = f"\n{_pnl_emoji} Результат: `{pnl_usd:+.2f} USDT ({pnl_pct:+.1f}%)`"
+                except Exception:
+                    pass
             self.active_trades.pop(symbol, None)
-            await send_telegram_msg(f"💰 **ЗАКРЫТО: {symbol}**\nПричина: {reason}")
+            await send_telegram_msg(
+                f"💰 **ПОЗИЦИЯ ЗАКРЫТА**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"🏁 Причина: {_reason_ru}{_pnl_msg}"
+            )
         except Exception as e: logger.error(f"Error closing {symbol}: {e}")
 
     async def manual_close(self, symbol: str) -> bool:

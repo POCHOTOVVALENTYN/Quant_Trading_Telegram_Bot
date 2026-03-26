@@ -87,10 +87,13 @@ class AIModel:
 
 
 # ---------------------------------------------------------------------------
-# EXTERNAL AI ADAPTER — all providers
+# EXTERNAL AI ADAPTER — cascade multi-provider
 # ---------------------------------------------------------------------------
 
-# OpenAI-compatible chat completions format, reused by many providers
+import time
+from dataclasses import dataclass, field
+
+
 async def _call_openai_compatible(
     url: str,
     api_key: str,
@@ -99,7 +102,6 @@ async def _call_openai_compatible(
     timeout: int = 30,
     extra_headers: Optional[Dict] = None,
 ) -> str:
-    """Generic caller for any OpenAI-compatible /chat/completions endpoint."""
     import aiohttp
 
     headers = {"Content-Type": "application/json"}
@@ -127,35 +129,63 @@ async def _call_openai_compatible(
             return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
+@dataclass
+class ProviderConfig:
+    name: str
+    api_key: str
+    model: str
+    base_url: str = ""
+
+
+@dataclass
+class _ProviderHealth:
+    fail_count: int = 0
+    backoff_until: float = 0.0
+    total_calls: int = 0
+    total_ok: int = 0
+
+
 class ExternalAIAdapter:
     """
-    Multi-provider AI adapter for signal analysis.
+    Cascade multi-provider AI adapter for signal analysis.
 
-    Supported backends (all use free/minimal tiers):
-      "ollama"      — Local Ollama (100% free, Llama 3.1 / Mistral / Gemma)
-      "gemini"      — Google Gemini API (free: 15 RPM / 1M TPM)
-      "grok"        — xAI Grok API ($25/mo free credit)
-      "groq"        — Groq Cloud (free tier, Llama 3 / Mixtral, ultra fast)
-      "openrouter"  — OpenRouter aggregator (some models free)
-      "openai"      — OpenAI (paid, GPT-4o-mini ~$0.15/1M tokens)
-      "custom"      — Any OpenAI-compatible endpoint
+    Tries providers in cascade_order. If the primary fails or is in backoff,
+    falls through to the next. Tracks per-provider health automatically.
+
+    Supported backends: groq, grok, gemini, openrouter, ollama, openai, custom.
     """
     def __init__(
         self,
-        backend: str = "ollama",
-        base_url: str = "http://localhost:11434",
+        providers: Optional[Dict[str, ProviderConfig]] = None,
+        cascade_order: Optional[list] = None,
+        # Legacy single-provider fallback
+        backend: str = "",
+        base_url: str = "",
         api_key: str = "",
-        model_name: str = "llama3.1:8b",
+        model_name: str = "",
     ):
-        self.backend = backend.lower().strip()
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.model_name = model_name
+        self._providers: Dict[str, ProviderConfig] = providers or {}
+        self._cascade: list = cascade_order or []
+        self._health: Dict[str, _ProviderHealth] = {}
         self._enabled = False
 
+        # Legacy: if no cascade but single backend provided, wrap it
+        if not self._cascade and backend:
+            self._providers[backend] = ProviderConfig(
+                name=backend, api_key=api_key, model=model_name, base_url=base_url
+            )
+            self._cascade = [backend]
+
+        for name in self._cascade:
+            self._health[name] = _ProviderHealth()
+
     def enable(self):
+        active = [n for n in self._cascade if self._providers.get(n, ProviderConfig("","","")).api_key]
+        if not active:
+            logger.warning("ExternalAI: no providers with API keys configured, staying disabled")
+            return
         self._enabled = True
-        logger.info(f"ExternalAI enabled: {self.backend} / {self.model_name}")
+        logger.info(f"ExternalAI enabled — cascade: {' → '.join(active)}")
 
     def disable(self):
         self._enabled = False
@@ -163,6 +193,22 @@ class ExternalAIAdapter:
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    def get_status(self) -> Dict[str, Any]:
+        result = {}
+        for name in self._cascade:
+            cfg = self._providers.get(name)
+            h = self._health.get(name, _ProviderHealth())
+            has_key = bool(cfg and cfg.api_key)
+            result[name] = {
+                "configured": has_key,
+                "model": cfg.model if cfg else "",
+                "calls": h.total_calls,
+                "ok": h.total_ok,
+                "fails": h.fail_count,
+                "in_backoff": time.time() < h.backoff_until,
+            }
+        return result
 
     async def analyze_signal(
         self,
@@ -173,56 +219,78 @@ class ExternalAIAdapter:
             return {"recommendation": "PASS", "confidence": 0.0, "reasoning": "disabled"}
 
         prompt = self._build_prompt(signal_data, market_context)
+        now = time.time()
+        errors = []
 
-        try:
-            raw = await self._dispatch(prompt)
-            return self._parse_response(raw)
-        except Exception as e:
-            logger.error(f"ExternalAI [{self.backend}] error: {e}")
-            return {"recommendation": "PASS", "confidence": 0.0, "reasoning": str(e)[:200]}
+        for name in self._cascade:
+            cfg = self._providers.get(name)
+            if not cfg or not cfg.api_key:
+                continue
 
-    # ---- routing ----
+            h = self._health[name]
+            if now < h.backoff_until:
+                continue
 
-    async def _dispatch(self, prompt: str) -> str:
-        if self.backend == "ollama":
-            return await self._call_ollama(prompt)
-        elif self.backend == "gemini":
-            return await self._call_gemini(prompt)
-        elif self.backend == "grok":
-            return await self._call_grok(prompt)
-        elif self.backend == "groq":
-            return await self._call_groq(prompt)
-        elif self.backend == "openrouter":
-            return await self._call_openrouter(prompt)
-        elif self.backend == "openai":
-            return await self._call_openai(prompt)
-        elif self.backend == "custom":
-            return await self._call_custom(prompt)
-        raise ValueError(f"Unknown backend: {self.backend}")
+            h.total_calls += 1
+            try:
+                raw = await self._call_provider(name, cfg, prompt)
+                h.total_ok += 1
+                h.fail_count = 0
+                h.backoff_until = 0.0
+                result = self._parse_response(raw)
+                result["provider"] = name
+                return result
+            except Exception as e:
+                h.fail_count += 1
+                backoff_sec = min(300.0, 15.0 * (2 ** min(h.fail_count - 1, 5)))
+                h.backoff_until = now + backoff_sec
+                errors.append(f"{name}: {str(e)[:100]}")
+                logger.warning(f"ExternalAI [{name}] failed (backoff {backoff_sec:.0f}s): {e}")
 
-    # ---- individual providers ----
+        err_summary = "; ".join(errors) if errors else "all providers in backoff or unconfigured"
+        logger.error(f"ExternalAI cascade exhausted: {err_summary}")
+        return {"recommendation": "PASS", "confidence": 0.0, "reasoning": f"cascade exhausted: {err_summary[:200]}"}
 
-    async def _call_ollama(self, prompt: str) -> str:
+    # ---- provider dispatch ----
+
+    async def _call_provider(self, name: str, cfg: ProviderConfig, prompt: str) -> str:
+        if name == "groq":
+            return await _call_openai_compatible(
+                "https://api.groq.com/openai/v1/chat/completions",
+                cfg.api_key, cfg.model or "llama-3.3-70b-versatile", prompt
+            )
+        elif name == "grok":
+            url = cfg.base_url or "https://api.x.ai"
+            if "/chat/completions" not in url:
+                url = url.rstrip("/") + "/v1/chat/completions"
+            return await _call_openai_compatible(
+                url, cfg.api_key, cfg.model or "grok-3-mini", prompt
+            )
+        elif name == "gemini":
+            return await self._call_gemini(cfg, prompt)
+        elif name == "openrouter":
+            return await _call_openai_compatible(
+                "https://openrouter.ai/api/v1/chat/completions",
+                cfg.api_key, cfg.model or "meta-llama/llama-3.1-8b-instruct:free", prompt,
+                extra_headers={"HTTP-Referer": "https://github.com/QuantTradingBot"},
+            )
+        elif name == "ollama":
+            return await self._call_ollama(cfg, prompt)
+        elif name == "openai":
+            return await _call_openai_compatible(
+                "https://api.openai.com/v1/chat/completions",
+                cfg.api_key, cfg.model or "gpt-4o-mini", prompt
+            )
+        elif name == "custom":
+            url = (cfg.base_url or "http://localhost:8080").rstrip("/") + "/v1/chat/completions"
+            return await _call_openai_compatible(url, cfg.api_key, cfg.model, prompt)
+        raise ValueError(f"Unknown provider: {name}")
+
+    @staticmethod
+    async def _call_gemini(cfg: ProviderConfig, prompt: str) -> str:
         import aiohttp
-        url = f"{self.base_url}/api/generate"
-        payload = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 300},
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"Ollama HTTP {resp.status}")
-                data = await resp.json()
-                return data.get("response", "")
-
-    async def _call_gemini(self, prompt: str) -> str:
-        """Google Gemini via REST (free tier: gemini-2.0-flash)."""
-        import aiohttp
-        model = self.model_name or "gemini-2.0-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+        model = cfg.model or "gemini-2.0-flash"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={cfg.api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
@@ -239,41 +307,27 @@ class ExternalAIAdapter:
                     return parts[0].get("text", "") if parts else ""
                 return ""
 
-    async def _call_grok(self, prompt: str) -> str:
-        """xAI Grok via OpenAI-compatible API ($25/mo free)."""
-        url = self.base_url or "https://api.x.ai/v1/chat/completions"
-        if "/chat/completions" not in url:
-            url = url.rstrip("/") + "/v1/chat/completions"
-        model = self.model_name or "grok-3-mini"
-        return await _call_openai_compatible(url, self.api_key, model, prompt)
-
-    async def _call_groq(self, prompt: str) -> str:
-        """Groq Cloud free tier (Llama 3 70B / Mixtral at 500+ tokens/sec)."""
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        model = self.model_name or "llama-3.3-70b-versatile"
-        return await _call_openai_compatible(url, self.api_key, model, prompt)
-
-    async def _call_openrouter(self, prompt: str) -> str:
-        """OpenRouter — aggregator with free models."""
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        model = self.model_name or "meta-llama/llama-3.1-8b-instruct:free"
-        return await _call_openai_compatible(
-            url, self.api_key, model, prompt,
-            extra_headers={"HTTP-Referer": "https://github.com/QuantTradingBot"},
-        )
-
-    async def _call_openai(self, prompt: str) -> str:
-        url = "https://api.openai.com/v1/chat/completions"
-        model = self.model_name or "gpt-4o-mini"
-        return await _call_openai_compatible(url, self.api_key, model, prompt)
-
-    async def _call_custom(self, prompt: str) -> str:
-        url = self.base_url.rstrip("/") + "/v1/chat/completions"
-        return await _call_openai_compatible(url, self.api_key, self.model_name, prompt)
+    @staticmethod
+    async def _call_ollama(cfg: ProviderConfig, prompt: str) -> str:
+        import aiohttp
+        url = f"{(cfg.base_url or 'http://localhost:11434').rstrip('/')}/api/generate"
+        payload = {
+            "model": cfg.model or "llama3.1:8b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 300},
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Ollama HTTP {resp.status}")
+                data = await resp.json()
+                return data.get("response", "")
 
     # ---- prompt & parsing ----
 
-    def _build_prompt(self, signal: Dict, context: Dict) -> str:
+    @staticmethod
+    def _build_prompt(signal: Dict, context: Dict) -> str:
         return (
             "You are a cryptocurrency trading risk analyst. "
             "Evaluate this signal and respond ONLY with valid JSON.\n\n"

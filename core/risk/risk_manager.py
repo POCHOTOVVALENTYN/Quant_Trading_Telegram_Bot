@@ -1,27 +1,64 @@
+import time
+import logging
+
+_rm_logger = logging.getLogger("risk_manager")
+
+
 class RiskManager:
     def __init__(self, max_risk_pct: float = 0.02, max_drawdown_pct: float = 0.20, max_open_trades: int = 5):
-        """
-        Менеджер рисков (Этап 9).
-        max risk per trade = 2%
-        max drawdown = 20%
-        max open trades = 5
-        """
         self.max_risk_pct = max_risk_pct
         self.max_drawdown_pct = max_drawdown_pct
         self.max_open_trades = max_open_trades
-        
-        # R2: Максимальная дневная просадка (5%)
+
+        # Daily PnL tracking — auto-stop at 5% daily drawdown
         self.max_daily_drawdown_pct = 0.05
         self._daily_pnl_usd = 0.0
+        self._daily_start_balance = 0.0
         self._daily_reset_ts = 0.0
-        
-        # R3: Корреляционные группы — не открывать больше 2 позиций в одном направлении в группе
+        self._daily_halted = False
+
+        # Correlation groups — max 2 positions in same direction per cluster
         self.correlation_groups = {
             "BTC_cluster": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "LTC/USDT", "BCH/USDT"],
             "ALT_cluster": ["ADA/USDT", "DOT/USDT", "LINK/USDT", "NEAR/USDT"],
             "MEME_cluster": ["DOGE/USDT", "SHIB/USDT"]
         }
         self.max_correlated_same_direction = 2
+
+    def record_closed_pnl(self, pnl_usd: float, account_balance: float) -> None:
+        """Call on every closed trade. Tracks cumulative daily PnL and halts if limit breached."""
+        self._ensure_daily_reset(account_balance)
+        self._daily_pnl_usd += pnl_usd
+        if self._daily_start_balance > 0:
+            dd_pct = abs(min(0.0, self._daily_pnl_usd)) / self._daily_start_balance
+            if dd_pct >= self.max_daily_drawdown_pct:
+                self._daily_halted = True
+                _rm_logger.warning(
+                    f"DAILY DRAWDOWN HALT: PnL={self._daily_pnl_usd:.2f} USDT "
+                    f"({dd_pct*100:.1f}% >= {self.max_daily_drawdown_pct*100:.0f}%)"
+                )
+
+    def is_daily_halted(self) -> bool:
+        self._ensure_daily_reset(0)
+        return self._daily_halted
+
+    def get_daily_stats(self) -> dict:
+        bal = self._daily_start_balance or 1
+        dd = abs(min(0.0, self._daily_pnl_usd)) / bal if bal > 0 else 0
+        return {
+            "daily_pnl_usd": round(self._daily_pnl_usd, 2),
+            "daily_drawdown_pct": round(dd * 100, 2),
+            "halted": self._daily_halted,
+        }
+
+    def _ensure_daily_reset(self, account_balance: float) -> None:
+        now = time.time()
+        if now - self._daily_reset_ts > 86400:
+            self._daily_pnl_usd = 0.0
+            self._daily_halted = False
+            self._daily_reset_ts = now
+            if account_balance > 0:
+                self._daily_start_balance = account_balance
 
     def check_listing_days(self, listing_date_str: str, min_days: int) -> bool:
         """Проверка даты листинга (Защита от новых монет)"""
@@ -160,13 +197,17 @@ class RiskManager:
         Динамический ATR Trailing Stop (Швагер):
         Для LONG: Стоп только поднимается вверх.
         Stop = Max(OldStop, Price - 2.5 * ATR)
+
+        Minimum distance: 0.3% from current price to avoid premature stop-outs
+        on low-ATR coins (ADA, TRX, etc.) where 2.5×ATR can be < 0.1%.
         """
-        new_potential_stop = current_price - (multiplier * atr) if signal_type == "LONG" else current_price + (multiplier * atr)
-        
+        min_distance = current_price * 0.003
+        effective_distance = max(multiplier * atr, min_distance)
+        new_potential_stop = current_price - effective_distance if signal_type == "LONG" else current_price + effective_distance
+
         if signal_type == "LONG":
             return max(current_stop, new_potential_stop)
         else:
-            # Для SHORT: Стоп только опускается вниз
             return min(current_stop, new_potential_stop)
 
 class TimeExitSystem:

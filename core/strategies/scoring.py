@@ -1,17 +1,29 @@
 import pandas as pd
 from typing import Dict, Any, FrozenSet
 
-# Контртрендовые/разворотные стратегии: скоринг «тренд vs ema50» для них не релевантен.
 MEAN_REVERSION_STRATEGIES: FrozenSet[str] = frozenset({
     "Williams R",
     "WRD Reversal",
     "Funding Squeeze",
 })
 
+STRATEGY_PRIORITY: Dict[str, float] = {
+    "Donchian": 1.15,
+    "MA Trend": 1.10,
+    "Pullback": 1.10,
+    "WRD": 1.05,
+    "Vol Contraction": 1.05,
+    "Williams R": 1.00,
+    "WRD Reversal": 0.95,
+    "Funding Squeeze": 0.90,
+}
+
+
 class SignalScorer:
     """
-    Система оценки качества сигнала (0..1).
-    Учитывает 4 фактора: тренд, волатильность, объём, моментум.
+    Signal quality scorer (0..1).
+    Factors: trend alignment, volatility, volume, momentum.
+    Strategy priority multiplier adjusts final score.
     """
     def __init__(self, weights: Dict[str, float] = None):
         self.weights = weights or {
@@ -29,7 +41,6 @@ class SignalScorer:
         direction = signal.get("signal")
         strategy_name = signal.get("strategy") or ""
 
-        # 1. Trend alignment
         trend_score = 0.0
         if strategy_name in MEAN_REVERSION_STRATEGIES:
             trend_score = 0.5
@@ -47,14 +58,12 @@ class SignalScorer:
                 elif direction == "SHORT" and last_row['close'] < sma_50_val:
                     trend_score = 1.0
 
-        # 2. Volatility (ATR выше среднего за 10 свечей)
         vol_score = 0.0
         if 'atr' in df.columns and not pd.isna(last_row.get('atr')):
             atr_ma = df['atr'].tail(10).mean()
             if atr_ma > 0 and last_row['atr'] > atr_ma:
                 vol_score = min(1.0, last_row['atr'] / atr_ma - 0.5)
 
-        # 3. Volume spike
         volu_score = 0.0
         vol_avg = df['volume'].tail(20).mean()
         if vol_avg > 0:
@@ -64,7 +73,6 @@ class SignalScorer:
             elif ratio > 1.0:
                 volu_score = 0.5
 
-        # 4. Momentum (ROC)
         mom_score = 0.0
         if len(df) > 10:
             close_10 = df.iloc[-10]['close']
@@ -75,11 +83,12 @@ class SignalScorer:
                 elif direction == "SHORT" and roc < 0:
                     mom_score = min(1.0, abs(roc) / 5.0)
 
-        total_score = (
+        raw_score = (
             trend_score * self.weights["trend"] +
             vol_score * self.weights["volatility"] +
             volu_score * self.weights["volume"] +
             mom_score * self.weights["momentum"]
         )
 
-        return round(total_score, 4)
+        priority = STRATEGY_PRIORITY.get(strategy_name, 1.0)
+        return round(min(1.0, raw_score * priority), 4)

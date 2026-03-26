@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 import ccxt.pro as ccxtpro
 
 from config.settings import settings
@@ -172,8 +173,9 @@ async def lifespan(app: FastAPI):
 
     # Periodic reconcile loop (keeps state aligned with exchange)
     async def _reconcile_loop():
-        # С WebSocket мониторингом мы можем опрашивать биржу реже (раз в 5 минут как страховка)
-        RECONCILE_INTERVAL = 300 
+        # Testnet algo orders expire fast (~2-5 min), so reconcile more frequently.
+        # On production, 300s is fine since algo orders persist until triggered.
+        RECONCILE_INTERVAL = 120 if settings.testnet else 300
         while True:
             # Сначала ждем интервал, т.к. первичный reconcile уже сделан выше
             await asyncio.sleep(RECONCILE_INTERVAL)
@@ -600,5 +602,338 @@ async def reduce_trade(symbol: str, fraction: float):
     return {"status": "error", "message": "Unexpected reduce response", "symbol": normalized_symbol}
 
 
+@app.get("/api/v1/positions")
+async def get_positions():
+    """Open positions in a flat list for the dashboard."""
+    if not orchestrator:
+        return []
+    trades = orchestrator.execution.active_trades.copy()
+    result = []
+    for symbol, info in trades.items():
+        result.append({
+            "symbol": symbol,
+            "side": str(info.get("signal_type", "")).upper(),
+            "signal_type": str(info.get("signal_type", "")).upper(),
+            "entry_price": info.get("entry", 0),
+            "stop_loss": info.get("stop_loss", 0),
+            "take_profit": info.get("take_profit", 0),
+            "unrealized_pnl": info.get("pnl_usd", 0),
+            "current_size": info.get("current_size", 0),
+        })
+    return result
+
+
+@app.get("/api/v1/signals")
+async def get_recent_signals(limit: int = 30):
+    """Recent signals from DB."""
+    from database.session import async_session as _async_session
+    from database.models.all_models import Signal
+    from sqlalchemy import select
+
+    async with _async_session() as session:
+        stmt = select(Signal).order_by(Signal.id.desc()).limit(min(limit, 100))
+        rows = (await session.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": r.id, "symbol": r.symbol,
+            "signal_type": r.signal_type.value if hasattr(r.signal_type, 'value') else str(r.signal_type),
+            "strategy": r.strategy, "confidence": r.confidence,
+            "win_prob": r.win_prob, "expected_return": r.expected_return,
+            "risk": r.risk, "status": r.status,
+            "entry_price": r.entry_price, "stop_loss": r.stop_loss,
+            "take_profit": r.take_profit,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/v1/ai/status")
+async def get_ai_status():
+    if not orchestrator:
+        return {"status": "not_ready"}
+    adapter = orchestrator.external_ai
+    return {
+        "enabled": adapter.is_enabled,
+        "providers": adapter.get_status(),
+    }
+
+
+@app.get("/api/v1/ai/decisions")
+async def get_ai_decisions(limit: int = 50):
+    """Recent AI decisions for analytics."""
+    from database.session import async_session as _async_session
+    from database.models.all_models import AIDecisionLog
+    from sqlalchemy import select
+
+    async with _async_session() as session:
+        stmt = select(AIDecisionLog).order_by(AIDecisionLog.id.desc()).limit(min(limit, 200))
+        rows = (await session.execute(stmt)).scalars().all()
+    items = []
+    for r in rows:
+        items.append({
+            "id": r.id, "signal_id": r.signal_id, "symbol": r.symbol,
+            "strategy": r.strategy, "provider": r.provider,
+            "recommendation": r.recommendation, "confidence": r.confidence,
+            "reasoning": (r.reasoning or "")[:200], "score": r.score,
+            "win_prob": r.win_prob, "latency_ms": r.latency_ms,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/v1/ai/decisions/summary")
+async def get_ai_decisions_summary():
+    """Aggregate AI decision statistics."""
+    from database.session import async_session as _async_session
+    from database.models.all_models import AIDecisionLog
+    from sqlalchemy import select, func
+
+    async with _async_session() as session:
+        stmt = select(
+            AIDecisionLog.provider,
+            AIDecisionLog.recommendation,
+            func.count().label("cnt"),
+            func.avg(AIDecisionLog.confidence).label("avg_conf"),
+            func.avg(AIDecisionLog.latency_ms).label("avg_latency"),
+        ).group_by(AIDecisionLog.provider, AIDecisionLog.recommendation)
+        rows = (await session.execute(stmt)).all()
+
+    summary = {}
+    for provider, rec, cnt, avg_conf, avg_lat in rows:
+        if provider not in summary:
+            summary[provider] = {"total": 0, "decisions": {}}
+        summary[provider]["total"] += cnt
+        summary[provider]["decisions"][rec] = {
+            "count": cnt,
+            "avg_confidence": round(float(avg_conf or 0), 3),
+            "avg_latency_ms": round(float(avg_lat or 0), 0),
+        }
+    return summary
+
+
+@app.get("/api/v1/risk/daily")
+async def get_daily_risk():
+    """Daily PnL and drawdown status."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    return orchestrator.risk_manager.get_daily_stats()
+
+
+@app.get("/api/v1/learner/status")
+async def get_learner_status():
+    """Scoring learner weights and training stats."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    learner = orchestrator.scoring_learner
+    import json
+    from pathlib import Path
+    stats = {}
+    try:
+        wf = Path(learner.weights_file)
+        if wf.exists():
+            with open(wf) as f:
+                stats = json.load(f).get("stats", {})
+    except Exception:
+        pass
+    return {
+        "enabled": settings.scoring_learner_enabled,
+        "weights": learner.get_weights(),
+        "last_training": stats,
+    }
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """Real-time monitoring dashboard with auto-refresh."""
+    return _DASHBOARD_HTML
+
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Bot Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;padding:16px}
+h1{color:#58a6ff;margin-bottom:12px;font-size:1.4rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin-bottom:14px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
+.card h2{font-size:.95rem;color:#8b949e;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
+.metric{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d;font-size:.88rem}
+.metric:last-child{border:none}
+.metric .val{color:#58a6ff;font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.78rem;font-weight:600}
+.badge.long{background:#1a4a2e;color:#3fb950}.badge.short{background:#4a1a1a;color:#f85149}
+.badge.enter{background:#1a3a4a;color:#58a6ff}.badge.skip{background:#4a3a1a;color:#d29922}
+.badge.ok{background:#1a4a2e;color:#3fb950}.badge.err{background:#4a1a1a;color:#f85149}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th{text-align:left;color:#8b949e;padding:6px 8px;border-bottom:1px solid #30363d}
+td{padding:5px 8px;border-bottom:1px solid #21262d}
+tr:hover{background:#1c2128}
+.timer{color:#484f58;font-size:.75rem;float:right}
+.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.status-dot.on{background:#3fb950}.status-dot.off{background:#f85149}
+.refresh-bar{height:2px;background:#58a6ff;transition:width linear;position:fixed;top:0;left:0}
+</style>
+</head>
+<body>
+<div class="refresh-bar" id="rbar"></div>
+<h1>Trading Bot <span style="color:#3fb950">Live Dashboard</span> <span class="timer" id="timer">--</span></h1>
+
+<div class="grid">
+  <div class="card" id="c-positions"><h2>Open Positions</h2><p style="color:#484f58">Loading...</p></div>
+  <div class="card" id="c-daily"><h2>Daily Risk</h2><p style="color:#484f58">Loading...</p></div>
+  <div class="card" id="c-ai"><h2>AI Providers</h2><p style="color:#484f58">Loading...</p></div>
+  <div class="card" id="c-stats"><h2>AI Decision Stats</h2><p style="color:#484f58">Loading...</p></div>
+  <div class="card" id="c-learner"><h2>Scoring Learner</h2><p style="color:#484f58">Loading...</p></div>
+</div>
+
+<div class="card" id="c-signals" style="margin-bottom:14px"><h2>Recent Signals</h2><p style="color:#484f58">Loading...</p></div>
+<div class="card" id="c-decisions"><h2>Recent AI Decisions</h2><p style="color:#484f58">Loading...</p></div>
+
+<script>
+const BASE = location.origin;
+const REFRESH = 15000;
+let countdown = REFRESH/1000;
+
+async function fetchJSON(path) {
+  try { const r = await fetch(BASE + path); return r.ok ? await r.json() : null; }
+  catch { return null; }
+}
+
+function badge(cls, text) { return `<span class="badge ${cls}">${text}</span>`; }
+function dot(on) { return `<span class="status-dot ${on?'on':'off'}"></span>`; }
+function pct(v) { return v != null ? (v*100).toFixed(1)+'%' : '-'; }
+function num(v,d=2) { return v != null ? Number(v).toFixed(d) : '-'; }
+
+async function refresh() {
+  const [positions, dailyRisk, aiStatus, aiSummary, learner, signals, decisions] = await Promise.all([
+    fetchJSON('/api/v1/positions'),
+    fetchJSON('/api/v1/risk/daily'),
+    fetchJSON('/api/v1/ai/status'),
+    fetchJSON('/api/v1/ai/decisions/summary'),
+    fetchJSON('/api/v1/learner/status'),
+    fetchJSON('/api/v1/signals?limit=15'),
+    fetchJSON('/api/v1/ai/decisions?limit=20'),
+  ]);
+
+  // Positions
+  const cp = document.getElementById('c-positions');
+  if (positions && Array.isArray(positions)) {
+    if (positions.length === 0) {
+      cp.innerHTML = '<h2>Open Positions</h2><p style="color:#484f58">No open positions</p>';
+    } else {
+      let h = '<h2>Open Positions (' + positions.length + ')</h2><table><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>PnL</th><th>SL</th><th>TP</th></tr>';
+      for (const p of positions) {
+        const side = (p.signal_type||p.side||'').toUpperCase();
+        const cls = side==='LONG'?'long':'short';
+        const pnl = p.unrealized_pnl||p.pnl||0;
+        h += `<tr><td>${p.symbol}</td><td>${badge(cls,side)}</td><td>${num(p.entry_price,4)}</td>`;
+        h += `<td style="color:${pnl>=0?'#3fb950':'#f85149'}">${num(pnl,3)} USDT</td>`;
+        h += `<td>${num(p.stop_loss,4)}</td><td>${num(p.take_profit,4)}</td></tr>`;
+      }
+      cp.innerHTML = h + '</table>';
+    }
+  }
+
+  // Daily Risk
+  const cdr = document.getElementById('c-daily');
+  if (dailyRisk && dailyRisk.daily_pnl_usd !== undefined) {
+    const pnl = dailyRisk.daily_pnl_usd;
+    const dd = dailyRisk.daily_drawdown_pct;
+    const halted = dailyRisk.halted;
+    let h = '<h2>Daily Risk</h2>';
+    h += `<div class="metric"><span>Daily PnL</span><span class="val" style="color:${pnl>=0?'#3fb950':'#f85149'}">${pnl>=0?'+':''}${pnl} USDT</span></div>`;
+    h += `<div class="metric"><span>Drawdown</span><span class="val">${dd}%</span></div>`;
+    h += `<div class="metric"><span>Trading</span><span class="val">${halted?badge('err','HALTED'):badge('ok','ACTIVE')}</span></div>`;
+    cdr.innerHTML = h;
+  }
+
+  // AI Status
+  const ca = document.getElementById('c-ai');
+  if (aiStatus) {
+    let h = `<h2>AI Providers</h2><div class="metric"><span>Cascade enabled</span><span class="val">${aiStatus.enabled?'Yes':'No'}</span></div>`;
+    if (aiStatus.providers && typeof aiStatus.providers === 'object') {
+      for (const [name, info] of Object.entries(aiStatus.providers)) {
+        const healthy = info.healthy !== false;
+        h += `<div class="metric"><span>${dot(healthy)}${name}</span><span class="val">${healthy?badge('ok','OK'):badge('err','DOWN')}</span></div>`;
+      }
+    }
+    ca.innerHTML = h;
+  }
+
+  // AI Summary
+  const cs = document.getElementById('c-stats');
+  if (aiSummary && typeof aiSummary === 'object') {
+    let h = '<h2>AI Decision Stats</h2><table><tr><th>Provider</th><th>Action</th><th>Count</th><th>Avg Conf</th><th>Avg Latency</th></tr>';
+    for (const [prov, data] of Object.entries(aiSummary)) {
+      for (const [rec, vals] of Object.entries(data.decisions||{})) {
+        const cls = rec==='ENTER'?'enter':rec==='SKIP'?'skip':'';
+        h += `<tr><td>${prov}</td><td>${badge(cls,rec)}</td><td>${vals.count}</td><td>${pct(vals.avg_confidence/100)}</td><td>${vals.avg_latency_ms}ms</td></tr>`;
+      }
+    }
+    cs.innerHTML = h + '</table>';
+  }
+
+  // Learner
+  const cl = document.getElementById('c-learner');
+  if (learner) {
+    let h = `<h2>Scoring Learner</h2><div class="metric"><span>Active</span><span class="val">${learner.enabled?'Yes':'No'}</span></div>`;
+    if (learner.weights) {
+      for (const [k, v] of Object.entries(learner.weights)) {
+        h += `<div class="metric"><span>${k}</span><span class="val">${num(v,3)}</span></div>`;
+      }
+    }
+    if (learner.last_training && learner.last_training.samples) {
+      h += `<div class="metric"><span>Last samples</span><span class="val">${learner.last_training.samples}</span></div>`;
+    }
+    cl.innerHTML = h;
+  }
+
+  // Signals
+  const csi = document.getElementById('c-signals');
+  if (signals && Array.isArray(signals)) {
+    let h = '<h2>Recent Signals (' + signals.length + ')</h2><table><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Score</th><th>WinProb</th><th>Status</th></tr>';
+    for (const s of signals.slice(0,15)) {
+      const side = (s.signal_type||'').toUpperCase();
+      const cls = side==='LONG'?'long':side==='SHORT'?'short':'';
+      h += `<tr><td>${(s.timestamp||'').slice(0,19)}</td><td>${s.symbol}</td><td>${badge(cls,side)}</td>`;
+      h += `<td>${s.strategy||'-'}</td><td>${pct(s.confidence)}</td><td>${pct(s.win_prob)}</td>`;
+      h += `<td>${s.status||'-'}</td></tr>`;
+    }
+    csi.innerHTML = h + '</table>';
+  }
+
+  // AI Decisions
+  const cd = document.getElementById('c-decisions');
+  if (decisions && decisions.items) {
+    let h = '<h2>Recent AI Decisions (' + decisions.count + ')</h2><table><tr><th>Time</th><th>Symbol</th><th>Provider</th><th>Rec</th><th>Conf</th><th>Latency</th><th>Reasoning</th></tr>';
+    for (const d of decisions.items.slice(0,20)) {
+      const cls = d.recommendation==='ENTER'?'enter':d.recommendation==='SKIP'?'skip':'';
+      h += `<tr><td>${(d.created_at||'').slice(0,19)}</td><td>${d.symbol}</td><td>${d.provider}</td>`;
+      h += `<td>${badge(cls,d.recommendation)}</td><td>${pct(d.confidence)}</td><td>${d.latency_ms||'-'}ms</td>`;
+      h += `<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reasoning||'-'}</td></tr>`;
+    }
+    cd.innerHTML = h + '</table>';
+  }
+
+  countdown = REFRESH/1000;
+}
+
+function tick() {
+  countdown--;
+  document.getElementById('timer').textContent = `refresh in ${Math.max(0,countdown)}s`;
+  const pct = 100 - (countdown/(REFRESH/1000))*100;
+  document.getElementById('rbar').style.width = pct+'%';
+}
+
+refresh();
+setInterval(refresh, REFRESH);
+setInterval(tick, 1000);
+</script>
+</body>
+</html>"""
 
 

@@ -23,12 +23,12 @@ from core.indicators.indicators import (
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
-from ai.model import AIModel, ExternalAIAdapter
+from ai.model import AIModel, ExternalAIAdapter, ProviderConfig
 from ai.scoring_learner import ScoringLearner, learning_loop
 from core.risk.risk_manager import RiskManager
 from core.execution.engine import ExecutionEngine
 from database.session import async_session
-from database.models.all_models import Signal
+from database.models.all_models import Signal, AIDecisionLog
 from utils.exporter import exporter
 
 logger = get_signal_logger()
@@ -79,13 +79,45 @@ class TradingOrchestrator:
 
     @staticmethod
     def _init_external_ai() -> ExternalAIAdapter:
-        adapter = ExternalAIAdapter(
-            backend=settings.external_ai_backend or "ollama",
-            base_url=settings.external_ai_url,
-            api_key=settings.external_ai_api_key,
-            model_name=settings.external_ai_model,
-        )
-        if settings.external_ai_backend:
+        providers: Dict[str, ProviderConfig] = {}
+
+        if settings.groq_api_key:
+            providers["groq"] = ProviderConfig(
+                name="groq", api_key=settings.groq_api_key,
+                model=settings.groq_model,
+            )
+        if settings.grok_api_key:
+            providers["grok"] = ProviderConfig(
+                name="grok", api_key=settings.grok_api_key,
+                model=settings.grok_model, base_url=settings.grok_api_url,
+            )
+        if settings.gemini_api_key:
+            providers["gemini"] = ProviderConfig(
+                name="gemini", api_key=settings.gemini_api_key,
+                model=settings.gemini_model,
+            )
+        if settings.openrouter_api_key:
+            providers["openrouter"] = ProviderConfig(
+                name="openrouter", api_key=settings.openrouter_api_key,
+                model=settings.openrouter_model,
+            )
+
+        cascade = [s.strip() for s in settings.ai_cascade_order.split(",") if s.strip()] if settings.ai_cascade_order else []
+
+        # Legacy fallback: single-provider env vars
+        if not cascade and settings.external_ai_backend:
+            cascade = [settings.external_ai_backend]
+            if settings.external_ai_backend not in providers:
+                providers[settings.external_ai_backend] = ProviderConfig(
+                    name=settings.external_ai_backend,
+                    api_key=settings.external_ai_api_key,
+                    model=settings.external_ai_model,
+                    base_url=settings.external_ai_url,
+                )
+
+        adapter = ExternalAIAdapter(providers=providers, cascade_order=cascade)
+
+        if cascade and providers:
             adapter.enable()
         return adapter
 
@@ -264,6 +296,15 @@ class TradingOrchestrator:
                         continue
                     self._last_signals_cache[cache_key] = now
 
+                    # Daily drawdown halt
+                    if self.risk_manager.is_daily_halted():
+                        logger.warning(f"[{symbol}] Daily drawdown limit reached, all entries halted")
+                        return
+
+                    # Duplicate-position guard: skip if position already open for this symbol
+                    if symbol in self.execution.active_trades and not settings.pyramiding_enabled:
+                        continue
+
                     # Фильтр направления
                     allowed_side = str(getattr(settings, "allowed_position_side", "BOTH") or "BOTH").upper()
                     signal_side = str(signal.get("signal", "")).upper()
@@ -300,17 +341,18 @@ class TradingOrchestrator:
                             logger.warning(f"Монета {symbol} слишком новая. Листинг {onboard_date_str}")
                             continue
 
-                    # Лимит позиций
-                    cached_balance, cached_drawdown, cached_open_trades = await self.execution.get_account_metrics()
-                    if cached_open_trades >= self.risk_manager.max_open_trades:
-                        logger.warning(f"Лимит позиций ({cached_open_trades} >= {self.risk_manager.max_open_trades})")
+                    # Лимит позиций (real-time count from active_trades dict to avoid race conditions)
+                    live_open_count = len(self.execution.active_trades)
+                    cached_balance, cached_drawdown, _ = await self.execution.get_account_metrics()
+                    if live_open_count >= self.risk_manager.max_open_trades:
+                        logger.warning(f"Лимит позиций ({live_open_count} >= {self.risk_manager.max_open_trades})")
                         now = time.time()
                         if not hasattr(self, '_last_limit_notify') or (now - self._last_limit_notify) > 900:
                             self._last_limit_notify = now
                             await send_telegram_msg(
-                                f"**ВХОД ПРОПУЩЕН**\n\n"
-                                f"Символ: {symbol}\n"
-                                f"Причина: Лимит позиций ({cached_open_trades}/{self.risk_manager.max_open_trades})"
+                                f"⚠️ **ВХОД ПРОПУЩЕН**\n\n"
+                                f"🔹 Символ: `{symbol}`\n"
+                                f"📂 Причина: Лимит позиций ({live_open_count}/{self.risk_manager.max_open_trades})"
                             )
                         return
 
@@ -346,7 +388,8 @@ class TradingOrchestrator:
                         logger.info(f"[{symbol}] AI prob {ai_prediction['win_prob']:.2f} < 0.55, skip")
                         continue
 
-                    # External AI filter (optional — Ollama/OpenAI/Custom)
+                    # External AI filter (optional — cascade: Groq → Grok → Gemini → OpenRouter)
+                    ext_ai_decision = None
                     if self.external_ai.is_enabled:
                         try:
                             market_ctx = {
@@ -357,12 +400,42 @@ class TradingOrchestrator:
                                 "funding_rate": fr,
                                 "trend": "UP" if df_eval.iloc[-1]['close'] > df_eval.iloc[-1].get('ema50', 0) else "DOWN"
                             }
+                            _ai_start = time.time()
                             ext_result = await self.external_ai.analyze_signal(
                                 {**signal, "score": score, "stop_loss": None, "take_profit": None},
                                 market_ctx
                             )
-                            if ext_result.get("recommendation") == "SKIP" and ext_result.get("confidence", 0) > 0.6:
-                                logger.info(f"[{symbol}] External AI SKIP: {ext_result.get('reasoning', '')[:100]}")
+                            _ai_ms = int((time.time() - _ai_start) * 1000)
+                            provider_name = ext_result.get("provider", "?")
+                            rec = ext_result.get("recommendation", "PASS")
+                            conf = ext_result.get("confidence", 0)
+                            reasoning = ext_result.get("reasoning", "")
+
+                            ext_ai_decision = {
+                                "provider": provider_name, "recommendation": rec,
+                                "confidence": conf, "reasoning": reasoning,
+                                "latency_ms": _ai_ms,
+                            }
+                            logger.info(
+                                f"[{symbol}] AI ({provider_name}): {rec} conf={conf:.2f} "
+                                f"({_ai_ms}ms) — {reasoning[:80]}"
+                            )
+
+                            # Save to DB for analytics
+                            try:
+                                async with async_session() as s:
+                                    s.add(AIDecisionLog(
+                                        symbol=symbol, strategy=signal.get("strategy"),
+                                        provider=provider_name, recommendation=rec,
+                                        confidence=conf, reasoning=reasoning[:500],
+                                        score=score, win_prob=ai_prediction["win_prob"],
+                                        latency_ms=_ai_ms,
+                                    ))
+                                    await s.commit()
+                            except Exception:
+                                pass
+
+                            if rec == "SKIP" and conf > 0.6:
                                 continue
                         except Exception as ext_err:
                             logger.warning(f"[{symbol}] External AI error (non-blocking): {ext_err}")
@@ -417,29 +490,46 @@ class TradingOrchestrator:
                         await session.commit()
                         enrich_signal["id"] = new_sig_model.id
 
+                        # Link AI decision to signal
+                        if ext_ai_decision and new_sig_model.id:
+                            try:
+                                session.add(AIDecisionLog(
+                                    signal_id=new_sig_model.id,
+                                    symbol=symbol, strategy=signal.get("strategy"),
+                                    provider=ext_ai_decision["provider"],
+                                    recommendation=ext_ai_decision["recommendation"],
+                                    confidence=ext_ai_decision.get("confidence"),
+                                    reasoning=ext_ai_decision.get("reasoning", "")[:500],
+                                    score=score, win_prob=ai_prediction["win_prob"],
+                                    latency_ms=ext_ai_decision.get("latency_ms"),
+                                ))
+                                await session.commit()
+                            except Exception:
+                                pass
+
                     # Уведомление
                     now_utc = datetime.now(timezone.utc).strftime('%H:%M:%S')
-                    dir_label = "LONG" if enrich_signal['signal'] == "LONG" else "SHORT"
+                    _dir_emoji = "🟢 LONG" if enrich_signal['signal'] == "LONG" else "🔴 SHORT"
                     status_msg = (
-                        f"**SIGNAL: {enrich_signal['strategy']}**\n\n"
-                        f"Symbol: {symbol}\n"
-                        f"Direction: {dir_label}\n\n"
-                        f"Entry: {enrich_signal['entry_price']:.4f}\n"
-                        f"Stop Loss: {enrich_signal['stop_loss']:.4f}\n"
-                        f"Take Profit: {enrich_signal['take_profit']:.4f}\n\n"
-                        f"Time (UTC): {now_utc}\n\n"
-                        f"Win Prob: {ai_prediction.get('win_prob', 0)*100:.1f}%\n"
-                        f"Exp Return: {ai_prediction.get('expected_return', 0):.2f}%\n"
-                        f"Risk: {ai_prediction.get('risk', 0):.2f}\n"
-                        f"Score: {score:.2f}\n\n"
-                        f"Status: PENDING"
+                        f"🚀 **НОВЫЙ СИГНАЛ**\n\n"
+                        f"📊 Стратегия: {enrich_signal['strategy']}\n"
+                        f"🔹 Символ: `{symbol}`\n"
+                        f"📌 Направление: {_dir_emoji}\n\n"
+                        f"💰 Вход: `{enrich_signal['entry_price']:.4f}`\n"
+                        f"🛡 Стоп-лосс: `{enrich_signal['stop_loss']:.4f}`\n"
+                        f"🎯 Тейк-профит: `{enrich_signal['take_profit']:.4f}`\n\n"
+                        f"🤖 Win Prob: `{ai_prediction.get('win_prob', 0)*100:.1f}%`\n"
+                        f"📈 Ож. доход: `{ai_prediction.get('expected_return', 0):.2f}%`\n"
+                        f"📊 Score: `{score:.2f}`\n\n"
+                        f"🕒 Время (UTC): {now_utc}\n"
+                        f"⏳ Статус: ОЖИДАНИЕ"
                     )
                     await send_telegram_msg(status_msg)
 
                     # Исполнение
                     if settings.is_trading_enabled:
                         asyncio.create_task(
-                            self.execution.execute_signal(enrich_signal, cached_balance, cached_drawdown, cached_open_trades)
+                            self.execution.execute_signal(enrich_signal, cached_balance, cached_drawdown, live_open_count)
                         )
                     else:
                         logger.info(f"Trading disabled. Signal {symbol} saved but not executed.")
@@ -454,14 +544,18 @@ class TradingOrchestrator:
             if errors_in_window >= 20 and settings.is_trading_enabled:
                 settings.is_trading_enabled = False
                 await send_telegram_msg(
-                    f"**CIRCUIT BREAKER**\n\n"
-                    f"Too many errors in 10min: {errors_in_window}.\n"
-                    f"Trading disabled automatically."
+                    f"🚨 **АВАРИЙНАЯ ОСТАНОВКА**\n\n"
+                    f"⚠️ Слишком много ошибок за 10 мин: {errors_in_window}\n"
+                    f"🔴 Торговля автоматически остановлена"
                 )
 
             if not hasattr(self, '_last_error_notify') or (now - self._last_error_notify) > 1800:
                 self._last_error_notify = now
-                await send_telegram_msg(f"**CRITICAL ERROR**\n\nSymbol: {symbol}\nError: {str(e)[:200]}")
+                await send_telegram_msg(
+                    f"❌ **КРИТИЧЕСКАЯ ОШИБКА**\n\n"
+                    f"🔹 Символ: `{symbol}`\n"
+                    f"⚠️ Ошибка: {str(e)[:200]}"
+                )
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df['ema9'] = calculate_ema(df['close'], 9)
@@ -493,11 +587,11 @@ class TradingOrchestrator:
             await asyncio.sleep(3600)
             uptime_hours = (time.time() - self.start_time) / 3600
             msg = (
-                f"**HEARTBEAT**\n\n"
-                f"Uptime: {uptime_hours:.1f}h\n"
-                f"Candles processed: {self.processed_candles}\n"
-                f"Errors: {self.errors_count}\n"
-                f"Symbols monitored: {len(self.market_history)}\n"
-                f"Strategies: {len(self.strategies)}"
+                f"💓 **ПУЛЬС БОТА**\n\n"
+                f"⏱ Аптайм: `{uptime_hours:.1f}ч`\n"
+                f"📊 Свечей обработано: `{self.processed_candles}`\n"
+                f"❌ Ошибок: `{self.errors_count}`\n"
+                f"🔍 Символов: `{len(self.market_history)}`\n"
+                f"📈 Стратегий: `{len(self.strategies)}`"
             )
             await send_telegram_msg(msg)

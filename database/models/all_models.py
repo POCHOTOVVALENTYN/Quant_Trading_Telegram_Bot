@@ -130,3 +130,21 @@ class Signal(Base):
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AIDecisionLog(Base):
+    """Stores every External AI decision for analytics and learning."""
+    __tablename__ = "ai_decision_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(Integer, ForeignKey("signals.id"), nullable=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    strategy = Column(String, nullable=True)
+    provider = Column(String, nullable=False)
+    recommendation = Column(String, nullable=False)  # ENTER / SKIP / PASS
+    confidence = Column(Float, nullable=True)
+    reasoning = Column(String, nullable=True)
+    score = Column(Float, nullable=True)
+    win_prob = Column(Float, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)

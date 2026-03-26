@@ -157,82 +157,47 @@ def _spam_level_badge(user_id: int, action: str, symbol_raw: str) -> str:
 
 
 def _build_settings_menu_text(runtime: dict) -> str:
-    runtime_status = runtime.get("_runtime_status", "fallback")
     leverage_val = runtime.get("leverage", settings.leverage)
+    side = runtime.get('allowed_position_side', getattr(settings, 'allowed_position_side', 'BOTH'))
+    pos_usdt = runtime.get('position_size_usdt', getattr(settings, 'position_size_usdt', 0.0))
     return (
         "⚙️ **НАСТРОЙКИ АВТОТОРГОВЛИ**\n\n"
-        f"🔄 Автоторговля: {'✅ ВКЛ' if runtime.get('is_trading_enabled', settings.is_trading_enabled) else '❌ ВЫКЛ'}\n"
-        f"↕️ Тип позиции: {runtime.get('allowed_position_side', getattr(settings, 'allowed_position_side', 'BOTH'))}\n"
-        f"💵 Объём позиции (USDT): {runtime.get('position_size_usdt', getattr(settings, 'position_size_usdt', 0.0)):.2f} (0 = авто)\n"
-        "🛑 **Stop Loss:**\n"
-        f"🟢 Long: {settings.sl_long_pct*100:.1f}%\n"
-        f"🔴 Short: {settings.sl_short_pct*100:.1f}%\n"
-        f"🛡 Коррекция SL (0.1%): {'✅ Вкл' if settings.sl_correction_enabled else '❌ Выкл'}\n\n"
-        "📊 **Runtime-параметры (без рестарта):**\n"
-        f"🔌 REST runtime: `{runtime_status}`\n"
-        f"⚡ Плечо: {leverage_val}x\n"
-        f"🎯 TP: {runtime.get('tp_pct', settings.tp_pct)*100:.2f}%\n"
-        f"⏱ Защита от устаревших сигналов: {runtime.get('signal_expiry_seconds', settings.signal_expiry_seconds)}с\n"
-        f"📂 Макс. сделок: {runtime.get('max_open_trades', settings.max_open_trades)}\n"
-        f"💰 Маржа на сделку: {runtime.get('per_trade_margin_pct', settings.per_trade_margin_pct)*100:.1f}%\n"
-        f"💎 Пирамидинг: {'✅ Вкл' if runtime.get('pyramiding_enabled', settings.pyramiding_enabled) else '❌ Выкл'}\n\n"
-        "🎯 **Пресеты риска:**"
+        f"🔄 Торговля: {'✅ ВКЛ' if runtime.get('is_trading_enabled', settings.is_trading_enabled) else '❌ ВЫКЛ'}\n"
+        f"↕️ Направление: `{side}`\n"
+        f"⚡ Плечо: `{leverage_val}x`\n"
+        f"📂 Макс. сделок: `{runtime.get('max_open_trades', settings.max_open_trades)}`\n"
+        f"💰 Маржа: `{runtime.get('per_trade_margin_pct', settings.per_trade_margin_pct)*100:.1f}%`\n"
+        f"💵 Объём: `{pos_usdt:.0f} USDT` {'(авто)' if pos_usdt == 0 else ''}\n"
+        f"🎯 TP: `{runtime.get('tp_pct', settings.tp_pct)*100:.2f}%`\n"
+        f"🛡 SL: Long `{settings.sl_long_pct*100:.1f}%` / Short `{settings.sl_short_pct*100:.1f}%`\n"
+        f"💎 Пирамидинг: {'✅' if runtime.get('pyramiding_enabled', settings.pyramiding_enabled) else '❌'}\n"
+        f"⏱ Expiry: `{runtime.get('signal_expiry_seconds', settings.signal_expiry_seconds)}с`\n\n"
+        "👇 Выберите раздел для настройки:"
     )
 
 
 def _build_settings_menu_keyboard(runtime: dict, presets: list) -> InlineKeyboardMarkup:
-    buttons = []
-    buttons.append([
-        InlineKeyboardButton(
-            f"🔄 Автоторговля: {'ON' if runtime.get('is_trading_enabled', settings.is_trading_enabled) else 'OFF'}",
+    is_on = runtime.get('is_trading_enabled', settings.is_trading_enabled)
+    pyr_on = runtime.get('pyramiding_enabled', False)
+    buttons = [
+        [InlineKeyboardButton(
+            f"{'🟢' if is_on else '🔴'} Торговля: {'ВКЛ' if is_on else 'ВЫКЛ'}",
             callback_data="rt_toggle_trading",
-        )
-    ])
-    buttons.append([
-        InlineKeyboardButton("↕️ LONG", callback_data="rt_side_long"),
-        InlineKeyboardButton("↕️ SHORT", callback_data="rt_side_short"),
-        InlineKeyboardButton("↕️ BOTH", callback_data="rt_side_both"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("💵 Объём -1$", callback_data="rt_pos_usdt_dec"),
-        InlineKeyboardButton("💵 Объём +1$", callback_data="rt_pos_usdt_inc"),
-    ])
-    # Отдельные кнопки runtime-настроек
-    buttons.append([
-        InlineKeyboardButton(
-            f"💎 Пирамидинг: {'ON' if runtime.get('pyramiding_enabled', False) else 'OFF'}",
+        )],
+        [InlineKeyboardButton("⚡ Плечо", callback_data="menu_leverage"),
+         InlineKeyboardButton("💰 Маржа", callback_data="menu_margin")],
+        [InlineKeyboardButton("📂 Позиции", callback_data="menu_positions"),
+         InlineKeyboardButton("🎯 TP / SL", callback_data="menu_tp_sl")],
+        [InlineKeyboardButton("↕️ Направление", callback_data="menu_side"),
+         InlineKeyboardButton("💵 Объём", callback_data="menu_volume")],
+        [InlineKeyboardButton(
+            f"💎 Пирамидинг: {'ВКЛ' if pyr_on else 'ВЫКЛ'}",
             callback_data="rt_toggle_pyramiding",
-        )
-    ])
-    buttons.append([
-        InlineKeyboardButton("💰 Маржа -1%", callback_data="rt_margin_dec"),
-        InlineKeyboardButton("💰 Маржа +1%", callback_data="rt_margin_inc"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("📂 Сделки -1", callback_data="rt_open_trades_dec"),
-        InlineKeyboardButton("📂 Сделки +1", callback_data="rt_open_trades_inc"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("⚡ 10x", callback_data="rt_leverage_10"),
-        InlineKeyboardButton("⚡ 15x", callback_data="rt_leverage_15"),
-        InlineKeyboardButton("⚡ 20x", callback_data="rt_leverage_20"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("⚡ 25x", callback_data="rt_leverage_25"),
-        InlineKeyboardButton("⚡ 50x", callback_data="rt_leverage_50"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("🎯 TP -0.1%", callback_data="rt_tp_dec"),
-        InlineKeyboardButton("🎯 TP +0.1%", callback_data="rt_tp_inc"),
-    ])
-    buttons.append([
-        InlineKeyboardButton("⏱ Expiry -10s", callback_data="rt_expiry_dec"),
-        InlineKeyboardButton("⏱ Expiry +10s", callback_data="rt_expiry_inc"),
-    ])
-    # Ниже — существующие пресеты
-    for p in presets:
-        label = f"✅ {p['name']}" if p['is_active'] else p['name']
-        buttons.append([InlineKeyboardButton(label, callback_data=f"apply_preset_{p['name']}")])
+        )],
+        [InlineKeyboardButton("⏱ Expiry сигналов", callback_data="menu_expiry")],
+    ]
+    if presets:
+        buttons.append([InlineKeyboardButton("🎯 Пресеты риска", callback_data="menu_presets")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -331,7 +296,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔴 Ошибка связи с движком: {e}")
 
 async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Please provide your Binance API keys (Use secure config or settings menu!).")
+    await update.message.reply_text(
+        "🔑 **Настройка API-ключей**\n\n"
+        "Для подключения биржи отредактируйте файл `.env` и перезапустите контейнеры.\n\n"
+        "⚠️ Никогда не отправляйте ключи в чат!",
+        parse_mode='Markdown'
+    )
 
 
 def _risk_tag_for_trade(is_long: bool, entry: float, stop: float, current_price: float | None) -> str:
@@ -593,19 +563,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка при обращении к базе данных.")
     elif text == BTN_STRATEGIES:
         strategy_text = (
-            "📖 **МЕТОДОЛОГИЯ БОТА (Schwager v2 + AI)**\n\n"
-            "🛡 **РИСК-МЕНЕДЖМЕНТ (Осторожный)**\n"
-            "• **Начальный вход:** 15% от плана ( Stage 0 ).\n"
-            "• **Пирамидинг:** Доливка по 5% (4 этапа) при росте цены на +1.5 ATR.\n"
-            "• **Stop Loss:** Раздельный (L/S) + Коррекция 0.1%.\n"
-            "• **ATR Trailing Stop:** Подтягивается в профит.\n"
-            "• **Time Exit:** 5 дней без движения.\n\n"
-            "📈 **СИГНАЛЬНЫЕ СТРАТЕГИИ (10)**\n"
-            "• *Volatility, Trend, Breakout, Pattern*.\n\n"
-            "🤖 **ИНТЕЛЛЕКТУАЛЬНЫЙ СЛОЙ (AI Layer)**\n"
-            "• **Signal Scorer:** Фильтр (Score > 0.65).\n"
-            "• **AI Filter:** Win Prob > 60%.\n"
-            "• **Фильтр листинга:** > 100 дней.\n"
+            "📖 **ТОРГОВАЯ СИСТЕМА (Швагер + AI)**\n\n"
+            "📈 **8 СТРАТЕГИЙ (4 группы):**\n"
+            "🔹 *Пробой:* Donchian (1.15x), WRD (1.05x), Vol Contraction (1.05x)\n"
+            "🔹 *Тренд:* MA Trend (1.10x), Pullback (1.10x)\n"
+            "🔹 *Разворот:* Williams R, WRD Reversal\n"
+            "🔹 *Крипто:* Funding Squeeze\n\n"
+            "🛡 **РИСК-МЕНЕДЖМЕНТ:**\n"
+            "• Стоп-лосс: ATR × 2.0 (мин. 0.5%)\n"
+            "• Трейлинг: ATR × 2.5 (мин. 0.3%)\n"
+            "• Безубыток: при 1R + ADX/Пробой\n"
+            "• Тайм-аут: 48 свечей без прогресса\n"
+            "• Макс. дневная просадка: 5%\n\n"
+            "🤖 **ИИ-ФИЛЬТРАЦИЯ:**\n"
+            "• Score > 0.55 (взвешенный по стратегии)\n"
+            "• AI Win Prob > 0.55\n"
+            "• Внешний AI: Groq → Grok → Gemini → OpenRouter\n"
+            "• Листинг > 100 дней\n"
+            "• ADX ≥ 20 (для трендовых)\n"
+            "• Корреляция: макс. 2 в группе"
         )
         await update.message.reply_text(strategy_text, parse_mode='Markdown')
     elif text == BTN_STATS:
@@ -800,13 +776,146 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
 
+    elif query.data == "menu_leverage":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        lev = runtime.get("leverage", settings.leverage)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{'✅ ' if lev == v else ''}{v}x", callback_data=f"rt_leverage_{v}") for v in [5, 10, 15]],
+            [InlineKeyboardButton(f"{'✅ ' if lev == v else ''}{v}x", callback_data=f"rt_leverage_{v}") for v in [20, 25, 50]],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"⚡ **НАСТРОЙКА ПЛЕЧА**\n\nТекущее плечо: `{lev}x`\n\nВыберите значение:",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_margin":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        margin = runtime.get("per_trade_margin_pct", settings.per_trade_margin_pct)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➖ 1%", callback_data="rt_margin_dec"),
+             InlineKeyboardButton(f"💰 {margin*100:.1f}%", callback_data="noop"),
+             InlineKeyboardButton("➕ 1%", callback_data="rt_margin_inc")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"💰 **МАРЖА НА СДЕЛКУ**\n\nТекущая маржа: `{margin*100:.1f}%`\n\nИзменяйте кнопками ±1%:",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_positions":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        max_t = runtime.get("max_open_trades", settings.max_open_trades)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➖ 1", callback_data="rt_open_trades_dec"),
+             InlineKeyboardButton(f"📂 {max_t}", callback_data="noop"),
+             InlineKeyboardButton("➕ 1", callback_data="rt_open_trades_inc")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"📂 **МАКС. ОТКРЫТЫХ ПОЗИЦИЙ**\n\nТекущий лимит: `{max_t}`\n\nИзменяйте кнопками:",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_tp_sl":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        tp = runtime.get("tp_pct", settings.tp_pct)
+        sl_l = settings.sl_long_pct
+        sl_s = settings.sl_short_pct
+        sl_corr = settings.sl_correction_enabled
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 TP -0.1%", callback_data="rt_tp_dec"),
+             InlineKeyboardButton("🎯 TP +0.1%", callback_data="rt_tp_inc")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"🎯 **ТЕЙК-ПРОФИТ / СТОП-ЛОСС**\n\n"
+            f"🎯 Тейк-профит: `{tp*100:.2f}%`\n"
+            f"🟢 SL Long: `{sl_l*100:.1f}%`\n"
+            f"🔴 SL Short: `{sl_s*100:.1f}%`\n"
+            f"🛡 Коррекция SL: {'✅ Вкл' if sl_corr else '❌ Выкл'}\n\n"
+            f"Изменяйте TP кнопками:",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_side":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        side = runtime.get('allowed_position_side', getattr(settings, 'allowed_position_side', 'BOTH'))
+        _mark = lambda v: "✅ " if side.upper() == v else ""
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{_mark('LONG')}🟢 LONG", callback_data="rt_side_long"),
+             InlineKeyboardButton(f"{_mark('SHORT')}🔴 SHORT", callback_data="rt_side_short"),
+             InlineKeyboardButton(f"{_mark('BOTH')}↕️ BOTH", callback_data="rt_side_both")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"↕️ **НАПРАВЛЕНИЕ ТОРГОВЛИ**\n\nТекущее: `{side}`\n\nВыберите:",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_volume":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        pos_usdt = runtime.get('position_size_usdt', getattr(settings, 'position_size_usdt', 0.0)) or 0.0
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➖ 1$", callback_data="rt_pos_usdt_dec"),
+             InlineKeyboardButton(f"💵 {pos_usdt:.0f}$", callback_data="noop"),
+             InlineKeyboardButton("➕ 1$", callback_data="rt_pos_usdt_inc")],
+            [InlineKeyboardButton("➖ 5$", callback_data="rt_pos_usdt_dec5"),
+             InlineKeyboardButton("➕ 5$", callback_data="rt_pos_usdt_inc5")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"💵 **ОБЪЁМ ПОЗИЦИИ**\n\nТекущий: `{pos_usdt:.0f} USDT` {'(авто)' if pos_usdt == 0 else ''}\n\n"
+            f"0 = рассчитывается автоматически по марже",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_expiry":
+        runtime = await _load_runtime_settings(httpx.AsyncClient())
+        exp = runtime.get("signal_expiry_seconds", settings.signal_expiry_seconds)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➖ 10с", callback_data="rt_expiry_dec"),
+             InlineKeyboardButton(f"⏱ {exp}с", callback_data="noop"),
+             InlineKeyboardButton("➕ 10с", callback_data="rt_expiry_inc")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")],
+        ])
+        await query.edit_message_text(
+            f"⏱ **СРОК ДЕЙСТВИЯ СИГНАЛА**\n\nТекущий: `{exp}с`\n\n"
+            f"Сигналы старше этого времени игнорируются.",
+            reply_markup=kb, parse_mode='Markdown'
+        )
+
+    elif query.data == "menu_presets":
+        try:
+            async with httpx.AsyncClient() as client:
+                presets_resp = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
+                presets_resp.raise_for_status()
+                presets = presets_resp.json() if isinstance(presets_resp.json(), list) else []
+            btns = []
+            for p in presets:
+                label = f"✅ {p['name']}" if p.get('is_active') else f"🔘 {p['name']}"
+                btns.append([InlineKeyboardButton(label, callback_data=f"apply_preset_{p['name']}")])
+            btns.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_back_settings")])
+            await query.edit_message_text(
+                "🎯 **ПРЕСЕТЫ РИСКА**\n\nВыберите готовый профиль:",
+                reply_markup=InlineKeyboardMarkup(btns), parse_mode='Markdown'
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Не удалось загрузить пресеты: {e}")
+
+    elif query.data == "menu_back_settings":
+        await _render_settings_message(query, edit=True)
+
+    elif query.data == "noop":
+        pass
+
     elif query.data == "rt_toggle_trading":
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
                 res = response.json()
-                st = "ВКЛ" if res.get("is_enabled") else "ВЫКЛ"
-                await _safe_answer_callback(query, f"🔄 Автоторговля: {st}")
+                st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
+                await _safe_answer_callback(query, f"🔄 Торговля: {st}")
                 await _render_settings_message(query, edit=True)
         except Exception as e:
             await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
@@ -838,7 +947,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
 
-    elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc", "rt_pos_usdt_dec", "rt_pos_usdt_inc", "rt_tp_dec", "rt_tp_inc", "rt_expiry_dec", "rt_expiry_inc"}:
+    elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc", "rt_pos_usdt_dec", "rt_pos_usdt_inc", "rt_pos_usdt_dec5", "rt_pos_usdt_inc5", "rt_tp_dec", "rt_tp_inc", "rt_expiry_dec", "rt_expiry_inc"}:
         try:
             async with httpx.AsyncClient() as client:
                 runtime = await _load_runtime_settings(client)
@@ -872,8 +981,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await _safe_answer_callback(query, "❌ Не удалось обновить лимит сделок", show_alert=True)
                 elif query.data.startswith("rt_pos_usdt"):
                     cur = float(runtime.get("position_size_usdt", getattr(settings, "position_size_usdt", 0.0)) or 0.0)
-                    new_val = cur - 1.0 if query.data.endswith("dec") else cur + 1.0
-                    new_val = max(0.0, min(100000.0, new_val))
+                    if query.data.endswith("dec5"):
+                        step = -5.0
+                    elif query.data.endswith("inc5"):
+                        step = 5.0
+                    elif query.data.endswith("dec"):
+                        step = -1.0
+                    else:
+                        step = 1.0
+                    new_val = max(0.0, min(100000.0, cur + step))
                     response = await client.post(
                         f"{ENGINE_URL}/api/v1/runtime-settings/position-size-usdt",
                         params={"value": new_val},

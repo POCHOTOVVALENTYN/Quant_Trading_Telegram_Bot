@@ -361,15 +361,18 @@ async def learning_loop(learner: ScoringLearner, ai_model, interval_hours: int =
                 logger.info("AIModel weights updated from learner")
             if stats:
                 from utils.notifier import send_telegram_msg
+                _improved = "✅ Да" if stats['improved'] else "❌ Нет"
                 msg = (
-                    f"**SCORING LEARNER**\n\n"
-                    f"Samples: {stats['num_samples']}\n"
-                    f"Accuracy: {stats['old_accuracy']:.1%} -> {stats['new_accuracy']:.1%}\n"
-                    f"Win Rate: {stats['win_rate']:.1%}\n"
-                    f"Improved: {'Yes' if stats['improved'] else 'No'}\n\n"
+                    f"🧠 **ОБУЧЕНИЕ СКОРИНГА**\n\n"
+                    f"📊 Выборка: `{stats['num_samples']}`\n"
+                    f"🎯 Точность: `{stats['old_accuracy']:.1%}` → `{stats['new_accuracy']:.1%}`\n"
+                    f"📈 Процент побед: `{stats['win_rate']:.1%}`\n"
+                    f"🔄 Улучшено: {_improved}\n\n"
+                    f"📋 **По стратегиям:**\n"
                 )
                 for name, s in stats.get("strategies", {}).items():
-                    msg += f"  {name}: {s['wins']}/{s['total']} ({s['win_rate']:.0%}), avg PnL {s['avg_pnl_pct']:.2f}%\n"
+                    _wr = f"{s['win_rate']:.0%}"
+                    msg += f"  • {name}: {s['wins']}/{s['total']} ({_wr}), PnL `{s['avg_pnl_pct']:.2f}%`\n"
                 await send_telegram_msg(msg)
         except Exception as e:
             logger.error(f"Learning loop error: {e}")
