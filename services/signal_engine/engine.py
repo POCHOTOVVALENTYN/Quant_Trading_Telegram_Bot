@@ -77,6 +77,64 @@ class TradingOrchestrator:
 
         self.market_data.register_callback(self.on_market_data)
 
+    # Роутер режимов: трендовые/пробойные vs mean-reversion (Швагер — разные фазы рынка).
+    _REGIME_TREND_STRATEGIES = frozenset({
+        "Donchian", "WRD", "Vol Contraction", "MA Trend", "Pullback", "Funding Squeeze",
+    })
+    _REGIME_RANGE_STRATEGIES = frozenset({
+        "Williams R", "WRD Reversal",
+    })
+
+    @staticmethod
+    def _classify_market_regime(adx: float, trend_min: float, range_max: float) -> str:
+        """TREND | RANGE | NEUTRAL — в зоне между порогами не режем входы (fail-safe)."""
+        try:
+            a = float(adx)
+        except (TypeError, ValueError):
+            return "NEUTRAL"
+        if a >= trend_min:
+            return "TREND"
+        if a <= range_max:
+            return "RANGE"
+        return "NEUTRAL"
+
+    def _strategy_allowed_for_regime(self, strategy_name: str, regime: str) -> bool:
+        if regime == "NEUTRAL":
+            return True
+        in_trend = strategy_name in self._REGIME_TREND_STRATEGIES
+        in_range = strategy_name in self._REGIME_RANGE_STRATEGIES
+        if not in_trend and not in_range:
+            return True
+        if regime == "TREND":
+            return in_trend
+        if regime == "RANGE":
+            return in_range
+        return True
+
+    def _get_daily_trend_bias(self, symbol: str) -> Optional[str]:
+        """
+        Возвращает дневной тренд для символа:
+        - LONG / SHORT
+        - None, если данных недостаточно (fail-safe: не блокируем входы).
+        """
+        df_1d = self.market_history.get(symbol, {}).get("1d")
+        if df_1d is None or df_1d.empty or len(df_1d) < 30:
+            return None
+        try:
+            ema_period = max(20, int(getattr(settings, "daily_filter_ema_period", 200) or 200))
+            ema_col = f"ema{ema_period}"
+            if ema_col not in df_1d.columns:
+                return None
+            # Используем предпоследнюю свечу (закрытая).
+            row = df_1d.iloc[-2] if len(df_1d) >= 2 else df_1d.iloc[-1]
+            close = float(row.get("close", 0.0) or 0.0)
+            ema_v = float(row.get(ema_col, 0.0) or 0.0)
+            if close <= 0 or ema_v <= 0:
+                return None
+            return "LONG" if close >= ema_v else "SHORT"
+        except Exception:
+            return None
+
     @staticmethod
     def _init_external_ai() -> ExternalAIAdapter:
         providers: Dict[str, ProviderConfig] = {}
@@ -278,9 +336,48 @@ class TradingOrchestrator:
                 if not df_15m.empty and len(df_15m) > 2:
                     current_adx = df_15m.iloc[-2].get('adx', current_adx)
 
+            market_regime = "NEUTRAL"
+            if getattr(settings, "strategy_regime_routing_enabled", True):
+                try:
+                    adx_val = float(current_adx)
+                    if pd.isna(adx_val) or adx_val <= 0:
+                        market_regime = "NEUTRAL"
+                    else:
+                        market_regime = self._classify_market_regime(
+                            adx_val,
+                            float(getattr(settings, "regime_adx_trend_min", 22.0)),
+                            float(getattr(settings, "regime_adx_range_max", 18.0)),
+                        )
+                except Exception:
+                    market_regime = "NEUTRAL"
+
             for strategy in self.strategies:
                 signal = strategy.evaluate(df_eval)
                 if signal:
+                    # 1D старший фильтр (Швагер: торговать в сторону старшего тренда).
+                    # Fail-safe: если дневка недоступна, не блокируем текущую логику.
+                    if getattr(settings, "use_daily_timeframe_filter", True):
+                        daily_bias = self._get_daily_trend_bias(symbol)
+                        if daily_bias is not None:
+                            # Трендовые/пробойные стратегии должны совпадать с 1D трендом.
+                            mtf_guarded = {"Donchian", "WRD", "Vol Contraction", "MA Trend", "Pullback"}
+                            if signal.get("strategy") in mtf_guarded:
+                                if str(signal.get("signal", "")).upper() != daily_bias:
+                                    logger.info(
+                                        f"[{symbol}] 1D filter: {signal['strategy']} {signal['signal']} "
+                                        f"conflicts with daily {daily_bias}, skip"
+                                    )
+                                    continue
+
+                    # Роутер режима: в тренде не торгуем mean-reversion; во флэте не торгуем пробой/тренд.
+                    if getattr(settings, "strategy_regime_routing_enabled", True):
+                        strat_name = signal.get("strategy", "")
+                        if not self._strategy_allowed_for_regime(strat_name, market_regime):
+                            logger.info(
+                                f"[{symbol}] Режим {market_regime} (ADX≈{current_adx}): пропуск {strat_name}"
+                            )
+                            continue
+
                     # ADX-фильтр: трендовые стратегии требуют ADX >= 20
                     trend_strategies = ["MA Trend", "Donchian", "Pullback"]
                     if signal['strategy'] in trend_strategies and current_adx < 20:

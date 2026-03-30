@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     position_size_usdt: float = 0.0   # Фиксированный объём позиции в USDT (0 = авто через % маржи)
     apply_new_entry_rules_after_flat: bool = False  # Включать новые правила только после полного закрытия текущих позиций
     allowed_position_side: str = "BOTH"  # LONG | SHORT | BOTH
+    use_daily_timeframe_filter: bool = True   # Включать 1D-фильтр старшего тренда
+    daily_filter_ema_period: int = 200        # Базовый EMA для 1D-фильтра
+    # Роутер режима рынка (ADX): тренд vs флэт — разные наборы стратегий
+    strategy_regime_routing_enabled: bool = True
+    regime_adx_trend_min: float = 22.0        # ADX >= порога → режим тренда
+    regime_adx_range_max: float = 18.0      # ADX <= порога → режим флэта
     
     # Торговые настройки
     leverage: int = 10

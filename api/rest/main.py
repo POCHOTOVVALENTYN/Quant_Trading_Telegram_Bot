@@ -141,6 +141,8 @@ async def lifespan(app: FastAPI):
     app_logger.info(f"✅ Валидных символов: {len(base_symbols)} из {len(desired_symbols)}")
     
     tfs = ["1m", "5m", "15m", "1h", "4h"]
+    if settings.use_daily_timeframe_filter and "1d" not in tfs:
+        tfs.append("1d")
     
     app_logger.info(f"🚀 [1/6] Запуск мониторинга {len(base_symbols)} монет на {len(tfs)} ТФ...")
     

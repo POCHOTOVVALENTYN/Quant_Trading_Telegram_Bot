@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from database.session import async_session
 from database.models.all_models import (
     Position as PositionModel, PositionStatus, 
@@ -333,6 +334,96 @@ class ExecutionEngine:
 
     # --- HELPERS ---
 
+    async def _db_persist_order(
+        self,
+        *,
+        position_id: Optional[int],
+        symbol: str,
+        exchange_order_id: Optional[str],
+        client_order_id: Optional[str],
+        order_type: str,
+        position_side: str,
+        price: Optional[float],
+        size: float,
+        status: OrderStatus = OrderStatus.FILLED,
+    ) -> None:
+        """Аудит: биржевые ордера в БД (идемпотентно по exchange/client id)."""
+        ex_id = str(exchange_order_id).strip() if exchange_order_id else None
+        cl_id = str(client_order_id).strip() if client_order_id else None
+        if not ex_id and not cl_id:
+            return
+        ps = (position_side or "LONG").upper()
+        side_enum = SignalType.LONG if ps == "LONG" else SignalType.SHORT
+        try:
+            async with async_session() as session:
+                if ex_id:
+                    dup = await session.execute(
+                        select(OrderModel.id).where(OrderModel.exchange_order_id == ex_id)
+                    )
+                    if dup.scalar_one_or_none():
+                        return
+                if cl_id:
+                    dup = await session.execute(
+                        select(OrderModel.id).where(OrderModel.client_order_id == cl_id)
+                    )
+                    if dup.scalar_one_or_none():
+                        return
+                session.add(
+                    OrderModel(
+                        user_id=1,
+                        position_id=position_id,
+                        exchange_order_id=ex_id,
+                        client_order_id=cl_id,
+                        symbol=symbol,
+                        order_type=order_type,
+                        side=side_enum,
+                        price=float(price or 0.0),
+                        size=float(size),
+                        status=status,
+                    )
+                )
+                await session.commit()
+        except IntegrityError:
+            pass
+        except Exception as e:
+            logger.warning(f"⚠️ [AUDIT] order persist failed ({symbol}): {e}")
+
+    def _position_side_from_entry_side(self, side: str) -> str:
+        s = (side or "").upper()
+        if s in ("BUY", "LONG"):
+            return "LONG"
+        if s in ("SELL", "SHORT"):
+            return "SHORT"
+        return "LONG"
+
+    async def _realized_pnl_from_exchange_trades(
+        self, symbol: str, trade: Dict[str, Any]
+    ) -> Tuple[float, float]:
+        """Сумма realizedPnl по сделкам Binance Futures после открытия позиции."""
+        opened_ts = float(trade.get("opened_at", 0) or 0)
+        since_ms = max(0, int((opened_ts - 180) * 1000))
+        try:
+            raw = await self._with_time_sync_retry(
+                lambda: self.exchange.fetch_my_trades(symbol, since=since_ms, limit=200),
+                ctx=f"audit.fetch_my_trades({symbol})",
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ [AUDIT] fetch_my_trades: {e}")
+            return 0.0, 0.0
+        total = 0.0
+        for t in raw or []:
+            info = t.get("info") or {}
+            rp = info.get("realizedPnl") or info.get("realizedProfit")
+            try:
+                total += float(rp or 0)
+            except (TypeError, ValueError):
+                pass
+        entry = float(trade.get("entry", 0) or 0)
+        size = float(trade.get("current_size", 0) or 0)
+        notional = abs(entry * size) if entry and size else 0.0
+        pct = (total / notional * 100.0) if notional > 1e-12 else 0.0
+        return total, pct
+
     async def _normalize_amount(self, symbol: str, amount: float) -> float:
         try:
             if not self.exchange.markets: await self.exchange.load_markets()
@@ -410,7 +501,15 @@ class ExecutionEngine:
 
     # --- CORE LOGIC ---
 
-    async def _set_protective_orders(self, symbol: str, side: str, amount: float, sl: float, tp: Optional[float] = None) -> Tuple[Optional[str], Optional[str]]:
+    async def _set_protective_orders(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        sl: float,
+        tp: Optional[float] = None,
+        position_id: Optional[int] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
         """Унифицированная установка SL и TP через Algo API (K6: fix closePosition для partial TP)"""
         sl_id, tp_id = None, None
         try:
@@ -573,6 +672,20 @@ class ExecutionEngine:
                     logger.error(f"❌ [PROTECT] Ошибка SL {symbol}: {sl_err}")
                     return None, None
 
+            if sl_id:
+                ps = self._position_side_from_entry_side(side)
+                await self._db_persist_order(
+                    position_id=position_id,
+                    symbol=symbol,
+                    exchange_order_id=sl_id,
+                    client_order_id=None,
+                    order_type="STOP_MARKET_ALGO",
+                    position_side=ps,
+                    price=float(sl_trigger),
+                    size=float(amount),
+                    status=OrderStatus.OPEN,
+                )
+
             # 2. TAKE PROFIT (Scale-out: Частичная фиксация)
             if tp:
                 tp_ids = []
@@ -608,8 +721,22 @@ class ExecutionEngine:
                                 ctx=f"set_partial_tp({symbol})"
                             )
                             if res_tp.get("algoId"):
-                                tp_ids.append(str(res_tp["algoId"]))
+                                aid = str(res_tp["algoId"])
+                                tp_ids.append(aid)
                                 logger.info(f"🎯 [PARTIAL TP {i+1}] {symbol} объем {norm_part_amt} по {target_price}")
+                                ps = self._position_side_from_entry_side(side)
+                                tp_px = float(await self._normalize_price(symbol, target_price))
+                                await self._db_persist_order(
+                                    position_id=position_id,
+                                    symbol=symbol,
+                                    exchange_order_id=aid,
+                                    client_order_id=None,
+                                    order_type="TAKE_PROFIT_MARKET_ALGO",
+                                    position_side=ps,
+                                    price=tp_px,
+                                    size=float(norm_part_amt),
+                                    status=OrderStatus.OPEN,
+                                )
                         except Exception as tp_err:
                             logger.warning(f"⚠️ [PROTECT] Partial TP {i+1} failed for {symbol}: {tp_err}")
                             
@@ -635,6 +762,19 @@ class ExecutionEngine:
                         )
                         tp_id = str(res_tp.get("algoId"))
                         logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
+                        ps = self._position_side_from_entry_side(side)
+                        tp_px = float(await self._normalize_price(symbol, tp))
+                        await self._db_persist_order(
+                            position_id=position_id,
+                            symbol=symbol,
+                            exchange_order_id=tp_id,
+                            client_order_id=None,
+                            order_type="TAKE_PROFIT_MARKET_ALGO",
+                            position_side=ps,
+                            price=tp_px,
+                            size=float(amount),
+                            status=OrderStatus.OPEN,
+                        )
                     except Exception as tp_err:
                         logger.warning(f"⚠️ [PROTECT] TP failed for {symbol}, keep SL active: {tp_err}")
 
@@ -758,7 +898,8 @@ class ExecutionEngine:
                                     logger.warning(f"[RESCUE] Adjusted stop for {symbol}: {dbp.stop_loss} -> {safe_stop}")
 
                             res_sl_id, res_tp_id = await self._set_protective_orders(
-                                symbol, "BUY" if is_long else "SELL", contracts, safe_stop, dbp.take_profit
+                                symbol, "BUY" if is_long else "SELL", contracts, safe_stop, dbp.take_profit,
+                                position_id=dbp.id,
                             )
                             if res_sl_id:
                                 sl_id = res_sl_id
@@ -910,6 +1051,7 @@ class ExecutionEngine:
                 max_retries = 3
                 remaining_size = lot_size
                 filled_total = 0.0
+                entry_audit: List[Dict[str, Any]] = []
 
                 for attempt in range(max_retries):
                     if remaining_size <= 0: break
@@ -937,6 +1079,7 @@ class ExecutionEngine:
                             ctx=f"fetch_order({symbol}:{temp_order['id']})"
                         )
                         filled_now = float(check.get('filled', 0.0) or 0.0)
+                        entry_audit.append({"order": check, "kind": "limit_entry"})
                         
                         if check['status'] == 'closed':
                             entry_exec = float(check.get('average') or check.get('price') or entry_price)
@@ -964,6 +1107,7 @@ class ExecutionEngine:
                             lambda: self.exchange.create_order(symbol, 'market', side, remaining_size),
                             ctx=f"create_market_fallback({symbol})"
                         )
+                        entry_audit.append({"order": fallback_order, "kind": "market_entry"})
                         if filled_total == 0:
                             entry_exec = float(fallback_order.get("average") or fallback_order.get("price") or entry_price)
                         filled_total += float(fallback_order.get("filled", remaining_size))
@@ -985,15 +1129,54 @@ class ExecutionEngine:
                                         status=PositionStatus.OPEN, opened_at=datetime.datetime.utcnow())
                     session.add(pos); await session.commit(); await session.refresh(pos)
 
+                pos_side = self._position_side_from_entry_side(direction)
+                for aud in entry_audit:
+                    od = aud.get("order") or {}
+                    oid = od.get("id")
+                    if oid is None:
+                        continue
+                    st_raw = str(od.get("status", "")).lower()
+                    if st_raw in ("closed", "filled"):
+                        ost = OrderStatus.FILLED
+                    elif st_raw in ("canceled", "cancelled"):
+                        ost = OrderStatus.CANCELED
+                    else:
+                        ost = OrderStatus.OPEN
+                    cid = od.get("clientOrderId")
+                    await self._db_persist_order(
+                        position_id=pos.id,
+                        symbol=symbol,
+                        exchange_order_id=str(oid),
+                        client_order_id=str(cid) if cid else None,
+                        order_type=str(aud.get("kind") or "entry"),
+                        position_side=pos_side,
+                        price=float(od.get("average") or od.get("price") or 0.0),
+                        size=float(od.get("filled") or od.get("amount") or 0.0),
+                        status=ost,
+                    )
+
                 # 8. Защитные ордера
                 targets = signal_data.get("targets") or signal_data.get("take_profit")
-                sl_id, tp_id = await self._set_protective_orders(symbol, direction, lot_size, stop_price, targets)
+                sl_id, tp_id = await self._set_protective_orders(
+                    symbol, direction, lot_size, stop_price, targets, position_id=pos.id
+                )
                 if not sl_id:
                     # Best practice: не оставлять открытую позицию без стопа.
                     emergency_side = 'sell' if direction.upper() == "LONG" else 'buy'
-                    await self._with_time_sync_retry(
+                    em_o = await self._with_time_sync_retry(
                         lambda: self.exchange.create_order(symbol, 'market', emergency_side, lot_size),
                         ctx=f"emergency_close_no_sl({symbol})"
+                    )
+                    await self._db_persist_order(
+                        position_id=pos.id,
+                        symbol=symbol,
+                        exchange_order_id=str(em_o.get("id")) if em_o and em_o.get("id") is not None else None,
+                        client_order_id=None,
+                        order_type="MARKET_EMERGENCY_CLOSE",
+                        position_side=pos_side,
+                        price=float(em_o.get("average") or em_o.get("price") or 0.0),
+                        size=float(em_o.get("filled") or lot_size),
+                        status=OrderStatus.FILLED,
                     )
                     async with async_session() as session:
                         await session.execute(
@@ -1090,7 +1273,10 @@ class ExecutionEngine:
                         if improves:
                             await self._cancel_all_orders(symbol)
                             tp_ref = trade.get("take_profit_live")
-                            sl_id, tp_id = await self._set_protective_orders(symbol, side, trade['current_size'], be_stop, tp_ref)
+                            sl_id, tp_id = await self._set_protective_orders(
+                                symbol, side, trade['current_size'], be_stop, tp_ref,
+                                position_id=trade.get("position_db_id"),
+                            )
                             if sl_id:
                                 trade['stop'] = be_stop
                                 trade['stop_order_id'] = sl_id
@@ -1120,7 +1306,10 @@ class ExecutionEngine:
                 await self._cancel_all_orders(symbol)
                 # TP должны оставаться активными после трейлинга.
                 tp_ref = trade.get("take_profit_live")
-                sl_id, tp_id = await self._set_protective_orders(symbol, trade['signal_type'], trade['current_size'], new_stop, tp_ref)
+                sl_id, tp_id = await self._set_protective_orders(
+                    symbol, trade['signal_type'], trade['current_size'], new_stop, tp_ref,
+                    position_id=trade.get("position_db_id"),
+                )
                 trade['stop'] = new_stop; trade['stop_order_id'] = sl_id
                 if tp_id:
                     trade['tp_order_id'] = tp_id
@@ -1146,7 +1335,18 @@ class ExecutionEngine:
                         logger.info(f"💎 [PYRAMID] Adding {add_size} to {symbol} (Stage {next_stage})")
                         try:
                             side = 'buy' if trade['signal_type'] == "LONG" else 'sell'
-                            await self.exchange.create_order(symbol, 'market', side, add_size)
+                            pyr_o = await self.exchange.create_order(symbol, 'market', side, add_size)
+                            await self._db_persist_order(
+                                position_id=trade.get("position_db_id"),
+                                symbol=symbol,
+                                exchange_order_id=str(pyr_o.get("id")) if pyr_o and pyr_o.get("id") is not None else None,
+                                client_order_id=str(pyr_o.get("clientOrderId")) if pyr_o and pyr_o.get("clientOrderId") else None,
+                                order_type="MARKET_PYRAMID_ADD",
+                                position_side=str(trade.get("signal_type") or "LONG"),
+                                price=float(pyr_o.get("average") or pyr_o.get("price") or 0.0),
+                                size=float(pyr_o.get("filled") or add_size),
+                                status=OrderStatus.FILLED,
+                            )
                             
                             # Обновляем среднюю и объем
                             old_size = trade['current_size']
@@ -1168,7 +1368,10 @@ class ExecutionEngine:
                             # Переставляем стопы
                             await self._cancel_all_orders(symbol)
                             tp_ref = trade.get("take_profit_live")
-                            sl_id, tp_id = await self._set_protective_orders(symbol, trade['signal_type'], new_size, trade['stop'], tp_ref)
+                            sl_id, tp_id = await self._set_protective_orders(
+                                symbol, trade['signal_type'], new_size, trade['stop'], tp_ref,
+                                position_id=trade.get("position_db_id"),
+                            )
                             trade['stop_order_id'] = sl_id
                             if tp_id:
                                 trade['tp_order_id'] = tp_id
@@ -1186,6 +1389,8 @@ class ExecutionEngine:
     async def _close_position(self, symbol: str, reason: str = "AUTO"):
         if symbol not in self.active_trades: return
         trade = self.active_trades[symbol]
+        pnl_usd = 0.0
+        pnl_pct = 0.0
         try:
             await self._cancel_all_orders(symbol)
             if reason != "EXTERNAL":
@@ -1197,45 +1402,71 @@ class ExecutionEngine:
                     logger.warning(f"⚠️ [CLOSE] Side mismatch for {symbol}: local={trade['signal_type']} live={live_side}. Skip market close.")
                     return
                 elif close_amount > 1e-8:
-                    await self.exchange.create_order(symbol, 'market', side, close_amount)
+                    co = await self.exchange.create_order(symbol, 'market', side, close_amount)
+                    ps = str(trade.get("signal_type") or "LONG").upper()
+                    await self._db_persist_order(
+                        position_id=trade.get("position_db_id"),
+                        symbol=symbol,
+                        exchange_order_id=str(co.get("id")) if co and co.get("id") is not None else None,
+                        client_order_id=str(co.get("clientOrderId")) if co and co.get("clientOrderId") else None,
+                        order_type="MARKET_CLOSE",
+                        position_side=ps,
+                        price=float(co.get("average") or co.get("price") or 0.0),
+                        size=float(co.get("filled") or close_amount),
+                        status=OrderStatus.FILLED,
+                    )
             
+            try:
+                lev = int(getattr(settings, "leverage", 1) or 1)
+            except Exception:
+                lev = 1
+
             async with async_session() as session:
                 await session.execute(
                     update(PositionModel)
                     .where(PositionModel.id == trade["position_db_id"])
                     .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
                 )
-                
-                pnl_usd = 0.0
-                pnl_pct = 0.0
-                if reason != "EXTERNAL":
-                    try:
+
+                try:
+                    if reason == "EXTERNAL":
+                        pnl_usd, pnl_pct = await self._realized_pnl_from_exchange_trades(symbol, trade)
+                        if abs(pnl_usd) < 1e-12:
+                            ticker = await self.exchange.fetch_ticker(symbol)
+                            exit_price = float(ticker.get("last") or 0)
+                            entry = float(trade["entry"])
+                            size = float(trade["current_size"])
+                            is_long = trade["signal_type"] == "LONG"
+                            if entry > 0 and size > 0 and exit_price > 0:
+                                pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
+                                pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
+                    else:
                         ticker = await self.exchange.fetch_ticker(symbol)
-                        exit_price = ticker['last']
-                        entry = trade['entry']
-                        size = trade['current_size']
-                        is_long = trade['signal_type'] == "LONG"
-                        
+                        exit_price = float(ticker["last"])
+                        entry = float(trade["entry"])
+                        size = float(trade["current_size"])
+                        is_long = trade["signal_type"] == "LONG"
                         pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
                         pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
-                        
-                        pnl_rec = PnLModel(
-                            user_id=1,
-                            symbol=symbol,
-                            pnl_usd=pnl_usd,
-                            pnl_pct=pnl_pct,
-                            reason=reason
-                        )
-                        session.add(pnl_rec)
+                except Exception as e:
+                    logger.warning(f"PnL record error: {e}")
 
-                        try:
-                            bal, _, _ = await self.get_account_metrics()
-                            self.risk_manager.record_closed_pnl(pnl_usd, bal)
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        logger.warning(f"PnL record error: {e}")
-                
+                session.add(
+                    PnLModel(
+                        user_id=1,
+                        symbol=symbol,
+                        pnl_usd=pnl_usd,
+                        pnl_pct=pnl_pct,
+                        leverage=lev,
+                        reason=reason,
+                    )
+                )
+                try:
+                    bal, _, _ = await self.get_account_metrics()
+                    self.risk_manager.record_closed_pnl(pnl_usd, bal)
+                except Exception:
+                    pass
+
                 await session.commit()
             
             _pnl_msg = ""
@@ -1246,12 +1477,11 @@ class ExecutionEngine:
                 "AUTO": "⚙️ Авто",
             }
             _reason_ru = _reason_map.get(reason, f"⚙️ {reason}")
-            if reason != "EXTERNAL":
-                try:
-                    _pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
-                    _pnl_msg = f"\n{_pnl_emoji} Результат: `{pnl_usd:+.2f} USDT ({pnl_pct:+.1f}%)`"
-                except Exception:
-                    pass
+            try:
+                _pnl_emoji = "🟢" if pnl_usd >= 0 else "🔴"
+                _pnl_msg = f"\n{_pnl_emoji} Результат: `{pnl_usd:+.2f} USDT ({pnl_pct:+.1f}%)`"
+            except Exception:
+                pass
             self.active_trades.pop(symbol, None)
             await send_telegram_msg(
                 f"💰 **ПОЗИЦИЯ ЗАКРЫТА**\n\n"
@@ -1298,9 +1528,21 @@ class ExecutionEngine:
                 return {"status": "error", "message": f"Reduce amount below minimum ({min_amount})"}
 
             params = {"reduceOnly": True}
-            await self._with_time_sync_retry(
+            ro = await self._with_time_sync_retry(
                 lambda: self.exchange.create_order(symbol, 'market', side, reduce_amount, None, params),
                 ctx=f"manual_reduce({symbol})"
+            )
+            ps = str(trade.get("signal_type") or "LONG")
+            await self._db_persist_order(
+                position_id=trade.get("position_db_id"),
+                symbol=symbol,
+                exchange_order_id=str(ro.get("id")) if ro and ro.get("id") is not None else None,
+                client_order_id=str(ro.get("clientOrderId")) if ro and ro.get("clientOrderId") else None,
+                order_type="MARKET_MANUAL_REDUCE",
+                position_side=ps,
+                price=float(ro.get("average") or ro.get("price") or 0.0),
+                size=float(ro.get("filled") or reduce_amount),
+                status=OrderStatus.FILLED,
             )
             await asyncio.sleep(0.25)
             await self.reconcile_full()

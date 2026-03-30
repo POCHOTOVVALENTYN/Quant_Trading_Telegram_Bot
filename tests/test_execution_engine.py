@@ -139,6 +139,9 @@ async def test_execute_signal_emergency_close_when_sl_not_created(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_signal_waits_until_flat_before_new_policy(monkeypatch):
+    from config.settings import settings
+
+    monkeypatch.setattr(settings, "apply_new_entry_rules_after_flat", True)
     exchange = MagicMock()
     exchange.create_order = AsyncMock()
     engine = ExecutionEngine(exchange_client=exchange, risk_manager=RiskManager())

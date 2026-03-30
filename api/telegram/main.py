@@ -249,6 +249,91 @@ async def _render_main_menu(message_target):
     )
 
 
+def _build_faq_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎛 Управление", callback_data="faq_controls"),
+         InlineKeyboardButton("⚙️ Настройки", callback_data="faq_settings")],
+        [InlineKeyboardButton("🛡 Риск-логика", callback_data="faq_risk"),
+         InlineKeyboardButton("🤖 Сигналы и AI", callback_data="faq_ai")],
+        [InlineKeyboardButton("🚫 Почему нет входа", callback_data="faq_no_entry"),
+         InlineKeyboardButton("🏁 Причины закрытия", callback_data="faq_close_reasons")],
+        [InlineKeyboardButton("🔄 Синхронизация", callback_data="faq_sync")],
+    ])
+
+
+def _faq_text_by_section(section: str) -> str:
+    if section == "controls":
+        return (
+            "🎛 **FAQ: УПРАВЛЕНИЕ**\n\n"
+            "• `🔄 Вкл/Выкл` — включает/выключает автоторговлю сразу.\n"
+            "• `💼 Активные позиции` — список позиций + действия (обновить/сократить/закрыть).\n"
+            "• `📜 История сделок` — последние закрытые сделки с причиной и PnL.\n"
+            "• `📈 Статистика` — агрегаты по закрытым сделкам и сброс статистики.\n"
+            "• `📉 Сигналы` — свежие сигналы из БД со статусом.\n"
+            "• `📚 Стратегии` — краткая методология бота."
+        )
+    if section == "settings":
+        return (
+            "⚙️ **FAQ: НАСТРОЙКИ**\n\n"
+            "• `⚡ Плечо` — runtime-плечо без рестарта.\n"
+            "• `💰 Маржа` — доля капитала на 1 сделку (процент).\n"
+            "• `📂 Позиции` — лимит одновременных сделок.\n"
+            "• `🎯 TP/SL` — TP runtime, SL рассчитывается риск-движком.\n"
+            "• `↕️ Направление` — LONG / SHORT / BOTH.\n"
+            "• `💵 Объём` — фикс USDT на сделку (0 = авто-расчёт).\n"
+            "• `💎 Пирамидинг` — доп. входы по правилам.\n"
+            "• `⏱ Expiry` — защита от устаревших сигналов."
+        )
+    if section == "risk":
+        return (
+            "🛡 **FAQ: РИСК-ЛОГИКА**\n\n"
+            "• Стоп-лосс: ATR-расчёт + минимальная дистанция.\n"
+            "• Трейлинг: стоп двигается только в сторону снижения риска.\n"
+            "• Безубыток: перенос стопа при 1R + подтверждение (ADX/пробой).\n"
+            "• Daily halt: блок входов при превышении дневного лимита просадки.\n"
+            "• Корреляционный фильтр: ограничивает одинаковые направления внутри кластеров.\n"
+            "• Листинг-фильтр: отсекает слишком новые инструменты."
+        )
+    if section == "ai":
+        return (
+            "🤖 **FAQ: СИГНАЛЫ И AI**\n\n"
+            "• Сигнал проходит технический скоринг и AI-фильтр.\n"
+            "• Минимальные пороги: score и win probability.\n"
+            "• Внешний AI работает каскадом по доступным провайдерам.\n"
+            "• Если провайдер недоступен/в лимите — используется следующий.\n"
+            "• Решения AI логируются для последующей аналитики/обучения."
+        )
+    if section == "no_entry":
+        return (
+            "🚫 **FAQ: ПОЧЕМУ НЕТ ВХОДА**\n\n"
+            "• достигнут лимит позиций,\n"
+            "• автоторговля выключена,\n"
+            "• сигнал устарел,\n"
+            "• score/win_prob ниже порога,\n"
+            "• фильтр листинга/корреляции/funding не пройден,\n"
+            "• активирован дневной стоп по просадке,\n"
+            "• биржа отклонила ордер (правила/лимиты инструмента)."
+        )
+    if section == "close_reasons":
+        return (
+            "🏁 **FAQ: ПРИЧИНЫ ЗАКРЫТИЯ**\n\n"
+            "• `🔄 Биржа (TP/SL)` — сработал защитный ордер на бирже.\n"
+            "• `🖐 Ручное` — закрытие через Telegram-кнопку.\n"
+            "• `⏱ Тайм-аут` — выход по time-exit.\n"
+            "• `⚙️ Авто` — закрытие внутренней логикой бота."
+        )
+    if section == "sync":
+        return (
+            "🔄 **FAQ: СИНХРОНИЗАЦИЯ**\n\n"
+            "• Есть регулярный reconcile: биржа ↔ БД ↔ память.\n"
+            "• `/api/v1/trades` перед выдачей делает принудительную синхронизацию.\n"
+            "• Локальный кеш `active_trades` мягко очищается по live-позициям.\n"
+            "• Если позиция закрыта внешне, она должна исчезнуть из списка активных.\n"
+            "• При сетевых сбоях возможны краткие задержки обновления, затем данные выравниваются."
+        )
+    return "❓ Раздел FAQ не найден."
+
+
 async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient() as client:
@@ -593,49 +678,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(strategy_text, parse_mode='Markdown')
     elif text == BTN_FAQ:
-        faq_text = (
-            "❓ **FAQ: ПОЛНОЕ ОПИСАНИЕ БОТА**\n\n"
-            "1) **УПРАВЛЕНИЕ**\n"
-            "• `🔄 Вкл/Выкл` — мгновенно включает/выключает автоторговлю.\n"
-            "• `💼 Активные позиции` — список позиций, карточки, refresh, reduce, ручное закрытие.\n"
-            "• `📜 История сделок` — последние закрытия с причиной и PnL.\n\n"
-            "2) **НАСТРОЙКИ АВТОТОРГОВЛИ**\n"
-            "• `⚡ Плечо` — runtime-плечо (без рестарта).\n"
-            "• `💰 Маржа` — доля капитала на сделку (%).\n"
-            "• `📂 Позиции` — лимит одновременных сделок.\n"
-            "• `🎯 TP / SL` — TP runtime; SL берётся из риск-логики (ATR/направление).\n"
-            "• `↕️ Направление` — LONG / SHORT / BOTH.\n"
-            "• `💵 Объём` — фикс USDT на сделку (0 = авто по марже).\n"
-            "• `💎 Пирамидинг` — разрешение поэтапного добора.\n"
-            "• `⏱ Expiry` — защита от старых сигналов.\n\n"
-            "3) **РИСК-ЛОГИКА**\n"
-            "• Стоп-лосс: ATR-логика + минимальная дистанция.\n"
-            "• Трейлинг: подтяжка только в сторону уменьшения риска.\n"
-            "• Безубыток: перенос SL при 1R + подтверждение.\n"
-            "• Daily halt: остановка входов при дневной просадке.\n"
-            "• Корреляционный фильтр: ограничение однотипных позиций в кластерах.\n\n"
-            "4) **СИГНАЛЫ И AI**\n"
-            "• Сигнал проходит скоринг и AI-фильтр перед входом.\n"
-            "• В карточке сигнала: стратегия, вход, SL/TP, win probability, score.\n"
-            "• Внешний AI работает каскадом по доступным провайдерам.\n\n"
-            "5) **ПОЧЕМУ НЕТ ВХОДА**\n"
-            "• лимит позиций,\n"
-            "• выключена торговля,\n"
-            "• слабый score/win_prob,\n"
-            "• сигнал устарел,\n"
-            "• фильтр листинга/корреляции/funding,\n"
-            "• достигнут дневной стоп по просадке.\n\n"
-            "6) **ПРИЧИНЫ ЗАКРЫТИЯ ПОЗИЦИИ**\n"
-            "• `🔄 Биржа (TP/SL)` — защитный ордер сработал на бирже.\n"
-            "• `🖐 Ручное` — закрытие из Telegram.\n"
-            "• `⏱ Тайм-аут` — time-exit.\n"
-            "• `⚙️ Авто` — внутренняя логика управления.\n\n"
-            "7) **СИНХРОНИЗАЦИЯ**\n"
-            "• Бот регулярно синхронизирует биржу, БД и память (`reconcile`).\n"
-            "• Если позиция закрыта внешне, она должна исчезнуть из активных.\n"
-            "• В разделе позиций показываются только актуальные данные после синхронизации."
+        await update.message.reply_text(
+            "❓ **FAQ БОТА**\n\nВыберите раздел:",
+            parse_mode='Markdown',
+            reply_markup=_build_faq_menu_keyboard()
         )
-        await update.message.reply_text(faq_text, parse_mode='Markdown')
     elif text == BTN_STATS:
         try:
             async with httpx.AsyncClient() as client:
@@ -1148,6 +1195,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
     elif query.data == "reset_stats_cancel":
         await query.edit_message_text("❎ Сброс статистики отменён.")
+    elif query.data == "faq_back":
+        await query.edit_message_text(
+            "❓ **FAQ БОТА**\n\nВыберите раздел:",
+            parse_mode='Markdown',
+            reply_markup=_build_faq_menu_keyboard()
+        )
+    elif query.data.startswith("faq_"):
+        faq_key = query.data.replace("faq_", "")
+        if faq_key not in {"controls", "settings", "risk", "ai", "no_entry", "close_reasons", "sync"}:
+            await query.edit_message_text(
+                "❓ **FAQ БОТА**\n\nВыберите раздел:",
+                parse_mode='Markdown',
+                reply_markup=_build_faq_menu_keyboard()
+            )
+            return
+        faq_text = _faq_text_by_section(faq_key)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ Назад к FAQ", callback_data="faq_back")]
+        ])
+        await query.edit_message_text(faq_text, parse_mode='Markdown', reply_markup=kb)
 
 # ======= ANTI-SPAM & RATE LIMITING (Этап 18) =======
 # Хранилище: {user_id: [timestamp1, timestamp2, ...]}
@@ -1182,6 +1249,16 @@ async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TY
     user_message_times[user_id].append(current_time)
 # ==================================================
 
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Глобальный перехватчик ошибок Telegram handlers."""
+    logging.exception("Unhandled Telegram handler error", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text("⚠️ Внутренняя ошибка обработчика. Попробуйте ещё раз через пару секунд.")
+    except Exception:
+        pass
+
 def run_bot():
     app = ApplicationBuilder().token(settings.telegram_bot_token.get_secret_value()).build()
 
@@ -1200,6 +1277,7 @@ def run_bot():
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_error_handler(global_error_handler)
 
     logging.info("Telegram Bot is polling...")
     app.run_polling()
