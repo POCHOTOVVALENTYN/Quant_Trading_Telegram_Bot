@@ -290,31 +290,42 @@ class ExecutionEngine:
 
     async def _handle_order_update(self, order: dict):
         try:
-            status = order.get('status')
+            status_raw = order.get('status')
+            status = str(status_raw or '').lower()
             symbol = self._norm_sym(order.get('symbol'))
             ex_id = str(order.get('id'))
-            
-            if status in ['closed', 'filled']:
+            info = order.get('info') or {}
+            algo_alt = str(info.get("algoId") or info.get("clientAlgoId") or "").strip()
+
+            if status in ('canceled', 'cancelled', 'expired', 'rejected'):
+                async with async_session() as session:
+                    for oid in {x for x in (ex_id, algo_alt) if x and str(x).strip()}:
+                        r = await session.execute(
+                            select(OrderModel).where(OrderModel.exchange_order_id == str(oid))
+                        )
+                        row = r.scalar_one_or_none()
+                        if row:
+                            row.status = OrderStatus.CANCELED
+                    await session.commit()
+                return
+
+            if status in ('closed', 'filled'):
                 is_protective_fill = False
                 async with async_session() as session:
                     stmt = select(OrderModel).where(OrderModel.exchange_order_id == ex_id)
                     res = await session.execute(stmt)
                     db_order = res.scalar_one_or_none()
-                    
+                    if not db_order and algo_alt and algo_alt != ex_id:
+                        stmt = select(OrderModel).where(OrderModel.exchange_order_id == algo_alt)
+                        res = await session.execute(stmt)
+                        db_order = res.scalar_one_or_none()
+
                     if db_order:
                         db_order.status = OrderStatus.FILLED
-                        if db_order.position_id:
-                            pos_stmt = select(PositionModel).where(PositionModel.id == db_order.position_id)
-                            pos_res = await session.execute(pos_stmt)
-                            db_pos = pos_res.scalar_one_or_none()
-                            
-                            if db_pos and db_pos.status == PositionStatus.OPEN:
-                                ot = db_order.order_type.upper()
-                                if any(x in ot for x in ["STOP", "TAKE", "TRAILING"]):
-                                    db_pos.status = PositionStatus.CLOSED
-                                    db_pos.closed_at = datetime.datetime.utcnow()
-                                    is_protective_fill = True
-                                    logger.info(f"💾 [WS_DB] Позиция {symbol} закрыта по {ot}")
+                        ot = (db_order.order_type or "").upper()
+                        if any(x in ot for x in ["STOP", "TAKE", "TRAILING"]):
+                            is_protective_fill = True
+                            logger.info(f"💾 [WS_DB] Защитный ордер исполнен: {symbol} {ot}")
                         await session.commit()
 
                 if is_protective_fill and symbol in self.active_trades:
@@ -423,6 +434,76 @@ class ExecutionEngine:
         notional = abs(entry * size) if entry and size else 0.0
         pct = (total / notional * 100.0) if notional > 1e-12 else 0.0
         return total, pct
+
+    async def _persist_pnl_reconciled_close(self, snap: Dict[str, Any]) -> None:
+        """P&L при закрытии позиции только в БД (нет живой позиции на бирже)."""
+        sym = self._norm_sym(str(snap.get("symbol") or ""))
+        if not sym:
+            return
+        side_raw = snap.get("side")
+        if hasattr(side_raw, "value"):
+            side_str = str(side_raw.value)
+        else:
+            side_str = str(side_raw or "LONG").split(".")[-1]
+        trade = {
+            "opened_at": float(snap.get("opened_at_ts") or time.time()),
+            "entry": float(snap.get("entry_price") or 0),
+            "current_size": float(snap.get("size") or 0),
+            "signal_type": side_str,
+        }
+        pnl_usd, pnl_pct = await self._realized_pnl_from_exchange_trades(sym, trade)
+        if abs(pnl_usd) < 1e-12 and trade["entry"] > 0 and trade["current_size"] > 0:
+            try:
+                ticker = await self.exchange.fetch_ticker(sym)
+                exit_price = float(ticker.get("last") or 0)
+                entry = trade["entry"]
+                size = trade["current_size"]
+                is_long = side_str.upper() == "LONG"
+                if exit_price > 0:
+                    pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
+                    pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
+            except Exception:
+                pass
+        try:
+            lev = int(getattr(settings, "leverage", 1) or 1)
+        except Exception:
+            lev = 1
+        try:
+            async with async_session() as session:
+                session.add(
+                    PnLModel(
+                        user_id=1,
+                        symbol=sym,
+                        pnl_usd=pnl_usd,
+                        pnl_pct=pnl_pct,
+                        leverage=lev,
+                        reason="RECONCILE_CLOSE",
+                    )
+                )
+                await session.commit()
+            try:
+                bal, _, _ = await self.get_account_metrics()
+                self.risk_manager.record_closed_pnl(pnl_usd, bal)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"⚠️ [AUDIT] RECONCILE_CLOSE PnL failed {sym}: {e}")
+
+    async def _db_mark_order_canceled(self, exchange_order_id: str) -> None:
+        oid = str(exchange_order_id).strip()
+        if not oid:
+            return
+        try:
+            async with async_session() as session:
+                r = await session.execute(
+                    select(OrderModel).where(OrderModel.exchange_order_id == oid)
+                )
+                row = r.scalar_one_or_none()
+                if row:
+                    row.status = OrderStatus.CANCELED
+                    await session.commit()
+        except Exception as e:
+            logger.debug(f"[AUDIT] mark canceled {oid}: {e}")
 
     async def _normalize_amount(self, symbol: str, amount: float) -> float:
         try:
@@ -815,6 +896,7 @@ class ExecutionEngine:
                 })
 
             # Единая сессия для всех операций с БД
+            ghost_snaps: List[Dict[str, Any]] = []
             async with async_session() as session:
                 res = await session.execute(select(PositionModel).where(PositionModel.status == PositionStatus.OPEN))
                 db_positions_raw = res.scalars().all()
@@ -949,6 +1031,19 @@ class ExecutionEngine:
                 # Закрываем "призраков" (позиции в БД без живой позиции на бирже)
                 for sym, dbp in db_positions.items():
                     if sym not in new_active:
+                        try:
+                            ots = dbp.opened_at.timestamp() if dbp.opened_at else time.time()
+                        except Exception:
+                            ots = time.time()
+                        ghost_snaps.append(
+                            {
+                                "symbol": dbp.symbol,
+                                "entry_price": float(dbp.entry_price or 0),
+                                "size": float(dbp.size or 0),
+                                "side": dbp.side,
+                                "opened_at_ts": ots,
+                            }
+                        )
                         await session.execute(
                             update(PositionModel)
                             .where(PositionModel.id == dbp.id)
@@ -956,6 +1051,9 @@ class ExecutionEngine:
                         )
 
                 await session.commit()
+
+            for snap in ghost_snaps:
+                await self._persist_pnl_reconciled_close(snap)
 
             # Orphan cleanup: cancel algo/standard orders for symbols with no active position
             orphan_symbols = set(ex_orders_by_symbol.keys()) - set(new_active.keys())
@@ -973,6 +1071,7 @@ class ExecutionEngine:
                             ctx=f"orphan_cleanup({orphan_sym}:{oid})"
                         )
                         logger.info(f"🧹 [ORPHAN] Cancelled stale order {oid} for {orphan_sym}")
+                        await self._db_mark_order_canceled(str(oid))
                     except Exception as e:
                         try:
                             await self._with_time_sync_retry(
@@ -980,6 +1079,7 @@ class ExecutionEngine:
                                 ctx=f"orphan_cleanup_std({orphan_sym}:{oid})"
                             )
                             logger.info(f"🧹 [ORPHAN] Cancelled standard order {oid} for {orphan_sym}")
+                            await self._db_mark_order_canceled(str(oid))
                         except Exception:
                             logger.warning(f"⚠️ [ORPHAN] Could not cancel {oid} for {orphan_sym}: {e}")
 

@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Optional
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import ccxt.pro as ccxtpro
@@ -476,17 +477,26 @@ async def get_stats():
 @app.post("/api/v1/stats/reset")
 async def reset_stats(scope: str = "all"):
     from database.session import async_session
-    from database.models.all_models import PnLRecord as PnLModel
+    from database.models.all_models import PnLRecord as PnLModel, Order as OrderModel
     from sqlalchemy import delete
 
-    # Сейчас поддерживаем только binance/all.
-    if scope.lower() not in {"all", "binance"}:
-        return {"status": "error", "message": "Unsupported scope. Use all or binance."}
+    s = scope.lower()
+    if s not in {"all", "binance", "pnl", "orders", "audit"}:
+        return {
+            "status": "error",
+            "message": "Unsupported scope: all, binance, pnl, orders, or audit (PnL+orders).",
+        }
+
+    clear_pnl = s in ("all", "binance", "pnl", "audit")
+    clear_orders = s in ("orders", "audit")
 
     async with async_session() as session:
-        await session.execute(delete(PnLModel))
+        if clear_pnl:
+            await session.execute(delete(PnLModel))
+        if clear_orders:
+            await session.execute(delete(OrderModel))
         await session.commit()
-    return {"status": "success", "scope": scope.lower()}
+    return {"status": "success", "scope": s}
 
 
 @app.get("/api/v1/history")
@@ -508,10 +518,52 @@ async def get_trade_history(limit: int = 20):
             "symbol": r.symbol,
             "pnl_usd": float(r.pnl_usd or 0.0),
             "pnl_pct": float(r.pnl_pct or 0.0),
+            "leverage": int(r.leverage or 1),
             "reason": r.reason or "AUTO",
             "closed_at": r.closed_at.isoformat() if r.closed_at else None,
         })
     return {"items": items, "count": len(items)}
+
+
+@app.get("/api/v1/orders")
+async def get_orders_audit(limit: int = 100, symbol: Optional[str] = None):
+    """Аудит ордеров из БД (вход, защита, закрытие)."""
+    from database.session import async_session
+    from database.models.all_models import Order as OrderModel
+    from sqlalchemy import select, desc
+
+    clamped = max(1, min(500, int(limit)))
+    async with async_session() as session:
+        if symbol:
+            stmt = (
+                select(OrderModel)
+                .where(OrderModel.symbol == symbol)
+                .order_by(desc(OrderModel.created_at))
+                .limit(clamped)
+            )
+        else:
+            stmt = select(OrderModel).order_by(desc(OrderModel.created_at)).limit(clamped)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    items = []
+    for o in rows:
+        items.append({
+            "id": o.id,
+            "position_id": o.position_id,
+            "exchange_order_id": o.exchange_order_id,
+            "client_order_id": o.client_order_id,
+            "symbol": o.symbol,
+            "order_type": o.order_type,
+            "side": o.side.value if o.side else None,
+            "price": float(o.price or 0.0),
+            "size": float(o.size or 0.0),
+            "status": o.status.value if o.status else None,
+            "created_at": o.created_at.isoformat() if o.created_at else None,
+            "updated_at": o.updated_at.isoformat() if o.updated_at else None,
+        })
+    return {"items": items, "count": len(items)}
+
 
 @app.get("/api/v1/trades")
 async def get_active_trades():

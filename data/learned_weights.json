@@ -1,0 +1,21 @@
+{
+  "weights": {
+    "atr_ratio": 0.11740919065761303,
+    "range_relative": 0.058704595328806515,
+    "rsi": 0.11740919065761303,
+    "roc_10": 0.10268166389105593,
+    "price_to_sma20": 0.058704595328806515,
+    "sma20_to_sma50": 0.05279173328379272,
+    "volume_ratio": 0.14007145887947306,
+    "orderbook_imbalance": 0.1761137859864196,
+    "funding_rate": 0.1761137859864196
+  },
+  "stats": {
+    "last_trained": "2026-03-30T08:49:08.486051+00:00",
+    "num_samples": 193,
+    "old_accuracy": 0.5337,
+    "old_loss": 0.6908,
+    "new_accuracy": 0.5337,
+    "new_loss": 0.6874,
+    "accuracy": 0.5337,
+    "improved": 
