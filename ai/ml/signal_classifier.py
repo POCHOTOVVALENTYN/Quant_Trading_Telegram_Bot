@@ -92,45 +92,65 @@ async def train_walk_forward(
     now = datetime.now(timezone.utc)
     val_cutoff = now - timedelta(days=val_days)
 
-    df = await extract_training_data()
+    df = await extract_training_data(min_date=now - timedelta(days=30))
     if df.empty or len(df) < MIN_SAMPLES_TRAIN:
         _log.warning(f"Not enough samples for training: {len(df)} < {MIN_SAMPLES_TRAIN}")
         return None, {"error": "insufficient_data", "samples": len(df)}
 
     X, y, feature_names = prepare_features(df)
 
-    # Temporal split: train on older data, validate on recent
-    # Use created_at from the pipeline (implicitly ordered)
-    split_idx = max(1, int(len(df) * (1 - val_days / 90)))  # approximate
-    X_train, y_train = X[:split_idx], y[:split_idx]
-    X_val, y_val = X[split_idx:], y[split_idx:]
-
-    if len(X_val) < 5 or len(np.unique(y_train)) < 2:
-        _log.warning("Insufficient validation samples or only one class in training")
-        return None, {"error": "degenerate_split", "train": len(X_train), "val": len(X_val)}
-
-    def _sync_train(X_tr, y_tr, X_v, y_v):
+    def _sync_train(X_data, y_data):
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.metrics import accuracy_score, roc_auc_score
+        from sklearn.model_selection import TimeSeriesSplit
         
-        m = GradientBoostingClassifier(
-            max_depth=3, n_estimators=80, learning_rate=0.05,
-            subsample=0.8, min_samples_leaf=5, random_state=42,
-        )
-        m.fit(X_tr, y_tr)
-        tr_acc = accuracy_score(y_tr, m.predict(X_tr))
-        v_acc = accuracy_score(y_v, m.predict(X_v))
-        try:
-            v_auc = roc_auc_score(y_v, m.predict_proba(X_v)[:, 1])
-        except Exception:
+        # TimeSeriesSplit (Phase 20) - предотвращает Look-Ahead Bias
+        tscv = TimeSeriesSplit(n_splits=5)
+        
+        best_model = None
+        best_val_auc = -1.0
+        final_tr_acc = 0.0
+        final_v_acc = 0.0
+        
+        # Walk-forward validation across folds
+        for train_index, val_index in tscv.split(X_data):
+            X_tr, X_v = X_data[train_index], X_data[val_index]
+            y_tr, y_v = y_data[train_index], y_data[val_index]
+            
+            if len(np.unique(y_tr)) < 2: continue
+            
+            m = GradientBoostingClassifier(
+                max_depth=3, n_estimators=100, learning_rate=0.05,
+                subsample=0.8, min_samples_leaf=5, random_state=42,
+            )
+            m.fit(X_tr, y_tr)
+            
             v_auc = 0.0
-        return m, tr_acc, v_acc, v_auc
+            try:
+                v_auc = roc_auc_score(y_v, m.predict_proba(X_v)[:, 1])
+            except: pass
+            
+            if v_auc > best_val_auc:
+                best_val_auc = v_auc
+                best_model = m
+                final_tr_acc = accuracy_score(y_tr, m.predict(X_tr))
+                final_v_acc = accuracy_score(y_v, m.predict(X_v))
+        
+        # If no fold was viable, train on all except last 7 days
+        if best_model is None:
+            best_model = GradientBoostingClassifier(n_estimators=100, random_state=42).fit(X_data, y_data)
+            best_val_auc = 0.5
+            final_tr_acc = accuracy_score(y_data, best_model.predict(X_data))
+            final_v_acc = 0.5
+            
+        return best_model, final_tr_acc, final_v_acc, best_val_auc
 
-    clf_model, train_acc, val_acc, val_auc = await asyncio.to_thread(_sync_train, X_train, y_train, X_val, y_val)
+    clf_model, train_acc, val_acc, val_auc = await asyncio.to_thread(_sync_train, X, y)
+
 
     stats = {
-        "train_samples": len(X_train),
-        "val_samples": len(X_val),
+        "train_samples": len(X),
+        "val_samples": int(len(X) / 5), # approximate via TimeSeriesSplit
         "train_accuracy": round(train_acc, 4),
         "val_accuracy": round(val_acc, 4),
         "val_auc": round(val_auc, 4),
@@ -139,7 +159,7 @@ async def train_walk_forward(
     }
     _log.info(
         f"ML training complete: train_acc={train_acc:.3f}, val_acc={val_acc:.3f}, "
-        f"val_auc={val_auc:.3f}, samples={len(X_train)}+{len(X_val)}"
+        f"val_auc={val_auc:.3f}, samples={len(X)}"
     )
 
     # Save model

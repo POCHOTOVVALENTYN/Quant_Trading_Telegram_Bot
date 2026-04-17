@@ -120,10 +120,21 @@ async def extract_training_data(
         if not pnl_df.empty:
             sym_pnl = pnl_df[pnl_df["symbol"] == sig.symbol]
             if not sym_pnl.empty and sig.created_at is not None:
-                time_diffs = (sym_pnl["closed_at"] - sig.created_at).abs()
-                min_idx = time_diffs.idxmin()
-                if time_diffs.loc[min_idx] < timedelta(days=1):
-                    target = 1.0 if sym_pnl.loc[min_idx, "pnl_usd"] > 0 else 0.0
+                # Находим соответствующую запись PnL (закрытую после сигнала в пределах 48ч)
+                time_diffs = (sym_pnl["closed_at"] - sig.created_at)
+                # Берем только те, что закрыты ПОСЛЕ открытия (создания сигнала)
+                valid_pnl = sym_pnl[time_diffs > timedelta(0)]
+                if not valid_pnl.empty:
+                    closest_idx = (valid_pnl["closed_at"] - sig.created_at).idxmin()
+                    pnl_val = valid_pnl.loc[closest_idx, "pnl_usd"]
+                    # Target (y) = 1 только если сделка прибыльна с запасом на комиссию (0.1-0.2%)
+                    # и проскальзывание. Принимаем порог в 0.5% (pnl_pct > 0.5) или pnl_usd > 1.0
+                    # В данном случае PnLRecord содержит pnl_pct.
+                    pnl_pct = valid_pnl.loc[closest_idx, "pnl_pct"]
+                    
+                    # Жесткий фильтр "победы" для обучения ML
+                    is_pnl_ok = pnl_pct > 0.002 # > 0.2% чистыми
+                    target = 1.0 if is_pnl_ok else 0.0
 
         if target is not None:
             row["target"] = target

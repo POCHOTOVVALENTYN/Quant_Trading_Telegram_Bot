@@ -564,6 +564,24 @@ async def reset_stats(scope: str = "all"):
         if clear_orders:
             await session.execute(delete(OrderModel))
         await session.commit()
+
+    # Сброс RiskManager в Redis (Этап 19-21)
+    if orchestrator and orchestrator.execution and orchestrator.execution.risk_manager:
+        rm = orchestrator.execution.risk_manager
+        if rm.redis:
+            try:
+                keys_to_del = [
+                    "rm_daily_pnl", "rm_daily_bal", "rm_daily_ts", 
+                    "rm_daily_halt", "rm_cons_wins", "rm_cons_loss"
+                ]
+                await rm.redis.delete(*keys_to_del)
+                # Переинициализируем, чтобы сбросить баланс на текущий
+                _, bal, _ = await orchestrator.execution.get_account_metrics()
+                await rm.record_closed_pnl(0.0, bal) 
+                app_logger.info("♻️ RiskManager stats reset in Redis and memory.")
+            except Exception as e:
+                app_logger.error(f"❌ Failed to reset RiskManager Redis stats: {e}")
+
     return {"status": "success", "scope": s}
 
 

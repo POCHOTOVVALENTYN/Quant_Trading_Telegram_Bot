@@ -61,6 +61,8 @@ class MarketDataService:
         self._watchdog_consecutive_failures: Dict[str, int] = {}
         self._stream_recovering: Dict[str, bool] = {}
         self._last_global_ws_reset_ts: float = 0.0
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._streaming_active = False
 
     @staticmethod
     def _split_stream_key(stream_key: str) -> Tuple[str, str]:
@@ -141,6 +143,22 @@ class MarketDataService:
             return True
         except Exception:
             return False
+
+    async def _restart_stream(self, symbol: str, timeframe: str):
+        """Force cancel and restart a specific OHLCV stream task."""
+        stream_key = f"{symbol}:{timeframe}"
+        if stream_key in self._tasks:
+            app_logger.warning(f"🔄 [WATCHDOG] Cancelling dead stream task for {stream_key}")
+            self._tasks[stream_key].cancel()
+            try:
+                await self._tasks[stream_key]
+            except asyncio.CancelledError:
+                pass
+        
+        # Give it a moment to clear
+        await asyncio.sleep(0.5)
+        self._tasks[stream_key] = asyncio.create_task(self.watch_ohlcv(symbol, timeframe))
+        app_logger.info(f"🚀 [WATCHDOG] Stream task for {stream_key} restarted")
 
     async def _close_ws_clients(self, reason: str) -> None:
         try:
@@ -349,11 +367,12 @@ class MarketDataService:
                 tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
             # Запускаем aggTrades (нужно для CVD) в любом случае
             tasks.append(asyncio.create_task(self.watch_trades(sym)))
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2) # Staggered (Stage 19)
             
             for tf in self.timeframes:
-                tasks.append(asyncio.create_task(self.watch_ohlcv(sym, tf)))
-                await asyncio.sleep(0.05) 
+                stream_key = f"{sym}:{tf}"
+                self._tasks[stream_key] = asyncio.create_task(self.watch_ohlcv(sym, tf))
+                await asyncio.sleep(0.2) # Staggered (Stage 19)
         
         # Average price poll (for Spread Momentum strategy)
         tasks.append(asyncio.create_task(self.fetch_avg_prices()))
@@ -387,6 +406,9 @@ class MarketDataService:
                 if gap > hard_thr:
                     self._mark_stream_recovering(stream_key, reason="watchdog_hard")
                     hard_stale_streams.append((stream_key, gap, soft_thr, hard_thr))
+                    # Специфичное требование Этапа 19: если минутный стрим мертв более 3 минут -> Force Restart
+                    if timeframe == "1m" and gap > 180:
+                         await self._restart_stream(symbol, timeframe)
                 elif gap > soft_thr:
                     self._mark_stream_recovering(stream_key, reason="watchdog_soft")
                     stale_streams.append((stream_key, gap, soft_thr, hard_thr))

@@ -38,6 +38,19 @@ from utils.logger import app_logger as logger
 
 # _log = logging.getLogger(__name__) # Use logger instead
 
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id if update.effective_user else 0
+        allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
+        if user_id not in allowed_ids:
+            if update.callback_query:
+                await _safe_answer_callback(update.callback_query, "⛔️ Нет доступа", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("⛔️ Доступ запрещен. Вы не являетесь администратором.")
+            return
+        return await func(update, context)
+    return wrapper
+
 _action_cooldowns: dict[str, float] = {}
 _ACTION_COOLDOWN_BY_TYPE = {
     "refresh": 0.8,
@@ -346,6 +359,7 @@ def _faq_text_by_section(section: str) -> str:
     return "❓ Раздел FAQ не найден."
 
 
+@admin_only
 async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_http_client() as client:
@@ -367,19 +381,14 @@ async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка проверки API: {e}")
 
+@admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Этап 14-15: Главное меню
     """
-    user_id = update.effective_user.id
-    allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
-    
-    if user_id not in allowed_ids:
-        await update.message.reply_text("⛔️ Доступ запрещен. Вы не являетесь администратором.")
-        return
-
     await _render_main_menu(update.message)
 
+@admin_only
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_http_client() as client:
@@ -400,6 +409,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 Ошибка связи с движком: {e}")
 
+@admin_only
 async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔑 **Настройка API-ключей**\n\n"
@@ -409,12 +419,8 @@ async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@admin_only
 async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
-    if user_id not in allowed_ids:
-        await update.message.reply_text("⛔️ Доступ запрещен.")
-        return
     command = update.message.text.split()[0] if update.message.text else ""
     want_enabled = command == "/start_trading"
     try:
@@ -469,11 +475,20 @@ def _sorted_positions_by_risk(trades: dict) -> list[tuple[int, str, dict, str]]:
     return enriched
 
 
-def _build_positions_list_view(trades: dict) -> tuple[str, InlineKeyboardMarkup]:
+def _build_positions_list_view(trades: dict, page: int = 1, page_size: int = 5) -> tuple[str, InlineKeyboardMarkup]:
     enriched = _sorted_positions_by_risk(trades)
-    list_lines = ["📌 **СПИСОК ПОЗИЦИЙ (приоритет по риску):**"]
+    total_positions = len(enriched)
+    total_pages = (total_positions + page_size - 1) // page_size
+    page = max(1, min(page, total_pages))
+    
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paged_items = enriched[start_idx:end_idx]
+    
+    list_lines = [f"📌 **СПИСОК ПОЗИЦИЙ (Страница {page}/{total_pages}):**"]
     keyboard_rows = []
-    for _, symbol, info, risk_tag in enriched:
+    
+    for _, symbol, info, risk_tag in paged_items:
         side_emoji = "🟢 LONG" if info.get('signal_type') == "LONG" else "🔴 SHORT"
         pnl_usd = float(info.get('pnl_usd', 0.0) or 0.0)
         pnl_badge = "🟢" if pnl_usd >= 0 else "🔴"
@@ -483,6 +498,19 @@ def _build_positions_list_view(trades: dict) -> tuple[str, InlineKeyboardMarkup]
             InlineKeyboardButton(f"ℹ️ {symbol}", callback_data=f"pos_view_{sraw}"),
             InlineKeyboardButton("❌", callback_data=f"close_{sraw}"),
         ])
+    
+    # Navigation buttons
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"pos_page_{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"pos_page_{page+1}"))
+    
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
+        
+    keyboard_rows.append([InlineKeyboardButton("🔄 Обновить", callback_data="pos_page_1")])
+    
     return "\n".join(list_lines), InlineKeyboardMarkup(keyboard_rows)
 
 
@@ -525,6 +553,7 @@ def _build_position_details_view(symbol: str, info: dict) -> str:
     )
 
 
+@admin_only
 async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_http_client() as client:
@@ -556,7 +585,7 @@ async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TY
             )
             await update.message.reply_text(summary_msg, parse_mode='Markdown')
 
-            list_text, list_kb = _build_positions_list_view(trades)
+            list_text, list_kb = _build_positions_list_view(trades, page=1)
             await update.message.reply_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
 
     except httpx.TimeoutException:
@@ -614,6 +643,7 @@ def _format_history_pct(pnl_pct: float, pnl_usd: float, notional_usd: float | No
     return f"{pct:+.2f}%", False
 
 
+@admin_only
 async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_http_client() as client:
@@ -669,12 +699,9 @@ async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logging.error(f"Ошибка истории сделок: {e!r}")
         await update.message.reply_text(f"❌ Не удалось получить историю сделок.\n`{_escape_md(str(e)[:120])}`", parse_mode='Markdown')
 
+@admin_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
-    if user_id not in allowed_ids:
-        return
-
     text = update.message.text
     logger.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
     if text == BTN_ACTIVE:
@@ -787,16 +814,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _render_main_menu(update.message)
     else:
         await update.message.reply_text("Команда не распознана. Нажмите кнопку из меню 👇", reply_markup=_build_main_menu_markup())
+@admin_only
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = update.effective_user.id if update and update.effective_user else 0
-
-    # Security: admin-only callbacks (prevent unauthorized button presses)
-    allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
-    if user_id not in allowed_ids:
-        await _safe_answer_callback(query, "⛔️ Нет доступа", show_alert=True)
-        return
-
+    user_id = update.effective_user.id if update.effective_user else 0
     _answered = False
 
     async def _answer_once(text: str | None = None, show_alert: bool = False):
@@ -804,6 +825,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _answered:
             _answered = True
             await _safe_answer_callback(query, text=text, show_alert=show_alert)
+
+    if query.data.startswith("pos_page_"):
+        await _answer_once()
+        try:
+            page = int(query.data.replace("pos_page_", ""))
+        except: page = 1
+        try:
+            async with get_http_client() as client:
+                data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
+                trades = data.get("trades", {})
+                if not trades:
+                    await query.edit_message_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                    return
+                list_text, list_kb = _build_positions_list_view(trades, page=page)
+                await query.edit_message_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка пагинации: {e}")
+        return
 
     if query.data.startswith("pos_view_") or query.data.startswith("pos_nav_") or query.data == "pos_back_list":
         await _answer_once()
