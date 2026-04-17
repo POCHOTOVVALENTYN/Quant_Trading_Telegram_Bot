@@ -1,6 +1,8 @@
 import time
 import logging
 from typing import Dict, Any
+import redis
+from config.settings import settings
 
 _rm_logger = logging.getLogger("risk_manager")
 
@@ -13,10 +15,19 @@ class RiskManager:
 
         # Daily PnL tracking — auto-stop at 5% daily drawdown
         self.max_daily_drawdown_pct = 0.05
+        try:
+            self.redis = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+            self.redis.ping()
+        except Exception as e:
+            _rm_logger.warning(f"Could not connect to Redis for RiskManager Daily PnL: {e}")
+            self.redis = None
+
         self._daily_pnl_usd = 0.0
         self._daily_start_balance = 0.0
         self._daily_reset_ts = 0.0
         self._daily_halted = False
+        
+        self._load_from_redis()
 
         # Streak-based adaptive risk
         self._consecutive_losses = 0
@@ -30,6 +41,41 @@ class RiskManager:
             "MEME_cluster": ["DOGE/USDT", "SHIB/USDT"]
         }
         self.max_correlated_same_direction = 2
+
+    def _load_from_redis(self):
+        if not self.redis: return
+        try:
+            pnl = self.redis.get("rm_daily_pnl")
+            if pnl is not None: self._daily_pnl_usd = float(pnl)
+            
+            bal = self.redis.get("rm_daily_bal")
+            if bal is not None: self._daily_start_balance = float(bal)
+            
+            ts = self.redis.get("rm_daily_ts")
+            if ts is not None: self._daily_reset_ts = float(ts)
+            
+            halt = self.redis.get("rm_daily_halt")
+            if halt is not None: self._daily_halted = (halt == "1")
+            
+            w = self.redis.get("rm_cons_wins")
+            if w is not None: self._consecutive_wins = int(w)
+            
+            l = self.redis.get("rm_cons_loss")
+            if l is not None: self._consecutive_losses = int(l)
+        except Exception as e:
+            _rm_logger.warning(f"Failed to load RiskManager state from Redis: {e}")
+
+    def _save_to_redis(self):
+        if not self.redis: return
+        try:
+            self.redis.set("rm_daily_pnl", self._daily_pnl_usd)
+            self.redis.set("rm_daily_bal", self._daily_start_balance)
+            self.redis.set("rm_daily_ts", self._daily_reset_ts)
+            self.redis.set("rm_daily_halt", "1" if self._daily_halted else "0")
+            self.redis.set("rm_cons_wins", self._consecutive_wins)
+            self.redis.set("rm_cons_loss", self._consecutive_losses)
+        except Exception as e:
+            _rm_logger.warning(f"Failed to save RiskManager state to Redis: {e}")
 
     def record_closed_pnl(self, pnl_usd: float, account_balance: float) -> None:
         """Call on every closed trade. Tracks cumulative daily PnL, streaks, and halts if limit breached."""
@@ -70,6 +116,8 @@ class RiskManager:
                     f"DAILY DRAWDOWN HALT: PnL={self._daily_pnl_usd:.2f} USDT "
                     f"({dd_pct*100:.1f}% >= {self.max_daily_drawdown_pct*100:.0f}%)"
                 )
+                
+        self._save_to_redis()
 
     def is_daily_halted(self) -> bool:
         self._ensure_daily_reset(0)
@@ -93,8 +141,11 @@ class RiskManager:
             self._daily_pnl_usd = 0.0
             self._daily_halted = False
             self._daily_reset_ts = now
+            self._consecutive_wins = 0
+            self._consecutive_losses = 0
             if account_balance > 0:
                 self._daily_start_balance = account_balance
+            self._save_to_redis()
 
     def check_listing_days(self, listing_date_str: str, min_days: int) -> bool:
         """Проверка даты листинга (Защита от новых монет)"""

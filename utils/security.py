@@ -8,13 +8,7 @@ class SecurityVault:
         raw_key = key or settings.encryption_key
         
         if not raw_key:
-            if not settings.testnet:
-                # В PROD падаем немедленно!
-                raise ValueError("CRITICAL SECURITY ERROR: ENCRYPTION_KEY is missing in .env!")
-            
-            raw_key = Fernet.generate_key().decode('utf-8')
-            app_logger.warning("ВНИМАНИЕ! Сгенерирован временный ключ шифрования (только для Testnet).")
-            settings.encryption_key = raw_key
+            raise ValueError("CRITICAL SECURITY ERROR: ENCRYPTION_KEY is missing in .env!")
             
         self.fernet = Fernet(raw_key.encode('utf-8'))
 

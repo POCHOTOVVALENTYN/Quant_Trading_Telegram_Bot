@@ -8,7 +8,7 @@ class FeatureGenerator:
     Превращает сырые данные OHLCV в вектор признаков для оценки вероятности успеха.
     """
     @staticmethod
-    def generate_features(df: pd.DataFrame, funding_rate: float = 0.0, orderbook: Dict[str, Any] = None) -> Dict[str, float]:
+    def generate_features(df: pd.DataFrame, funding_rate: float = 0.0, orderbook: Dict[str, Any] = None, cvd_norm: float = 0.0) -> Dict[str, float]:
         if len(df) < 50:
             return {}
 
@@ -62,6 +62,7 @@ class FeatureGenerator:
             if (bid_vol + ask_vol) > 0:
                 imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol)
         features['orderbook_imbalance'] = imbalance
+        features['cvd_norm'] = cvd_norm
         
         # 6. Свечные паттерны (упрощенно)
         features['body_pos'] = (last_row['close'] - last_row['low']) / (last_row['high'] - last_row['low'] + 1e-9)

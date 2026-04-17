@@ -33,6 +33,7 @@ class MLWorker:
         self.redis: aioredis.Redis = None
         self._running = True
         self._last_retrain = 0.0
+        self._signals_processed = 0
 
     async def start(self):
         _log.info("ML Worker starting...")
@@ -81,6 +82,17 @@ class MLWorker:
         """Run ML inference on a feature dict."""
         request_id = data.get("request_id", "")
         features = data.get("features", {})
+
+        self._signals_processed += 1
+        
+        # Graceful restart after N signals to prevent memory leaks (Python/ML bounds)
+        MAX_SIGNALS_BEFORE_RESTART = 1000
+        if self._signals_processed >= MAX_SIGNALS_BEFORE_RESTART:
+            _log.info(f"Processed {self._signals_processed} signals. Committing graceful restart to clear memory.")
+            self._running = False
+            # We don't await here directly as it's sync, but setting _running = False stops the listener
+            loop = asyncio.get_event_loop()
+            loop.call_soon(self._shutdown)
 
         if not self.classifier.is_ready():
             return {"request_id": request_id, "ml_prob": 0.5, "status": "model_not_ready"}

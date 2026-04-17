@@ -228,7 +228,8 @@ class MarketDataService:
         reconnect_backoff = 1.0
         while self.running:
             try:
-                trades = await self.exchange.watch_trades(symbol)
+                # Force Binance aggTrades stream to accurately separate taker/maker logic
+                trades = await self.exchange.watch_trades(symbol, params={"name": "aggTrade"})
                 reconnect_backoff = 1.0
                 if trades:
                     for t in trades:
@@ -336,7 +337,8 @@ class MarketDataService:
             from config.settings import settings
             if not settings.testnet:
                 tasks.append(asyncio.create_task(self.watch_orderbook(sym)))
-                tasks.append(asyncio.create_task(self.watch_trades(sym)))
+            # Запускаем aggTrades (нужно для CVD) в любом случае
+            tasks.append(asyncio.create_task(self.watch_trades(sym)))
             await asyncio.sleep(0.05)
             
             for tf in self.timeframes:

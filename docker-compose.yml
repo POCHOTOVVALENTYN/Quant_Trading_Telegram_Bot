@@ -19,6 +19,7 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+      - "8001:8001"
     env_file:
       - .env
     depends_on:
@@ -75,6 +76,10 @@ services:
     volumes:
       - .:/app
     command: python -m services.ml_worker.worker
+    deploy:
+      resources:
+        limits:
+          memory: 1G
 
   prometheus:
     image: prom/prometheus:v2.51.0

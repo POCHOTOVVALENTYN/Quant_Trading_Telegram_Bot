@@ -5,6 +5,19 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from telegram.error import BadRequest
 import time
 import httpx
+from contextlib import asynccontextmanager
+
+# Global client for preventing TIME_WAIT exhaustion
+global_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0),
+    headers={"X-API-Key": settings.internal_api_key}
+)
+
+@asynccontextmanager
+async def get_http_client(*args, **kwargs):
+    # Ignore kwargs like timeout here, let global client handle it
+    yield global_client
+
 from collections import defaultdict
 from config.settings import settings
 
@@ -204,7 +217,7 @@ def _build_settings_menu_keyboard(runtime: dict, presets: list) -> InlineKeyboar
 
 async def _render_settings_message(message_target, edit: bool = False):
     timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with get_http_client() as client:
         presets = []
         try:
             presets_resp = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
@@ -237,7 +250,7 @@ def _build_main_menu_markup() -> ReplyKeyboardMarkup:
 
 async def _load_runtime_settings_for_menu() -> dict:
     timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with get_http_client() as client:
         return await _load_runtime_settings(client)
 
 
@@ -336,7 +349,7 @@ def _faq_text_by_section(section: str) -> str:
 
 async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             ex = await client.get(f"{ENGINE_URL}/api/v1/exchange/check", timeout=6.0)
             st = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=6.0)
             ex_data = ex.json() if ex.status_code == 200 else {"status": "error", "message": ex.text}
@@ -370,7 +383,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             response = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=5.0)
             data = response.json()
             
@@ -406,7 +419,7 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = update.message.text.split()[0] if update.message.text else ""
     want_enabled = command == "/start_trading"
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             resp = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=5.0)
             status_data = resp.json()
             is_running = status_data.get("status") == "running"
@@ -515,7 +528,7 @@ def _build_position_details_view(symbol: str, info: dict) -> str:
 
 async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=15.0, retries=2)
             trades = data.get("trades", {})
 
@@ -604,7 +617,7 @@ def _format_history_pct(pnl_pct: float, pnl_usd: float, notional_usd: float | No
 
 async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             data = await _get_json_with_retry(
                 client,
                 f"{ENGINE_URL}/api/v1/history",
@@ -669,7 +682,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_active_positions(update, context)
     elif text == BTN_TOGGLE:
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
                 res = response.json()
                 st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
@@ -685,120 +698,62 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == BTN_API_SETTINGS:
         await show_api_settings(update, context)
     elif text == BTN_SIGNALS:
-        from database.session import async_session
-        from database.models.all_models import Signal, SignalDecisionLog
-        from sqlalchemy import select, desc
-        
         try:
-            from datetime import datetime, timedelta
-            async with async_session() as session:
-                # Показываем 5 свежих сигналов за последние 6 часов
-                six_hours_ago = datetime.utcnow() - timedelta(hours=6)
-                query = (
-                    select(Signal)
-                    .where(Signal.timestamp >= six_hours_ago)
-                    .order_by(Signal.timestamp.desc())
-                    .limit(5)
-                )
-                result = await session.execute(query)
-                signals = result.scalars().all()
+            async with get_http_client() as client:
+                resp = await client.get(f"{ENGINE_URL}/api/v1/signals?limit=5", timeout=5.0)
+                resp.raise_for_status()
+                signals = resp.json()
 
-                fallback_sdl = []
-                if not signals:
-                    sdl_query = (
-                        select(SignalDecisionLog)
-                        .where(SignalDecisionLog.created_at >= six_hours_ago)
-                        .order_by(desc(SignalDecisionLog.created_at))
-                        .limit(5)
-                    )
-                    sdl_res = await session.execute(sdl_query)
-                    fallback_sdl = sdl_res.scalars().all()
+            if not signals:
+                await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет.")
+                return
+
+            await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({len(signals)}):**", parse_mode='Markdown')
+
+            status_map = {
+                "PENDING": "⌛️ В ОЖИДАНИИ",
+                "EXECUTED": "✅ В ПОЗИЦИИ",
+                "FAILED": "❌ ОШИБКА",
+                "REJECTED": "🛑 ОТКЛОНЕН",
+                "EXPIRED": "⏱ ИСТЕК"
+            }
+
+            def fmt_p(val):
+                if val is None: return "N/A"
+                v = float(val)
+                return f"{v:.4f}" if v < 1.0 else f"{v:.2f}"
+
+            for s in signals:
+                sig_side = str(s.get("signal_type", "")).upper()
+                signal_type_ru = "🟢 LONG" if sig_side == "LONG" else "🔴 SHORT"
+                status_raw = s.get("status", "UNKNOWN")
+                status_ru = status_map.get(status_raw, f"❓ {status_raw}")
                 
-                if not signals and not fallback_sdl:
-                    await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет. Бот мониторит рынок...")
-                    return
+                win_p = s.get("win_prob", 0.0) or 0.0
+                conf = s.get("confidence", 0.0) or 0.0
+                ts = str(s.get("timestamp", "N/A"))[:19].replace("T", " ")
 
-                total_count = len(signals) if signals else len(fallback_sdl)
-                await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({total_count}):**", parse_mode='Markdown')
-
-                status_map = {
-                    "PENDING": "⌛️ В ОЖИДАНИИ",
-                    "EXECUTED": "✅ В ПОЗИЦИИ",
-                    "FAILED": "❌ ОШИБКА",
-                    "REJECTED": "🛑 ОТКЛОНЕН",
-                    "EXPIRED": "⏱ ИСТЕК"
-                }
-
-                def fmt_p(val):
-                    if val is None: return "N/A"
-                    return f"{val:.4f}" if val < 1.0 else f"{val:.2f}"
-
-                if signals:
-                    for last_signal in signals:
-                        status_ru = status_map.get(last_signal.status, "🕒 ОБРАБОТКА")
-                        signal_type_ru = "🟢 LONG" if last_signal.signal_type == "LONG" else "🔴 SHORT"
-
-                        msg = (
-                            f"🚀 **СИГНАЛ: {last_signal.strategy}**\n\n"
-                            f"🔸 **Символ:** {last_signal.symbol}\n"
-                            f"🔸 **Направление:** {signal_type_ru}\n\n"
-                            f"💰 **Цена входа:** {fmt_p(last_signal.entry_price)}\n"
-                            f"🛡 **Stop Loss:** {fmt_p(last_signal.stop_loss)}\n"
-                            f"🎯 **Take Profit:** {fmt_p(last_signal.take_profit)}\n\n"
-                            f"🕒 **Время (UTC):** {last_signal.timestamp.strftime('%H:%M:%S')}\n\n"
-                            f"🤖 **AI ВЕРДИКТ:**\n"
-                            f"📈 **Вероятность успеха:** {int((last_signal.win_prob or 0.5) * 100)}%\n"
-                            f"💰 **Ож. доходность:** {last_signal.expected_return or '0.0'}%\n"
-                            f"⚠️ **Уровень риска:** {last_signal.risk or '1.0'}\n"
-                            f"📊 **AI Score:** {last_signal.confidence or 0.6:.2f}\n\n"
-                            f"ℹ️ **Статус:** {status_ru}\n"
-                            f"───────────────────"
-                        )
-                        await update.message.reply_text(msg, parse_mode='Markdown')
-                else:
-                    for row in fallback_sdl:
-                        signal_type_ru = "🟢 LONG" if str(row.direction).upper() == "LONG" else "🔴 SHORT"
-                        status_ru = "✅ ПРИНЯТ" if row.outcome == "ACCEPTED" else f"🛑 {row.outcome}"
-                        msg = (
-                            f"🚀 **СИГНАЛ: {row.strategy}**\n\n"
-                            f"🔸 **Символ:** {row.symbol}\n"
-                            f"🔸 **Направление:** {signal_type_ru}\n"
-                            f"⏱ **TF:** {row.timeframe}\n\n"
-                            f"💰 **Цена входа:** {fmt_p(row.entry_price)}\n"
-                            f"🕒 **Время (UTC):** {row.created_at.strftime('%H:%M:%S') if row.created_at else 'N/A'}\n"
-                            f"📊 **Score:** {float(row.score or 0.0):.2f}\n"
-                            f"🤖 **Win Prob:** {int((row.win_prob or 0.0) * 100)}%\n\n"
-                            f"ℹ️ **Итог:** {status_ru}\n"
-                            f"📁 **Источник:** decision_logs\n"
-                            f"───────────────────"
-                        )
-                        await update.message.reply_text(msg, parse_mode='Markdown')
+                msg = (
+                    f"🚀 **СИГНАЛ: {s.get('strategy', 'Unknown')}**\n\n"
+                    f"🔸 **Символ:** {s.get('symbol', 'N/A')}\n"
+                    f"🔸 **Направление:** {signal_type_ru}\n\n"
+                    f"💰 **Цена входа:** {fmt_p(s.get('entry_price'))}\n"
+                    f"🛡 **Stop Loss:** {fmt_p(s.get('stop_loss', 0))}\n"
+                    f"🎯 **Take Profit:** {fmt_p(s.get('take_profit', 0))}\n\n"
+                    f"🕒 **Время (UTC):** {ts}\n\n"
+                    f"🤖 **AI ВЕРДИКТ:**\n"
+                    f"📈 **Вероятность успеха:** {int(win_p * 100)}%\n"
+                    f"💰 **Ож. доходность:** {s.get('expected_return', '0.0')}%\n"
+                    f"⚠️ **Уровень риска:** {s.get('risk', '1.0')}\n"
+                    f"📊 **AI Score:** {conf:.2f}\n\n"
+                    f"ℹ️ **Статус:** {status_ru}\n"
+                    f"📁 **Источник:** {s.get('source', 'unknown')}\n"
+                    f"───────────────────"
+                )
+                await update.message.reply_text(msg, parse_mode='Markdown')
         except Exception as e:
-            logging.error(f"Ошибка получения сигналов из БД: {e}")
-            await update.message.reply_text("❌ Ошибка при обращении к базе данных.")
-    elif text == BTN_STRATEGIES:
-        strategy_text = (
-            "📖 **ТОРГОВАЯ СИСТЕМА (Швагер + AI)**\n\n"
-            "📈 **8 СТРАТЕГИЙ (4 группы):**\n"
-            "🔹 *Пробой:* Donchian (1.15x), WRD (1.05x), Vol Contraction (1.05x)\n"
-            "🔹 *Тренд:* MA Trend (1.10x), Pullback (1.10x)\n"
-            "🔹 *Разворот:* Williams R, WRD Reversal\n"
-            "🔹 *Крипто:* Funding Squeeze\n\n"
-            "🛡 **РИСК-МЕНЕДЖМЕНТ:**\n"
-            "• Стоп-лосс: ATR × 2.0 (мин. 0.5%)\n"
-            "• Трейлинг: ATR × 2.5 (мин. 0.3%)\n"
-            "• Безубыток: при 1R + ADX/Пробой\n"
-            "• Тайм-аут: 48 свечей без прогресса\n"
-            "• Макс. дневная просадка: 5%\n\n"
-            "🤖 **ИИ-ФИЛЬТРАЦИЯ:**\n"
-            "• Score > 0.55 (взвешенный по стратегии)\n"
-            "• AI Win Prob > 0.55\n"
-            "• Внешний AI: Groq → Grok → Gemini → OpenRouter\n"
-            "• Листинг > 100 дней\n"
-            "• ADX ≥ 20 (для трендовых)\n"
-            "• Корреляция: макс. 2 в группе"
-        )
-        await update.message.reply_text(strategy_text, parse_mode='Markdown')
+            logging.error(f"Ошибка получения сигналов из REST API: {e}")
+            await update.message.reply_text("❌ Ошибка при обращении к торговому движку.")
     elif text == BTN_FAQ:
         await update.message.reply_text(
             "❓ **FAQ БОТА**\n\nВыберите раздел:",
@@ -807,7 +762,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif text == BTN_STATS:
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
                 data = response.json()
                 daily = data.get("daily", {})
@@ -860,7 +815,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             symbol_raw = query.data.replace("pos_nav_", "")
         symbol = symbol_raw.replace("_", "/") if symbol_raw else ""
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
                 trades = data.get("trades", {})
                 if not trades:
@@ -931,7 +886,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         symbol = symbol_raw.replace("_", "/")
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 if action in {"reduce25", "reduce50"}:
                     fraction = 0.25 if action == "reduce25" else 0.50
                     r = await client.post(
@@ -1000,7 +955,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = symbol_raw.replace("_", "/")
         
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/trades/close/{symbol_raw}", timeout=10.0)
                 res = response.json()
                 
@@ -1130,7 +1085,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "menu_presets":
         await _answer_once()
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 presets_resp = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
                 presets_resp.raise_for_status()
                 presets = presets_resp.json() if isinstance(presets_resp.json(), list) else []
@@ -1155,7 +1110,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "rt_toggle_trading":
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
                 res = response.json()
                 st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
@@ -1168,7 +1123,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from urllib.parse import quote
         preset_name = query.data.replace("apply_preset_", "")
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/presets/apply/{quote(preset_name, safe='')}", timeout=5.0)
                 res = response.json()
                 if res.get("status") == "success":
@@ -1181,7 +1136,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "rt_toggle_pyramiding":
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/runtime-settings/pyramiding/toggle", timeout=5.0)
                 res = response.json()
                 if res.get("status") == "success":
@@ -1194,7 +1149,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc", "rt_pos_usdt_dec", "rt_pos_usdt_inc", "rt_pos_usdt_dec5", "rt_pos_usdt_inc5", "rt_tp_dec", "rt_tp_inc", "rt_expiry_dec", "rt_expiry_inc"}:
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 runtime = await _load_runtime_settings(client)
                 if query.data.startswith("rt_margin"):
                     cur = float(runtime.get("per_trade_margin_pct", settings.per_trade_margin_pct))
@@ -1283,7 +1238,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if value == "BOTH":
             value = "BOTH"
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(
                     f"{ENGINE_URL}/api/v1/runtime-settings/allowed-side",
                     params={"value": value},
@@ -1301,7 +1256,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("rt_leverage_"):
         try:
             leverage_value = int(query.data.replace("rt_leverage_", ""))
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(
                     f"{ENGINE_URL}/api/v1/runtime-settings/leverage",
                     params={"value": leverage_value},
@@ -1332,7 +1287,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _answer_once()
         scope = "binance" if query.data.endswith("binance") else "all"
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/stats/reset", params={"scope": scope}, timeout=8.0)
                 res = response.json()
                 if res.get("status") == "success":

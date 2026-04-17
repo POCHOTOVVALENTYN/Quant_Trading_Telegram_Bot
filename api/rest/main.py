@@ -2,6 +2,22 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI
+
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    # Protect only if key is explicitly set in .env to something secure
+    if settings.internal_api_key and settings.internal_api_key != "changeme_for_prod":
+        if api_key != settings.internal_api_key:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
+    return api_key
+
+# We will apply this dependency to all routes by replacing @app. with @app. (adding Depends)
+# But wait, we can just replace @app.get("/api/v1  with @app.get(", dependencies=[Depends(verify_api_key)]/api/v1, dependencies=[Depends(verify_api_key)]
+
 from fastapi.responses import HTMLResponse
 import ccxt.pro as ccxtpro
 
@@ -25,6 +41,13 @@ async def lifespan(app: FastAPI):
     
     print("!!!!!!!! APP STARTING !!!!!!!!", flush=True) # DEBUG
     app_logger.info("🚀 [1/5] Инициализация базы данных...")
+    try:
+        from prometheus_client import start_http_server
+        start_http_server(8001)
+        app_logger.info("✅ Prometheus metrics server running on port 8001.")
+    except Exception as e:
+        app_logger.error(f"❌ Failed to start Prometheus server: {e}")
+
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -267,7 +290,7 @@ async def prometheus_metrics():
     body, content_type = get_metrics_response()
     return Response(content=body, media_type=content_type)
 
-@app.get("/api/v1/status")
+@app.get("/api/v1/status", dependencies=[Depends(verify_api_key)])
 async def get_system_status():
     if not orchestrator or not exchange_client:
         return {"status": "initializing"}
@@ -284,7 +307,7 @@ async def get_system_status():
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-@app.get("/api/v1/presets")
+@app.get("/api/v1/presets", dependencies=[Depends(verify_api_key)])
 async def get_presets():
     from database.session import async_session
     from database.models.all_models import SettingsPreset
@@ -314,7 +337,7 @@ async def get_presets():
             } for p in presets
         ]
 
-@app.post("/api/v1/presets/apply/{name}")
+@app.post("/api/v1/presets/apply/{name}", dependencies=[Depends(verify_api_key)])
 async def apply_preset(name: str):
     from database.session import async_session
     from database.models.all_models import SettingsPreset
@@ -349,13 +372,13 @@ async def apply_preset(name: str):
         await session.commit()
         return {"status": "success", "message": f"Preset {name} applied"}
 
-@app.post("/api/v1/toggle")
+@app.post("/api/v1/toggle", dependencies=[Depends(verify_api_key)])
 async def toggle_trading():
     settings.is_trading_enabled = not settings.is_trading_enabled
     return {"status": "success", "is_enabled": settings.is_trading_enabled}
 
 
-@app.get("/api/v1/runtime-settings")
+@app.get("/api/v1/runtime-settings", dependencies=[Depends(verify_api_key)])
 async def get_runtime_settings():
     return {
         "is_trading_enabled": settings.is_trading_enabled,
@@ -371,13 +394,13 @@ async def get_runtime_settings():
     }
 
 
-@app.post("/api/v1/runtime-settings/pyramiding/toggle")
+@app.post("/api/v1/runtime-settings/pyramiding/toggle", dependencies=[Depends(verify_api_key)])
 async def toggle_pyramiding_runtime():
     settings.pyramiding_enabled = not settings.pyramiding_enabled
     return {"status": "success", "pyramiding_enabled": settings.pyramiding_enabled}
 
 
-@app.post("/api/v1/runtime-settings/per-trade-margin")
+@app.post("/api/v1/runtime-settings/per-trade-margin", dependencies=[Depends(verify_api_key)])
 async def set_per_trade_margin_pct_runtime(value: float):
     # 1%-30% безопасный диапазон для runtime-настроек
     clamped = max(0.01, min(0.30, float(value)))
@@ -385,7 +408,7 @@ async def set_per_trade_margin_pct_runtime(value: float):
     return {"status": "success", "per_trade_margin_pct": settings.per_trade_margin_pct}
 
 
-@app.post("/api/v1/runtime-settings/position-size-usdt")
+@app.post("/api/v1/runtime-settings/position-size-usdt", dependencies=[Depends(verify_api_key)])
 async def set_position_size_usdt_runtime(value: float):
     # 0 = выключить фикс и вернуться к расчету по % маржи.
     clamped = max(0.0, min(100000.0, float(value)))
@@ -393,7 +416,7 @@ async def set_position_size_usdt_runtime(value: float):
     return {"status": "success", "position_size_usdt": settings.position_size_usdt}
 
 
-@app.post("/api/v1/runtime-settings/max-open-trades")
+@app.post("/api/v1/runtime-settings/max-open-trades", dependencies=[Depends(verify_api_key)])
 async def set_max_open_trades_runtime(value: int):
     clamped = max(1, min(20, int(value)))
     settings.max_open_trades = clamped
@@ -403,7 +426,7 @@ async def set_max_open_trades_runtime(value: int):
     return {"status": "success", "max_open_trades": settings.max_open_trades}
 
 
-@app.post("/api/v1/runtime-settings/tp-pct")
+@app.post("/api/v1/runtime-settings/tp-pct", dependencies=[Depends(verify_api_key)])
 async def set_tp_pct_runtime(value: float):
     # 0.1%..20%
     clamped = max(0.001, min(0.20, float(value)))
@@ -411,7 +434,7 @@ async def set_tp_pct_runtime(value: float):
     return {"status": "success", "tp_pct": settings.tp_pct}
 
 
-@app.post("/api/v1/runtime-settings/signal-expiry")
+@app.post("/api/v1/runtime-settings/signal-expiry", dependencies=[Depends(verify_api_key)])
 async def set_signal_expiry_runtime(value: int):
     # 60..600 сек
     clamped = max(60, min(600, int(value)))
@@ -419,7 +442,7 @@ async def set_signal_expiry_runtime(value: int):
     return {"status": "success", "signal_expiry_seconds": settings.signal_expiry_seconds}
 
 
-@app.post("/api/v1/runtime-settings/allowed-side")
+@app.post("/api/v1/runtime-settings/allowed-side", dependencies=[Depends(verify_api_key)])
 async def set_allowed_side_runtime(value: str):
     norm = str(value or "").upper()
     if norm not in {"LONG", "SHORT", "BOTH"}:
@@ -428,7 +451,7 @@ async def set_allowed_side_runtime(value: str):
     return {"status": "success", "allowed_position_side": settings.allowed_position_side}
 
 
-@app.post("/api/v1/runtime-settings/leverage")
+@app.post("/api/v1/runtime-settings/leverage", dependencies=[Depends(verify_api_key)])
 async def set_leverage_runtime(value: int):
     requested = int(value)
     if requested < 1 or requested > 125:
@@ -477,7 +500,7 @@ async def set_leverage_runtime(value: int):
     settings.leverage = requested
     return {"status": "success", "leverage": settings.leverage, "exchange_check": "ok"}
 
-@app.get("/api/v1/exchange/check")
+@app.get("/api/v1/exchange/check", dependencies=[Depends(verify_api_key)])
 async def check_exchange_connection():
     if not exchange_client:
         return {"status": "error", "message": "Exchange client not initialized"}
@@ -487,7 +510,7 @@ async def check_exchange_connection():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.get("/api/v1/stats")
+@app.get("/api/v1/stats", dependencies=[Depends(verify_api_key)])
 async def get_stats():
     from database.session import async_session
     from database.models.all_models import PnLRecord as PnLModel
@@ -515,7 +538,7 @@ async def get_stats():
         }
 
 
-@app.post("/api/v1/stats/reset")
+@app.post("/api/v1/stats/reset", dependencies=[Depends(verify_api_key)])
 async def reset_stats(scope: str = "all"):
     from database.session import async_session
     from database.models.all_models import PnLRecord as PnLModel, Order as OrderModel
@@ -540,7 +563,7 @@ async def reset_stats(scope: str = "all"):
     return {"status": "success", "scope": s}
 
 
-@app.get("/api/v1/history")
+@app.get("/api/v1/history", dependencies=[Depends(verify_api_key)])
 async def get_trade_history(limit: int = 20):
     from database.session import async_session
     from database.models.all_models import PnLRecord as PnLModel
@@ -575,7 +598,7 @@ async def get_trade_history(limit: int = 20):
     return {"items": items, "count": len(items)}
 
 
-@app.get("/api/v1/orders")
+@app.get("/api/v1/orders", dependencies=[Depends(verify_api_key)])
 async def get_orders_audit(limit: int = 100, symbol: Optional[str] = None):
     """Аудит ордеров из БД (вход, защита, закрытие)."""
     from database.session import async_session
@@ -616,7 +639,7 @@ async def get_orders_audit(limit: int = 100, symbol: Optional[str] = None):
     return {"items": items, "count": len(items)}
 
 
-@app.get("/api/v1/trades")
+@app.get("/api/v1/trades", dependencies=[Depends(verify_api_key)])
 async def get_active_trades():
     if not orchestrator:
         return {"trades": {}}
@@ -662,7 +685,7 @@ async def get_active_trades():
 
     return {"trades": trades}
 
-@app.post("/api/v1/trades/close/{symbol}")
+@app.post("/api/v1/trades/close/{symbol}", dependencies=[Depends(verify_api_key)])
 async def close_trade(symbol: str):
     # CCXT использует BTC/USDT, но в URL удобнее передавать BTCUSDT или кодировать /
     # Попробуем найти символ. Если в URL передали BTC_USDT, заменим на BTC/USDT
@@ -677,7 +700,7 @@ async def close_trade(symbol: str):
         return {"status": "error", "message": "Trade not found", "symbol": normalized_symbol}
 
 
-@app.post("/api/v1/trades/reduce/{symbol}")
+@app.post("/api/v1/trades/reduce/{symbol}", dependencies=[Depends(verify_api_key)])
 async def reduce_trade(symbol: str, fraction: float):
     normalized_symbol = symbol.replace("_", "/")
     if not orchestrator:
@@ -689,7 +712,7 @@ async def reduce_trade(symbol: str, fraction: float):
     return {"status": "error", "message": "Unexpected reduce response", "symbol": normalized_symbol}
 
 
-@app.get("/api/v1/positions")
+@app.get("/api/v1/positions", dependencies=[Depends(verify_api_key)])
 async def get_positions():
     """Open positions in a flat list for the dashboard."""
     if not orchestrator:
@@ -710,7 +733,7 @@ async def get_positions():
     return result
 
 
-@app.get("/api/v1/signals")
+@app.get("/api/v1/signals", dependencies=[Depends(verify_api_key)])
 async def get_recent_signals(limit: int = 30):
     """Recent signals from DB.
 
@@ -770,7 +793,7 @@ async def get_recent_signals(limit: int = 30):
         ]
 
 
-@app.get("/api/v1/ai/status")
+@app.get("/api/v1/ai/status", dependencies=[Depends(verify_api_key)])
 async def get_ai_status():
     if not orchestrator:
         return {"status": "not_ready"}
@@ -781,7 +804,7 @@ async def get_ai_status():
     }
 
 
-@app.get("/api/v1/ai/decisions")
+@app.get("/api/v1/ai/decisions", dependencies=[Depends(verify_api_key)])
 async def get_ai_decisions(limit: int = 50):
     """Recent AI decisions for analytics."""
     from database.session import async_session as _async_session
@@ -804,7 +827,7 @@ async def get_ai_decisions(limit: int = 50):
     return {"count": len(items), "items": items}
 
 
-@app.get("/api/v1/ai/decisions/summary")
+@app.get("/api/v1/ai/decisions/summary", dependencies=[Depends(verify_api_key)])
 async def get_ai_decisions_summary():
     """Aggregate AI decision statistics."""
     from database.session import async_session as _async_session
@@ -834,7 +857,7 @@ async def get_ai_decisions_summary():
     return summary
 
 
-@app.get("/api/v1/decision-logs")
+@app.get("/api/v1/decision-logs", dependencies=[Depends(verify_api_key)])
 async def get_decision_logs(limit: int = 100, symbol: Optional[str] = None, outcome: Optional[str] = None):
     """Signal decision journal — every filter step for post-analysis."""
     from database.session import async_session as _async_session
@@ -881,7 +904,7 @@ async def get_decision_logs(limit: int = 100, symbol: Optional[str] = None, outc
     return {"count": len(items), "items": items}
 
 
-@app.get("/api/v1/ml/status")
+@app.get("/api/v1/ml/status", dependencies=[Depends(verify_api_key)])
 async def get_ml_status():
     """ML signal classifier status."""
     if not orchestrator or not orchestrator.ml_classifier:
@@ -893,7 +916,7 @@ async def get_ml_status():
     }
 
 
-@app.post("/api/v1/ml/train")
+@app.post("/api/v1/ml/train", dependencies=[Depends(verify_api_key)])
 async def trigger_ml_training():
     """Manually trigger walk-forward ML training."""
     from ai.ml.signal_classifier import train_walk_forward
@@ -903,7 +926,7 @@ async def trigger_ml_training():
     return stats
 
 
-@app.get("/api/v1/strategy-scoring")
+@app.get("/api/v1/strategy-scoring", dependencies=[Depends(verify_api_key)])
 async def get_strategy_scoring():
     """Dynamic strategy scoring adjustments."""
     if not orchestrator:
@@ -911,7 +934,7 @@ async def get_strategy_scoring():
     return orchestrator.dynamic_strategy_scorer.get_all_adjustments()
 
 
-@app.get("/api/v1/cvd")
+@app.get("/api/v1/cvd", dependencies=[Depends(verify_api_key)])
 async def get_cvd():
     """Current CVD (Cumulative Volume Delta) per symbol."""
     if not orchestrator:
@@ -919,7 +942,7 @@ async def get_cvd():
     return orchestrator.cvd_tracker.get_all_symbols()
 
 
-@app.get("/api/v1/news-filter")
+@app.get("/api/v1/news-filter", dependencies=[Depends(verify_api_key)])
 async def get_news_filter_status():
     """NLP news filter status."""
     if not orchestrator:
@@ -927,7 +950,7 @@ async def get_news_filter_status():
     return orchestrator.news_filter.get_status()
 
 
-@app.post("/api/v1/news-filter/check")
+@app.post("/api/v1/news-filter/check", dependencies=[Depends(verify_api_key)])
 async def trigger_news_check():
     """Manually trigger news sentiment check."""
     if not orchestrator:
@@ -936,7 +959,7 @@ async def trigger_news_check():
     return result
 
 
-@app.get("/api/v1/risk/daily")
+@app.get("/api/v1/risk/daily", dependencies=[Depends(verify_api_key)])
 async def get_daily_risk():
     """Daily PnL and drawdown status."""
     if not orchestrator:
@@ -944,7 +967,7 @@ async def get_daily_risk():
     return orchestrator.risk_manager.get_daily_stats()
 
 
-@app.get("/api/v1/learner/status")
+@app.get("/api/v1/learner/status", dependencies=[Depends(verify_api_key)])
 async def get_learner_status():
     """Scoring learner weights and training stats."""
     if not orchestrator:

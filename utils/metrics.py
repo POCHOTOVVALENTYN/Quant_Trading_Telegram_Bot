@@ -103,6 +103,23 @@ trade_mgmt_max_favorable_r = Histogram(
     buckets=[0, 0.5, 1, 1.5, 2, 3, 5, 10],
 )
 
+ws_latency_ms = Histogram(
+    "trading_ws_latency_ms",
+    "Time from Binance candle generation to on_market_data processing in ms",
+    buckets=[10, 50, 100, 250, 500, 1000, 5000, 10000],
+)
+
+order_execution_slippage = Histogram(
+    "trading_order_execution_slippage_pct",
+    "Difference between requested entry price and actual execution price in %",
+    buckets=[-1.0, -0.5, -0.1, 0, 0.1, 0.5, 1.0, 5.0],
+)
+
+api_429_errors = Counter(
+    "trading_api_429_errors_total",
+    "Number of Binance API rate limit (429) errors",
+)
+
 
 def get_metrics_response():
     """Return raw Prometheus metrics bytes and content type."""

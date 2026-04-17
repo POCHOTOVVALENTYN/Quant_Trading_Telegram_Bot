@@ -37,7 +37,7 @@ from core.strategies.scoring import SignalScorer, DynamicStrategyScorer
 from ai.feature_generator import FeatureGenerator
 from ai.model import AIModel, ExternalAIAdapter, ProviderConfig
 from ai.scoring_learner import ScoringLearner, learning_loop
-from ai.ml.signal_classifier import SignalClassifier
+from services.ml_worker.client import MLWorkerClient
 from core.risk.risk_manager import RiskManager
 from core.indicators.cvd import CVDTracker
 from ai.news_filter import NewsFilter
@@ -96,7 +96,7 @@ class TradingOrchestrator:
         self.scoring_learner = ScoringLearner(weights_file=settings.scoring_weights_file)
         self.ai_model = AIModel(weights=self.scoring_learner.get_weights())
         self.external_ai = self._init_external_ai()
-        self.ml_classifier = SignalClassifier() if settings.ml_validator_enabled else None
+        self.ml_classifier = MLWorkerClient() if settings.ml_validator_enabled else None
         self.cvd_tracker = CVDTracker(window_seconds=300)
         self.news_filter = NewsFilter(check_interval=3600)
 
@@ -397,6 +397,9 @@ class TradingOrchestrator:
         return adapter
 
     async def start(self):
+        if self.ml_classifier:
+            await self.ml_classifier.start()
+
         logger.info(f"Запуск Торгового Движка (8 стратегий, Schwager-based ensemble)...")
         await self._prefetch_history()
         asyncio.create_task(self._heartbeat_loop())
@@ -449,6 +452,9 @@ class TradingOrchestrator:
         return False
 
     async def stop(self):
+        if self.ml_classifier:
+            await self.ml_classifier.stop()
+
         logger.info("Остановка Торгового Движка...")
         await self.market_data.stop()
 
@@ -463,14 +469,25 @@ class TradingOrchestrator:
                     if isinstance(rate_info, dict):
                         self.funding_rates[sym] = rate_info.get('fundingRate', 0.0)
         elif data_type == "trade":
-            if isinstance(data, dict) and self.cvd_tracker:
-                self.cvd_tracker.on_trade(
-                    symbol=symbol,
-                    price=float(data.get("price", 0)),
-                    amount=float(data.get("amount", 0)),
-                    side=str(data.get("side", "buy")),
-                    timestamp_ms=int(data.get("timestamp", 0)),
-                )
+            if isinstance(data, dict):
+                trade_ts = int(data.get("timestamp", 0))
+                if trade_ts > 0:
+                    try:
+                        from utils.metrics import ws_latency_ms
+                        latency = (time.time() * 1000) - trade_ts
+                        if latency > 0:
+                            ws_latency_ms.observe(latency)
+                    except Exception:
+                        pass
+                
+                if self.cvd_tracker:
+                    self.cvd_tracker.on_trade(
+                        symbol=symbol,
+                        price=float(data.get("price", 0)),
+                        amount=float(data.get("amount", 0)),
+                        side=str(data.get("side", "buy")),
+                        timestamp_ms=trade_ts,
+                    )
         elif data_type == "avg_price":
             pass
 
@@ -888,7 +905,8 @@ class TradingOrchestrator:
 
                     # AI/Statistical prediction
                     ob = self.orderbooks.get(symbol)
-                    features = FeatureGenerator.generate_features(df_eval, funding_rate=fr, orderbook=ob)
+                    cvd_val = self.cvd_tracker.get_cvd_normalized(symbol) if self.cvd_tracker else 0.0
+                    features = FeatureGenerator.generate_features(df_eval, funding_rate=fr, orderbook=ob, cvd_norm=cvd_val)
                     ai_prediction = self.ai_model.predict_win_probability(features, signal['signal'])
                     sdl["win_prob"] = ai_prediction['win_prob']
 
@@ -961,13 +979,14 @@ class TradingOrchestrator:
                     _filter_flags["f_ext_ai"] = True
 
                     # ML classifier (shadow or gate mode)
-                    if self.ml_classifier and self.ml_classifier.is_ready():
+                    if self.ml_classifier:
                         ml_features = {
                             "adx": sdl.get("adx", 0), "atr": sdl.get("atr", 0),
                             "rsi": sdl.get("rsi", 0), "volume_ratio": sdl.get("volume_ratio", 0),
                             "funding_rate": sdl.get("funding_rate", 0),
                             "score": sdl.get("score", 0), "win_prob": sdl.get("win_prob", 0),
                             "ai_confidence": sdl.get("ai_confidence", 0),
+                            "cvd_norm": cvd_val,
                             "regime_TREND": 1.0 if market_regime == "TREND" else 0.0,
                             "regime_RANGE": 1.0 if market_regime == "RANGE" else 0.0,
                             "regime_NEUTRAL": 1.0 if market_regime == "NEUTRAL" else 0.0,
@@ -983,7 +1002,7 @@ class TradingOrchestrator:
                             "direction_LONG": 1.0 if signal.get("signal") == "LONG" else 0.0,
                             "direction_SHORT": 1.0 if signal.get("signal") == "SHORT" else 0.0,
                         }
-                        ml_prob = self.ml_classifier.predict_proba(ml_features)
+                        ml_prob = await self.ml_classifier.predict_proba(ml_features)
                         logger.info(f"[{symbol}] ML classifier: prob={ml_prob:.3f}")
 
                         if not settings.ml_validator_shadow_mode:
@@ -1191,4 +1210,10 @@ class TradingOrchestrator:
                 f"🔍 Символов: `{len(self.market_history)}`\n"
                 f"📈 Стратегий: `{len(self.strategies)}`"
             )
+            if self.cvd_tracker:
+                try:
+                    self.cvd_tracker.cleanup()
+                except Exception:
+                    pass
+
             await send_telegram_msg(msg)

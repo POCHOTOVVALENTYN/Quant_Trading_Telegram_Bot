@@ -32,15 +32,17 @@ logger = get_execution_logger()
 
 class EntryExecutionError(Exception):
     def __init__(self, exchange_client, risk_manager: RiskManager, user_id: int):
-    self.user_id = user_id
+        self.user_id = user_id
 
 class ExecutionEngine:
-    def __init__(self, exchange_client, risk_manager: RiskManager):
+    def __init__(self, exchange_client, risk_manager: RiskManager, user_id: Optional[int] = None):
+        self.exchange = exchange_client
+        self.user_id = user_id if user_id is not None else int(settings.admin_user_ids.split(',')[0]) if settings.admin_user_ids else 1
         self._market_rules_cache = {} # Кэш фильтров
         if hasattr(self.exchange, 'options'):
             self.exchange.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
         self.active_trades: Dict[str, Dict[str, Any]] = {}
-        self._trades_lock = asyncio.Lock() # ДОБАВИТЬ ГЛОБАЛЬНЫЙ ЛОК
+        self._trades_lock = asyncio.Lock() # ГЛОБАЛЬНЫЙ ЛОК
         
         self.risk_manager = risk_manager
         self.pyramiding = PyramidingSystem()
@@ -147,7 +149,15 @@ class ExecutionEngine:
                 return await op()
             except Exception as e:
                 last_err = e
-                if "-1021" not in str(e):
+                err_str = str(e)
+                if "429" in err_str or "RateLimit" in err_str or "rate limit" in err_str.lower():
+                    try:
+                        from utils.metrics import api_429_errors
+                        api_429_errors.inc()
+                    except Exception:
+                        pass
+
+                if "-1021" not in err_str:
                     raise
                 try:
                     await self.exchange.load_time_difference()
@@ -198,12 +208,22 @@ class ExecutionEngine:
         is_long: bool,
         db_stop: float = 0.0,
         db_tp: float = 0.0,
+        client_id: Optional[str] = None,
+        position_id: Optional[int] = None,
     ) -> Optional[str]:
         """
         Возвращает тип защиты:
         - "SL" / "TP" при успешной классификации
         - None, если классифицировать нельзя.
         """
+        # Priority 1: Exact match by clientOrderId naming convention
+        if client_id and position_id:
+            cid = str(client_id)
+            pid_str = f"_{position_id}"
+            if pid_str in cid:
+                if cid.startswith("asl_"): return "SL"
+                if cid.startswith("atp_"): return "TP"
+        
         t = (order_type or "").upper()
         if "TAKE_PROFIT" in t:
             return "TP"
@@ -482,7 +502,7 @@ class ExecutionEngine:
                         return
                 session.add(
                     OrderModel(
-                        user_id=1,
+                        user_id=self.user_id,
                         position_id=position_id,
                         exchange_order_id=ex_id,
                         client_order_id=cl_id,
@@ -573,7 +593,7 @@ class ExecutionEngine:
             async with async_session() as session:
                 session.add(
                     PnLModel(
-                        user_id=1,
+                        user_id=self.user_id,
                         symbol=sym,
                         pnl_usd=pnl_usd,
                         pnl_pct=pnl_pct,
@@ -740,6 +760,7 @@ class ExecutionEngine:
                 logger.warning(
                     f"⚠️ [PROTECT] Adjust SL trigger for {symbol}: requested={sl:.8f}, ref={ref_price:.8f}, adjusted={sl_trigger:.8f}"
                 )
+            sl_cid = f"asl_{position_id}" if position_id else None
             sl_p = {
                 "symbol": clean_sym,
                 "side": reduce_side,
@@ -749,6 +770,8 @@ class ExecutionEngine:
                 "closePosition": "true",
                 "workingType": "MARK_PRICE"
             }
+            if sl_cid:
+                sl_p["newClientStrategyId"] = sl_cid
             if is_hedge:
                 sl_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
                 sl_p["reduceOnly"] = "true" # В хедж-режиме может быть полезно, но проверим
@@ -860,7 +883,7 @@ class ExecutionEngine:
                     position_id=position_id,
                     symbol=symbol,
                     exchange_order_id=sl_id,
-                    client_order_id=None,
+                    client_order_id=sl_cid,
                     order_type="STOP_MARKET_ALGO",
                     position_side=ps,
                     price=float(sl_trigger),
@@ -885,6 +908,7 @@ class ExecutionEngine:
                         if norm_part_amt <= 0:
                             continue
                         
+                        tp_cid = f"atp_{position_id}_{i+1}" if position_id else None
                         tp_p = {
                             "symbol": clean_sym,
                             "side": reduce_side,
@@ -895,6 +919,7 @@ class ExecutionEngine:
                             "reduceOnly": "true",
                             "workingType": "MARK_PRICE"
                         }
+                        if tp_cid: tp_p["newClientStrategyId"] = tp_cid
                         if is_hedge: tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
                         
                         try:
@@ -912,7 +937,7 @@ class ExecutionEngine:
                                     position_id=position_id,
                                     symbol=symbol,
                                     exchange_order_id=aid,
-                                    client_order_id=None,
+                                    client_order_id=tp_cid,
                                     order_type="TAKE_PROFIT_MARKET_ALGO",
                                     position_side=ps,
                                     price=tp_px,
@@ -924,6 +949,7 @@ class ExecutionEngine:
                             
                     tp_id = ",".join(tp_ids)
                 else:
+                    tp_cid = f"atp_{position_id}_f" if position_id else None
                     tp_p = {
                         "symbol": clean_sym,
                         "side": reduce_side,
@@ -933,6 +959,7 @@ class ExecutionEngine:
                         "closePosition": "true",
                         "workingType": "MARK_PRICE"
                     }
+                    if tp_cid: tp_p["newClientStrategyId"] = tp_cid
                     if is_hedge: 
                         tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
                         tp_p["reduceOnly"] = "true"
@@ -950,7 +977,7 @@ class ExecutionEngine:
                             position_id=position_id,
                             symbol=symbol,
                             exchange_order_id=tp_id,
-                            client_order_id=None,
+                            client_order_id=tp_cid,
                             order_type="TAKE_PROFIT_MARKET_ALGO",
                             position_side=ps,
                             price=tp_px,
@@ -992,6 +1019,7 @@ class ExecutionEngine:
                 if s not in ex_orders_by_symbol: ex_orders_by_symbol[s] = []
                 ex_orders_by_symbol[s].append({
                     "id": o.get("algoId"),
+                    "client_id": o.get("clientStrategyId"),
                     "type": (o.get("type") or "").upper(),
                     "stopPrice": (o.get("triggerPrice") or o.get("stopPrice")),
                 })
@@ -1021,7 +1049,7 @@ class ExecutionEngine:
                         sl_def = entry * (0.95 if is_long else 1.05)
                         tp_def = entry * (1.10 if is_long else 0.90)
                         dbp = PositionModel(
-                            user_id=1, symbol=symbol,
+                            user_id=self.user_id, symbol=symbol,
                             side=SignalType.LONG if is_long else SignalType.SHORT,
                             size=contracts, entry_price=entry,
                             status=PositionStatus.OPEN,
@@ -1043,12 +1071,7 @@ class ExecutionEngine:
                             dbp.size = contracts
                             await session.flush()
                 
-                # Блокируем доступ ТОЛЬКО на момент подмены словаря
-                async with self._trades_lock:
-                    self.active_trades = new_active
-                    logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
-
-
+                # [Lock logic moved to after the loop]
                     found_sl, found_tp = None, None
                     sl_id, tp_id = None, None
                     db_sl_val = float(dbp.stop_loss or 0.0)
@@ -1060,6 +1083,8 @@ class ExecutionEngine:
                         kind = self._classify_protective_order(
                             str(o.get("type", "")), trig, entry, is_long,
                             db_stop=db_sl_val, db_tp=db_tp_val,
+                            client_id=o.get("client_id"),
+                            position_id=dbp.id
                         )
                         if kind == "SL":
                             found_sl = self._pick_better_level(found_sl, trig, kind="SL", is_long=is_long)
@@ -1137,6 +1162,11 @@ class ExecutionEngine:
                         "strategy": prev_trade.get("strategy", "unknown"),
                         "timeframe": prev_trade.get("timeframe", "1h"),
                     }
+
+                # Подмена словаря под локом теперь после формирования new_active
+                async with self._trades_lock:
+                    self.active_trades = new_active
+                    logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
 
                 # Закрываем "призраков" (позиции в БД без живой позиции на бирже)
                 for sym, dbp in db_positions.items():
@@ -1492,6 +1522,16 @@ class ExecutionEngine:
 
                 _sl_dist_pct = abs(entry_exec - stop_price) / entry_exec * 100 if entry_exec > 0 else 0
                 _risk_usdt = abs(entry_exec - stop_price) * lot_size
+
+                pct_slip = ((entry_exec - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                if direction.upper() == 'SHORT':
+                    pct_slip = -pct_slip
+
+                try:
+                    from utils.metrics import order_execution_slippage
+                    order_execution_slippage.observe(pct_slip)
+                except Exception:
+                    pass
 
                 if trades_opened:
                     trades_opened.labels(symbol=symbol, direction=direction.upper()).inc()
@@ -2148,7 +2188,7 @@ class ExecutionEngine:
 
                 session.add(
                     PnLModel(
-                        user_id=1,
+                        user_id=self.user_id,
                         symbol=symbol,
                         pnl_usd=pnl_usd,
                         pnl_pct=pnl_pct,
@@ -2415,39 +2455,40 @@ class ExecutionEngine:
             return
         self._soft_cleanup_last_ts = now
 
-        if not self.active_trades:
-            return
+        async with self._trades_lock:
+            if not self.active_trades:
+                return
 
-        stale_symbols: List[str] = []
-        for symbol in list(self.active_trades.keys()):
-            local = self.active_trades.get(symbol) or {}
-            live = live_positions_map.get(symbol)
-            if not live:
-                stale_symbols.append(symbol)
-                self.active_trades.pop(symbol, None)
-                continue
+            stale_symbols: List[str] = []
+            for symbol in list(self.active_trades.keys()):
+                local = self.active_trades.get(symbol) or {}
+                live = live_positions_map.get(symbol)
+                if not live:
+                    stale_symbols.append(symbol)
+                    self.active_trades.pop(symbol, None)
+                    continue
 
-            live_size = float(live.get("size") or 0.0)
-            if live_size > 0 and abs(float(local.get("current_size", 0.0) or 0.0) - live_size) > 1e-8:
-                local["current_size"] = live_size
+                live_size = float(live.get("size") or 0.0)
+                if live_size > 0 and abs(float(local.get("current_size", 0.0) or 0.0) - live_size) > 1e-8:
+                    local["current_size"] = live_size
 
-            live_side = str(live.get("side") or "").upper()
-            if live_side in ("LONG", "SHORT") and str(local.get("signal_type", "")).upper() != live_side:
-                local["signal_type"] = live_side
+                live_side = str(live.get("side") or "").upper()
+                if live_side in ("LONG", "SHORT") and str(local.get("signal_type", "")).upper() != live_side:
+                    local["signal_type"] = live_side
 
-        if stale_symbols:
-            logger.warning(f"🧹 [SOFT_CLEANUP] Removed stale active_trades: {stale_symbols}")
-            try:
-                async with async_session() as session:
-                    for sym in stale_symbols:
-                        await session.execute(
-                            update(PositionModel)
-                            .where(
-                                PositionModel.symbol == sym,
-                                PositionModel.status == PositionStatus.OPEN
+            if stale_symbols:
+                logger.warning(f"🧹 [SOFT_CLEANUP] Removed stale active_trades: {stale_symbols}")
+                try:
+                    async with async_session() as session:
+                        for sym in stale_symbols:
+                            await session.execute(
+                                update(PositionModel)
+                                .where(
+                                    PositionModel.symbol == sym,
+                                    PositionModel.status == PositionStatus.OPEN
+                                )
+                                .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
                             )
-                            .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
-                        )
-                    await session.commit()
-            except Exception as e:
-                logger.warning(f"⚠️ [SOFT_CLEANUP] DB close sync failed: {e}")
+                        await session.commit()
+                except Exception as e:
+                    logger.warning(f"⚠️ [SOFT_CLEANUP] DB close sync failed: {e}")

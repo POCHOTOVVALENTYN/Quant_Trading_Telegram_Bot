@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     
     # Security
     encryption_key: str = "" # AES256 key base64 URL safe
+    internal_api_key: str = "changeme_for_prod" # Internal REST API Key
     
     # Trading Defaults
     default_exchange: str = "binance"
