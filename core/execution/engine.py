@@ -31,15 +31,16 @@ logger = get_execution_logger()
 
 
 class EntryExecutionError(Exception):
-    def __init__(self, reason: str, message: str):
-        super().__init__(message)
-        self.reason = reason
+    def __init__(self, exchange_client, risk_manager: RiskManager, user_id: int):
+    self.user_id = user_id
 
 class ExecutionEngine:
     def __init__(self, exchange_client, risk_manager: RiskManager):
-        self.exchange = exchange_client
+        self._market_rules_cache = {} # Кэш фильтров
         if hasattr(self.exchange, 'options'):
             self.exchange.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        self.active_trades: Dict[str, Dict[str, Any]] = {}
+        self._trades_lock = asyncio.Lock() # ДОБАВИТЬ ГЛОБАЛЬНЫЙ ЛОК
         
         self.risk_manager = risk_manager
         self.pyramiding = PyramidingSystem()
@@ -79,6 +80,29 @@ class ExecutionEngine:
         self._tm_partial_reduce_skip_log_ts: Dict[str, float] = {}
         # Фоновые задачи (periodic reconcile, ws watchdog)
         self._periodic_reconcile_task: Optional[asyncio.Task] = None
+
+        
+    async def _get_market_rules(self, symbol: str) -> dict:
+        if symbol in self._market_rules_cache:
+            return self._market_rules_cache[symbol]
+        
+        if not self.exchange.markets: await self.exchange.load_markets()
+        market = self.exchange.market(symbol)
+        
+        rules = {'step_size': '0.001', 'tick_size': '0.01'}
+        for f in market['info'].get('filters', []):
+            if f.get('filterType') == 'LOT_SIZE':
+                rules['step_size'] = f.get('stepSize', '0.001')
+            elif f.get('filterType') == 'PRICE_FILTER':
+                rules['tick_size'] = f.get('tickSize', '0.01')
+                
+        self._market_rules_cache[symbol] = rules
+        return rules
+
+    async def _normalize_price(self, symbol: str, price: float) -> float:
+        rules = await self._get_market_rules(symbol)
+        tick = Decimal(rules['tick_size'])
+        return float(Decimal(str(price)).quantize(tick, rounding=ROUND_HALF_UP))
 
     def register_trade_close_callback(self, cb):
         """Register a callback(strategy: str, pnl_usd: float) called on every trade close."""
@@ -1018,6 +1042,12 @@ class ExecutionEngine:
                             logger.info(f"[SYNC] Volume {symbol}: {dbp.size} -> {contracts}")
                             dbp.size = contracts
                             await session.flush()
+                
+                # Блокируем доступ ТОЛЬКО на момент подмены словаря
+                async with self._trades_lock:
+                    self.active_trades = new_active
+                    logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
+
 
                     found_sl, found_tp = None, None
                     sl_id, tp_id = None, None
@@ -1356,7 +1386,7 @@ class ExecutionEngine:
 
                 # 7. БД Позиция
                 async with async_session() as session:
-                    pos = PositionModel(user_id=1, signal_id=signal_id, symbol=symbol, side=SignalType.LONG if direction.upper() == "LONG" else SignalType.SHORT,
+                    pos = PositionModel(user_id=self.user_id, signal_id=signal_id, symbol=symbol, side=SignalType.LONG if direction.upper() == "LONG" else SignalType.SHORT,
                                         entry_price=entry_exec, size=lot_size, stop_loss=stop_price, take_profit=signal_data.get("take_profit"),
                                         status=PositionStatus.OPEN, opened_at=datetime.datetime.utcnow())
                     session.add(pos); await session.commit(); await session.refresh(pos)
@@ -1505,22 +1535,24 @@ class ExecutionEngine:
     async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None):
         """Вызывается каждую минуту для трейлинга и trade management."""
         async with self._get_symbol_lock(symbol):
-            if symbol not in self.active_trades: return
-            trade = self.active_trades[symbol]
-            trade['current_price'] = current_price
-            live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
-            if live_size <= 1e-8:
-                await self._close_position(symbol, reason="EXTERNAL")
-                return
-            if abs(live_size - float(trade.get("current_size", 0.0))) > 1e-8:
-                trade["current_size"] = live_size
-                async with async_session() as session:
-                    await session.execute(
-                        update(PositionModel)
-                        .where(PositionModel.id == trade["position_db_id"])
-                        .values(size=float(live_size))
-                    )
-                    await session.commit()
+            async with self._get_symbol_lock(symbol):
+                async with self._trades_lock: # Блокируем чтение
+                    if symbol not in self.active_trades: return
+                    trade = self.active_trades[symbol]
+                    trade['current_price'] = current_price
+                    live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
+                    if live_size <= 1e-8:
+                        await self._close_position(symbol, reason="EXTERNAL")
+                        return
+                    if abs(live_size - float(trade.get("current_size", 0.0))) > 1e-8:
+                        trade["current_size"] = live_size
+                        async with async_session() as session:
+                            await session.execute(
+                                update(PositionModel)
+                                .where(PositionModel.id == trade["position_db_id"])
+                                .values(size=float(live_size))
+                            )
+                            await session.commit()
 
             # Trade management cycle (invalidation, time stop, partial, confirmed trailing)
             try:

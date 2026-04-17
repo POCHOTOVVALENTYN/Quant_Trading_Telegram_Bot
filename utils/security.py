@@ -4,28 +4,16 @@ import os
 from config.settings import settings
 
 class SecurityVault:
-    """
-    Система безопасности (Этап 18).
-    Отвечает за шифрование и дешифрование API ключей с использованием AES256 (Fernet в python'е реализует AES128 CBC или 256).
-    """
     def __init__(self, key: str = None):
-        """
-        Инициализация шифратора. Требует 32-байтного url-safe base64 ключа.
-        Если ключ не передан в настройках, он будет сгенерирован (разово).
-        """
         raw_key = key or settings.encryption_key
         
-        # Если ключа нет (пустая строка), генерируем временный для запуска.
-        # В продакшене ключ должен быть жестко прописан в ENV!
         if not raw_key:
+            if not settings.testnet:
+                # В PROD падаем немедленно!
+                raise ValueError("CRITICAL SECURITY ERROR: ENCRYPTION_KEY is missing in .env!")
+            
             raw_key = Fernet.generate_key().decode('utf-8')
-            # Выводим предупреждение в логи, что ключ сгенерирован налету
-            from utils.logger import app_logger
-            app_logger.warning(
-                "ВНИМАНИЕ! Ключ шифрования не найден в .env. "
-                "Сгенерирован временный ключ. "
-                "Перезапуск бота без сохранения этого ключа сделает базу БД с ключами нечитаемой."
-            )
+            app_logger.warning("ВНИМАНИЕ! Сгенерирован временный ключ шифрования (только для Testnet).")
             settings.encryption_key = raw_key
             
         self.fernet = Fernet(raw_key.encode('utf-8'))
