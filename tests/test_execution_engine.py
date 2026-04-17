@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.execution.engine import ExecutionEngine
+from core.execution.engine import ExecutionEngine, EntryExecutionError
 from core.risk.risk_manager import RiskManager
 
 
@@ -110,26 +110,30 @@ async def test_execute_signal_emergency_close_when_sl_not_created(monkeypatch):
     engine._set_protective_orders = AsyncMock(return_value=(None, None))
     engine.risk_manager.check_trade_allowed = MagicMock(return_value=True)
     engine.risk_manager.calculate_atr_stop = MagicMock(return_value=95.0)
-    engine.risk_manager.calculate_position_size = MagicMock(return_value=1.0)
+    engine.risk_manager.assess_trade_feasibility = MagicMock(
+        return_value={"feasible": True, "reason": "ok", "position_size": 1.0}
+    )
 
     session_factory = _SessionFactory()
     monkeypatch.setattr("core.execution.engine.async_session", session_factory)
     monkeypatch.setattr("core.execution.engine.send_telegram_msg", AsyncMock())
 
-    await engine.execute_signal(
-        {
-            "id": 1,
-            "symbol": "BTC/USDT",
-            "signal": "LONG",
-            "entry_price": 100.0,
-            "atr": 2.0,
-            "take_profit": 110.0,
-            "timeframe": "1h",
-        },
-        account_balance=1000.0,
-        drawdown=0.0,
-        open_count=0,
-    )
+    with pytest.raises(EntryExecutionError) as excinfo:
+        await engine.execute_signal(
+            {
+                "id": 1,
+                "symbol": "BTC/USDT",
+                "signal": "LONG",
+                "entry_price": 100.0,
+                "atr": 2.0,
+                "take_profit": 110.0,
+                "timeframe": "1h",
+            },
+            account_balance=1000.0,
+            drawdown=0.0,
+            open_count=0,
+        )
+    assert excinfo.value.reason == "protective_stop_missing"
 
     # Должны быть entry + аварийное закрытие.
     assert exchange.create_order.await_count == 2
@@ -147,26 +151,31 @@ async def test_execute_signal_normalized_to_zero_fails_before_order_placement(mo
     engine._normalize_amount = AsyncMock(return_value=0.0)
     engine.risk_manager.check_trade_allowed = MagicMock(return_value=True)
     engine.risk_manager.calculate_atr_stop = MagicMock(return_value=95.0)
+    engine.risk_manager.assess_trade_feasibility = MagicMock(
+        return_value={"feasible": True, "reason": "ok", "position_size": 1.0}
+    )
 
     session_factory = _SessionFactory()
     notify = AsyncMock()
     monkeypatch.setattr("core.execution.engine.async_session", session_factory)
     monkeypatch.setattr("core.execution.engine.send_telegram_msg", notify)
 
-    await engine.execute_signal(
-        {
-            "id": 1,
-            "symbol": "BTC/USDT",
-            "signal": "LONG",
-            "entry_price": 100.0,
-            "atr": 2.0,
-            "take_profit": 110.0,
-            "timeframe": "1h",
-        },
-        account_balance=1000.0,
-        drawdown=0.0,
-        open_count=0,
-    )
+    with pytest.raises(EntryExecutionError) as excinfo:
+        await engine.execute_signal(
+            {
+                "id": 1,
+                "symbol": "BTC/USDT",
+                "signal": "LONG",
+                "entry_price": 100.0,
+                "atr": 2.0,
+                "take_profit": 110.0,
+                "timeframe": "1h",
+            },
+            account_balance=1000.0,
+            drawdown=0.0,
+            open_count=0,
+        )
+    assert excinfo.value.reason == "normalized_to_zero"
 
     exchange.create_order.assert_not_awaited()
     assert notify.await_count >= 1

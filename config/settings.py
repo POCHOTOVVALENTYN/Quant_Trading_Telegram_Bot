@@ -149,6 +149,9 @@ class Settings(BaseSettings):
     # Confirmation-based trailing (advances trailing only on confirmed bars)
     confirmed_trailing_enabled: bool = True
     confirmed_trailing_min_r: float = 1.0  # start confirmed trailing only after 1R
+    # When trade_mgmt_enabled=True, bar-based time stop is handled in TM (TIME_MGMT).
+    # Set True only if you need the legacy TimeExitSystem rules in parallel (not recommended).
+    legacy_time_exit_system_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

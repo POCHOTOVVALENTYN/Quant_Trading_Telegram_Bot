@@ -237,3 +237,38 @@ class TestBarsCalculation:
         )
         bars = engine._tm_bars_since_entry(trade, "15m")
         assert 19 <= bars <= 21
+
+
+class TestUnifiedDesiredStop:
+    def test_atr_trail_computes_for_long(self):
+        engine = _make_engine()
+        trade = _base_trade(
+            stop=96.0,
+            initial_stop=95.0,
+            entry=100.0,
+            invalidation_level=None,
+            setup_group="trend",
+        )
+        desired, src = engine._compute_unified_desired_stop(
+            trade, current_price=102.0, atr=2.0, adx=22.0, df_tf=None
+        )
+        assert desired >= 96.0
+        assert src in ("atr_trail", "unchanged", "confirmed_trail")
+
+    def test_break_even_level_subsumed_by_trail_at_1r(self):
+        """At 1R+ ADX, BE is merged; label may stay atr_trail if ATR trail is already tighter than BE."""
+        engine = _make_engine()
+        trade = _base_trade(
+            stop=95.0,
+            initial_stop=95.0,
+            entry=100.0,
+            be_moved=False,
+            invalidation_level=None,
+            setup_group="trend",
+        )
+        desired, src = engine._compute_unified_desired_stop(
+            trade, current_price=105.5, atr=2.0, adx=22.0, df_tf=None
+        )
+        be_px = RiskManager.break_even_price(100.0, "LONG", 0.0004)
+        assert desired >= be_px
+        assert src in ("atr_trail", "break_even", "atr_trail+be", "confirmed_trail")

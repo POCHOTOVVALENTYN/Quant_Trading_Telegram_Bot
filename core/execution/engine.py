@@ -31,8 +31,12 @@ logger = get_execution_logger()
 
 
 class EntryExecutionError(Exception):
-    def __init__(self, exchange_client, risk_manager: RiskManager, user_id: int):
-        self.user_id = user_id
+    """Entry path failure with a stable machine-readable reason for metrics and logs."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
 
 class ExecutionEngine:
     def __init__(self, exchange_client, risk_manager: RiskManager, user_id: Optional[int] = None):
@@ -47,8 +51,7 @@ class ExecutionEngine:
         self.risk_manager = risk_manager
         self.pyramiding = PyramidingSystem()
         self.time_exit = TimeExitSystem()
-        
-        self.active_trades: Dict[str, Dict[str, Any]] = {}
+
         self._symbol_locks: Dict[str, asyncio.Lock] = {}
         
         self._user_order_stream_task: Optional[asyncio.Task] = None
@@ -1279,7 +1282,7 @@ class ExecutionEngine:
                 self._entry_policy_activated = True
                 logger.info("✅ Новые правила входа активированы: max_open_trades=3, margin_per_trade=5%, pyramiding=OFF")
 
-            if not await self.risk_manager.check_trade_allowed(open_count, drawdown):
+            if not self.risk_manager.check_trade_allowed(open_count, drawdown):
                 logger.warning(f"🚫 [{symbol}] Риск-менеджер запретил вход (Drawdown/Limit)")
                 del self.active_trades[symbol]
                 return
@@ -1609,144 +1612,42 @@ class ExecutionEngine:
                         )
                         await session.commit()
                             
-            # Trade management cycle (invalidation, time stop, partial, confirmed trailing)
+            # Trade management cycle (invalidation, time stop, partial); стоп — ниже, unified pipeline
             try:
                 await self.evaluate_position_management(symbol, current_price, atr, adx=adx, df_tf=df_tf, cvd_val=cvd_val)
             except Exception as e:
                 logger.debug(f"[TM] {symbol}: management cycle error: {e}")
             if symbol not in self.active_trades:
                 return
+            trade = self.active_trades[symbol]
 
-            # Явный BE-триггер (отдельно от trailing):
-            # 1) reached 1R
-            # 2) подтверждение: ADX>=20 или breakout >= 0.5 ATR
-            if not trade.get("be_moved", False):
-                entry = float(trade.get("entry", 0.0) or 0.0)
-                initial_stop = float(trade.get("initial_stop", trade.get("stop", 0.0)) or 0.0)
-                side = str(trade.get("signal_type", "")).upper()
-                risk_distance = abs(entry - initial_stop)
-                atr_safe = max(float(atr or 0.0), 0.0)
-                breakout_dist = max(atr_safe * 0.5, entry * 0.0015 if entry > 0 else 0.0)
-                adx_ok = (adx is not None) and (float(adx) >= 20.0)
+            # Единый расчёт и одно обновление защитного стопа за тик (ATR + confirmed + BE).
+            try:
+                desired_stop, stop_src = self._compute_unified_desired_stop(
+                    trade, current_price, atr, adx, df_tf
+                )
+                await self._apply_unified_protective_stop(
+                    symbol, trade, desired_stop, stop_src, current_price
+                )
+            except Exception as e:
+                logger.warning(f"[UNIFIED_STOP] {symbol}: {e}")
 
-                if entry > 0 and risk_distance > 0 and side in ("LONG", "SHORT"):
-                    if side == "LONG":
-                        reached_1r = current_price >= (entry + risk_distance)
-                        breakout_ok = current_price >= (entry + breakout_dist)
-                    else:
-                        reached_1r = current_price <= (entry - risk_distance)
-                        breakout_ok = current_price <= (entry - breakout_dist)
-
-                    if reached_1r and (adx_ok or breakout_ok):
-                        be_buffer = entry * 0.0004  # 0.04% буфер на комиссию/проскальзывание
-                        be_stop = (entry + be_buffer) if side == "LONG" else (entry - be_buffer)
-                        current_stop = float(trade.get("stop", initial_stop) or initial_stop)
-                        improves = (side == "LONG" and be_stop > current_stop) or (side == "SHORT" and be_stop < current_stop)
-
-                        if improves:
-                            logger.info(
-                                f"🔰 [BE-TRIGGER] {symbol} {side}: "
-                                f"entry={entry:.6f} initial_stop={initial_stop:.6f} "
-                                f"current_stop={current_stop:.6f} -> BE={be_stop:.6f} | "
-                                f"price={current_price:.6f} 1R_target={'%.6f' % (entry + risk_distance if side == 'LONG' else entry - risk_distance)} "
-                                f"ADX={'%.1f' % float(adx) if adx else 'N/A'} adx_ok={adx_ok} breakout_ok={breakout_ok}"
-                            )
-                            await self._cancel_all_orders(symbol)
-                            tp_ref = trade.get("take_profit_live")
-                            sl_id, tp_id = await self._set_protective_orders(
-                                symbol, side, trade['current_size'], be_stop, tp_ref,
-                                position_id=trade.get("position_db_id"),
-                            )
-                            if sl_id:
-                                trade['stop'] = be_stop
-                                trade['stop_order_id'] = sl_id
-                                trade['be_moved'] = True
-                                if tp_id:
-                                    trade['tp_order_id'] = tp_id
-                                async with async_session() as session:
-                                    await session.execute(
-                                        update(PositionModel)
-                                        .where(PositionModel.id == trade["position_db_id"])
-                                        .values(stop_loss=float(be_stop))
-                                    )
-                                    await session.commit()
-                                logger.info(
-                                    f"✅ [BE-DONE] {symbol}: stop moved to BE={be_stop:.6f}, "
-                                    f"SL order={sl_id}, DB updated"
-                                )
-                                await self._db_persist_order(
-                                    position_id=trade.get("position_db_id"),
-                                    symbol=symbol,
-                                    exchange_order_id=str(sl_id) if sl_id else None,
-                                    client_order_id=None,
-                                    order_type="SL_BREAKEVEN_MOVE",
-                                    position_side=side,
-                                    price=float(be_stop),
-                                    size=float(trade['current_size']),
-                                    status=OrderStatus.OPEN,
-                                )
-                                await send_telegram_msg(
-                                    f"🟡 **БЕЗУБЫТОК: {symbol}**\n\n"
-                                    f"🛡 Стоп перенесён на: `{be_stop:.6f}`\n"
-                                    f"📈 Триггер: 1R + {'ADX ≥ 20' if adx_ok else 'Пробой'}\n"
-                                    f"📊 Цена: `{current_price:.6f}` | Risk dist: `{risk_distance:.6f}`"
-                                )
-                            else:
-                                logger.warning(
-                                    f"⚠️ [BE-FAIL] {symbol}: could not place BE stop order "
-                                    f"(target={be_stop:.6f})"
-                                )
-            
-            # Трейлинг-стоп (skip if ATR is invalid to prevent stop jump to current price)
-            if atr <= 0:
+            if symbol not in self.active_trades:
                 return
-            new_stop = self.risk_manager.calculate_trailing_stop(trade['stop'], current_price, atr, trade['signal_type'])
-            trail_delta = abs(new_stop - trade['stop'])
-            trail_threshold = current_price * 0.001
-            if trail_delta > trail_threshold:
-                old_stop = trade['stop']
-                pnl_vs_entry = ((current_price - trade['entry']) / trade['entry'] * 100) if trade.get('entry') else 0
-                logger.info(
-                    f"🔄 [TRAILING] {symbol} {trade['signal_type']}: "
-                    f"stop {old_stop:.6f} -> {new_stop:.6f} "
-                    f"(delta={trail_delta:.6f}, ATR={atr:.6f}) | "
-                    f"price={current_price:.6f} entry={trade.get('entry', 0):.6f} "
-                    f"PnL={pnl_vs_entry:+.2f}% BE={trade.get('be_moved', False)}"
-                )
-                await self._cancel_all_orders(symbol)
-                tp_ref = trade.get("take_profit_live")
-                sl_id, tp_id = await self._set_protective_orders(
-                    symbol, trade['signal_type'], trade['current_size'], new_stop, tp_ref,
-                    position_id=trade.get("position_db_id"),
-                )
-                trade['stop'] = new_stop; trade['stop_order_id'] = sl_id
-                if tp_id:
-                    trade['tp_order_id'] = tp_id
-                async with async_session() as session:
-                    await session.execute(update(PositionModel).where(PositionModel.id == trade["position_db_id"]).values(stop_loss=float(new_stop)))
-                    await session.commit()
-                await self._db_persist_order(
-                    position_id=trade.get("position_db_id"),
-                    symbol=symbol,
-                    exchange_order_id=str(sl_id) if sl_id else None,
-                    client_order_id=None,
-                    order_type="SL_TRAILING_UPDATE",
-                    position_side=str(trade.get("signal_type") or "LONG"),
-                    price=float(new_stop),
-                    size=float(trade['current_size']),
-                    status=OrderStatus.OPEN,
-                )
-            else:
-                if trail_delta > 0:
-                    logger.debug(
-                        f"[TRAILING] {symbol}: skip micro-move "
-                        f"delta={trail_delta:.8f} < threshold={trail_threshold:.8f}"
-                    )
+            trade = self.active_trades[symbol]
 
-            # Временной выход (M5: используем реальный ТФ сигнала вместо хардкода "1h")
-            trade_tf = trade.get('timeframe', '1h')
-            if self.time_exit.should_exit(trade['opened_at'], time.time(), trade_tf, current_price, trade['entry'], trade['signal_type']):
-                await self._close_position(symbol, reason="TIME")
+            # Legacy TimeExitSystem: только если TM выключен или явно включён параллельный режим.
+            trade_tf = trade.get("timeframe", "1h")
+            if not settings.trade_mgmt_enabled:
+                if self.time_exit.should_exit(trade["opened_at"], time.time(), trade_tf, current_price, trade["entry"], trade["signal_type"]):
+                    await self._close_position(symbol, reason="TIME")
+                    return
+            elif getattr(settings, "legacy_time_exit_system_enabled", False):
+                if self.time_exit.should_exit(trade["opened_at"], time.time(), trade_tf, current_price, trade["entry"], trade["signal_type"]):
+                    await self._close_position(symbol, reason="TIME")
+                    return
+
+            if atr <= 0:
                 return
 
             # Пирамидинг (Баг 3.2 — ATR-based пирамидинг Швагера)
@@ -1820,6 +1721,195 @@ class ExecutionEngine:
                 trade_mgmt_events.labels(action=action).inc()
         except Exception:
             pass
+
+    @staticmethod
+    def _better_stop_for_side(is_long: bool, a: float, b: float) -> float:
+        """Return the more protective stop: higher for LONG, lower for SHORT."""
+        if is_long:
+            return max(a, b)
+        return min(a, b)
+
+    def _compute_unified_desired_stop(
+        self,
+        trade: Dict[str, Any],
+        current_price: float,
+        atr: float,
+        adx: Optional[float],
+        df_tf: Any,
+    ) -> Tuple[float, str]:
+        """
+        Single computation for protective stop: ATR trailing (2.5x) + optional confirmed trail (2.0x)
+        + break-even when 1R and confirmation. No exchange calls.
+        """
+        side = str(trade.get("signal_type", "")).upper()
+        is_long = side == "LONG"
+        current_stop = float(trade.get("stop") or 0)
+        entry = float(trade.get("entry") or 0)
+        initial_stop = float(trade.get("initial_stop", trade.get("stop")) or 0)
+
+        if entry <= 0 or current_stop <= 0:
+            return current_stop, "unchanged"
+
+        atr_safe = float(atr or 0.0)
+        if atr_safe <= 0:
+            best = current_stop
+            src = "unchanged"
+        else:
+            best = self.risk_manager.calculate_trailing_stop(
+                current_stop, current_price, atr_safe, side, multiplier=2.5
+            )
+            src = "atr_trail"
+
+            current_r = self.risk_manager.current_r_multiple(entry, initial_stop, current_price, side)
+            if (
+                settings.confirmed_trailing_enabled
+                and trade.get("be_armed")
+                and current_r >= float(settings.confirmed_trailing_min_r)
+                and df_tf is not None
+                and not getattr(df_tf, "empty", True)
+                and len(df_tf) >= 2
+            ):
+                last_bar = df_tf.iloc[-2]
+                bar_ts = last_bar.get("timestamp", 0)
+                try:
+                    bar_ts = float(bar_ts.timestamp()) if hasattr(bar_ts, "timestamp") else float(bar_ts)
+                except Exception:
+                    bar_ts = 0
+                if bar_ts > float(trade.get("last_mgmt_bar_ts", 0)):
+                    bar_dict = {
+                        "open": float(last_bar.get("open", 0)),
+                        "close": float(last_bar.get("close", 0)),
+                        "high": float(last_bar.get("high", 0)),
+                        "low": float(last_bar.get("low", 0)),
+                    }
+                    if self.risk_manager.favorable_bar_confirmed(bar_dict, side):
+                        trail_conf = self.risk_manager.calculate_trailing_stop(
+                            current_stop, current_price, atr_safe, side, multiplier=2.0
+                        )
+                        best = self._better_stop_for_side(is_long, best, trail_conf)
+                        src = "confirmed_trail"
+                    trade["last_mgmt_bar_ts"] = bar_ts
+
+        if not trade.get("be_moved", False):
+            risk_distance = abs(entry - initial_stop)
+            atr_for_breakout = max(atr_safe, 0.0)
+            breakout_dist = max(atr_for_breakout * 0.5, entry * 0.0015 if entry > 0 else 0.0)
+            adx_ok = (adx is not None) and (float(adx) >= 20.0)
+            if entry > 0 and risk_distance > 0 and side in ("LONG", "SHORT"):
+                if side == "LONG":
+                    reached_1r = current_price >= (entry + risk_distance)
+                    breakout_ok = current_price >= (entry + breakout_dist)
+                else:
+                    reached_1r = current_price <= (entry - risk_distance)
+                    breakout_ok = current_price <= (entry - breakout_dist)
+                if reached_1r and (adx_ok or breakout_ok):
+                    be_stop = float(
+                        RiskManager.break_even_price(entry, side, float(getattr(settings, "be_buffer_pct", 0.0004) or 0.0004))
+                    )
+                    new_best = self._better_stop_for_side(is_long, best, be_stop)
+                    if abs(new_best - best) > 1e-12:
+                        best = new_best
+                        src = "break_even" if src == "unchanged" else f"{src}+be"
+
+        return best, src
+
+    async def _apply_unified_protective_stop(
+        self,
+        symbol: str,
+        trade: Dict[str, Any],
+        desired_stop: float,
+        source: str,
+        current_price: float,
+    ) -> None:
+        """At most one cancel+replace per tick if the desired stop improves enough."""
+        if symbol not in self.active_trades:
+            return
+        side = str(trade.get("signal_type", "")).upper()
+        is_long = side == "LONG"
+        current_stop = float(trade.get("stop") or 0)
+        if current_stop <= 0:
+            return
+
+        threshold = max(current_price * 0.001, 1e-12)
+        delta = abs(desired_stop - current_stop)
+        if delta <= threshold:
+            return
+
+        improves = (is_long and desired_stop > current_stop) or ((not is_long) and desired_stop < current_stop)
+        if not improves:
+            return
+
+        be_before = bool(trade.get("be_moved", False))
+        is_be = "break_even" in source or "+be" in source
+
+        logger.info(
+            f"🎯 [UNIFIED_STOP] {symbol} {side}: {current_stop:.6f} -> {desired_stop:.6f} "
+            f"(src={source}, Δ={delta:.6f})"
+        )
+        await self._cancel_all_orders(symbol)
+        tp_ref = trade.get("take_profit_live")
+        sl_id, tp_id = await self._set_protective_orders(
+            symbol, side, trade["current_size"], desired_stop, tp_ref,
+            position_id=trade.get("position_db_id"),
+        )
+        if not sl_id:
+            logger.warning(f"⚠️ [UNIFIED_STOP] {symbol}: protective SL not placed at {desired_stop:.6f}")
+            return
+
+        trade["stop"] = desired_stop
+        trade["stop_order_id"] = sl_id
+        if tp_id:
+            trade["tp_order_id"] = tp_id
+
+        if is_be and not be_before:
+            trade["be_moved"] = True
+        elif not trade.get("be_moved"):
+            # Трейлинг мог подтянуть стоп выше/ниже чистого BE — считаем безубыток достигнутым.
+            entry_px = float(trade.get("entry") or 0)
+            if entry_px > 0:
+                buf = float(getattr(settings, "be_buffer_pct", 0.0004) or 0.0004)
+                be_px = float(RiskManager.break_even_price(entry_px, side, buffer_pct=buf))
+                if is_long and desired_stop >= be_px - 1e-10:
+                    trade["be_moved"] = True
+                elif (not is_long) and desired_stop <= be_px + 1e-10:
+                    trade["be_moved"] = True
+
+        async with async_session() as session:
+            await session.execute(
+                update(PositionModel)
+                .where(PositionModel.id == trade["position_db_id"])
+                .values(stop_loss=float(desired_stop))
+            )
+            await session.commit()
+
+        if "confirmed" in source:
+            self._tm_record("confirmed_trailing")
+
+        order_type = "SL_TRAILING_UPDATE"
+        if is_be and not be_before:
+            order_type = "SL_BREAKEVEN_MOVE"
+        elif "confirmed" in source:
+            order_type = "SL_TRAILING_CONFIRMED"
+
+        await self._db_persist_order(
+            position_id=trade.get("position_db_id"),
+            symbol=symbol,
+            exchange_order_id=str(sl_id) if sl_id else None,
+            client_order_id=None,
+            order_type=order_type,
+            position_side=side,
+            price=float(desired_stop),
+            size=float(trade["current_size"]),
+            status=OrderStatus.OPEN,
+        )
+
+        if is_be and not be_before:
+            await send_telegram_msg(
+                f"🟡 **БЕЗУБЫТОК: {symbol}**\n\n"
+                f"🛡 Стоп: `{desired_stop:.6f}`\n"
+                f"📊 Источник: unified ({source})\n"
+                f"💹 Цена: `{current_price:.6f}`"
+            )
 
     def _tm_bars_since_entry(self, trade: dict, timeframe: str) -> int:
         from core.strategies.strategies import get_timeframe_seconds
@@ -1997,8 +2087,9 @@ class ExecutionEngine:
         cvd_val: float = 0.0,
     ) -> None:
         """
-        Main trade management cycle: called every minute alongside trailing.
-        Checks invalidation, time stop, BE, partial reduce, confirmed trailing.
+        Main trade management cycle: called every minute before unified stop update.
+        Handles invalidation exit, TM time stop, BE arming, partial reduce, vol/CVD heuristics.
+        ATR / confirmed / BE stop placement: `_compute_unified_desired_stop` + `_apply_unified_protective_stop`.
         """
         if not getattr(settings, "trade_mgmt_enabled", True):
             return
@@ -2088,62 +2179,7 @@ class ExecutionEngine:
         if not trade.get("partial_done") and current_r >= settings.partial_trigger_r:
             await self._tm_partial_reduce(symbol, trade, current_r)
 
-        # 5. Confirmed trailing: only tighten trailing stop on favorable confirmed bars
-        if (
-            settings.confirmed_trailing_enabled
-            and trade.get("be_armed")
-            and current_r >= settings.confirmed_trailing_min_r
-            and df_tf is not None
-            and not df_tf.empty
-            and len(df_tf) >= 2
-        ):
-            last_bar = df_tf.iloc[-2]
-            bar_ts = last_bar.get("timestamp", 0)
-            try:
-                bar_ts = float(bar_ts.timestamp()) if hasattr(bar_ts, "timestamp") else float(bar_ts)
-            except Exception:
-                bar_ts = 0
-            if bar_ts > float(trade.get("last_mgmt_bar_ts", 0)):
-                bar_dict = {
-                    "open": float(last_bar.get("open", 0)),
-                    "close": float(last_bar.get("close", 0)),
-                    "high": float(last_bar.get("high", 0)),
-                    "low": float(last_bar.get("low", 0)),
-                }
-                if self.risk_manager.favorable_bar_confirmed(bar_dict, side):
-                    tighter_mult = 2.0
-                    new_trail = self.risk_manager.calculate_trailing_stop(
-                        float(trade.get("stop", 0)), current_price, atr, side, multiplier=tighter_mult
-                    )
-                    current_stop = float(trade.get("stop", 0))
-                    improved = (side == "LONG" and new_trail > current_stop) or (side == "SHORT" and new_trail < current_stop)
-                    if improved:
-                        delta = abs(new_trail - current_stop)
-                        threshold = current_price * 0.001
-                        if delta > threshold:
-                            logger.info(
-                                f"📈 [TM-CONFIRMED-TRAIL] {symbol}: "
-                                f"stop {current_stop:.6f} -> {new_trail:.6f} (R={current_r:.2f})"
-                            )
-                            await self._cancel_all_orders(symbol)
-                            tp_ref = trade.get("take_profit_live")
-                            sl_id, tp_id = await self._set_protective_orders(
-                                symbol, side, trade['current_size'], new_trail, tp_ref,
-                                position_id=trade.get("position_db_id"),
-                            )
-                            trade['stop'] = new_trail
-                            trade['stop_order_id'] = sl_id
-                            if tp_id:
-                                trade['tp_order_id'] = tp_id
-                            async with async_session() as session:
-                                await session.execute(
-                                    update(PositionModel)
-                                    .where(PositionModel.id == trade["position_db_id"])
-                                    .values(stop_loss=float(new_trail))
-                                )
-                                await session.commit()
-                            self._tm_record("confirmed_trailing")
-                trade["last_mgmt_bar_ts"] = bar_ts
+        # Confirmed trailing + ATR trail + BE: см. _compute_unified_desired_stop / schedule_update_positions
 
     async def _close_position(self, symbol: str, reason: str = "AUTO"):
         if symbol not in self.active_trades: return
