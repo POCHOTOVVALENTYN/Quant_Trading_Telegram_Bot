@@ -604,7 +604,7 @@ class ExecutionEngine:
                 await session.commit()
             try:
                 bal, _, _ = await self.get_account_metrics()
-                self.risk_manager.record_closed_pnl(pnl_usd, bal)
+                await self.risk_manager.record_closed_pnl(pnl_usd, bal)
             except Exception:
                 pass
         except Exception as e:
@@ -1265,18 +1265,23 @@ class ExecutionEngine:
             if symbol in self.active_trades:
                 logger.info(f"⏭ [{symbol}] Уже в работе (лочед-чек). Пропускаю.")
                 return
+                
+            # Резервируем монету, чтобы параллельные тики по другим стратегиям не вошли сюда
+            self.active_trades[symbol] = {"stage": "PENDING_EXECUTION", "ts": time.time()}
 
             # Новые правила размера/лимита входов применяем только когда бот полностью "плоский".
             if settings.apply_new_entry_rules_after_flat and not self._entry_policy_activated:
                 _, _, live_open_count = await self.get_account_metrics()
                 if live_open_count > 0:
                     logger.info(f"⏳ [{symbol}] Новые правила входа активируются после закрытия текущих позиций ({live_open_count} открыто).")
+                    del self.active_trades[symbol]
                     return
                 self._entry_policy_activated = True
                 logger.info("✅ Новые правила входа активированы: max_open_trades=3, margin_per_trade=5%, pyramiding=OFF")
 
-            if not self.risk_manager.check_trade_allowed(open_count, drawdown):
+            if not await self.risk_manager.check_trade_allowed(open_count, drawdown):
                 logger.warning(f"🚫 [{symbol}] Риск-менеджер запретил вход (Drawdown/Limit)")
+                del self.active_trades[symbol]
                 return
 
             # Idempotency (по ID сигнала в БД)
@@ -1285,12 +1290,13 @@ class ExecutionEngine:
                 res = await session.execute(stmt); await session.commit()
                 if res.rowcount == 0:
                     logger.info(f"⏭ [{symbol}] Сигнал {signal_id} уже обрабатывается или исполнен.")
+                    del self.active_trades[symbol]
                     return
 
             try:
                 await self._prepare_private_ops(ctx=f"execute_signal({symbol})")
                 # 3. Расчет параметров входа
-                entry_price = float(signal_data['entry_price'])
+                entry_price = float(signal_data.get('entry_price', 0))
                 raw_atr = signal_data.get('atr', 0.0)
                 safe_atr = float(raw_atr) if raw_atr and not (isinstance(raw_atr, float) and raw_atr != raw_atr) else 0.0
                 if safe_atr <= 0:
@@ -1350,10 +1356,11 @@ class ExecutionEngine:
                         best_price = await self._normalize_price(symbol, best_price)
                         
                         logger.info(f"🕸 [LIMIT CHASE] Попытка {attempt+1}: Лимитка {side} {symbol} по {best_price}")
+                        
                         temp_order = await self._with_time_sync_retry(
                             lambda: self.exchange.create_order(
                                 symbol=symbol, type='limit', side=side, amount=remaining_size, price=best_price,
-                                params={'timeInForce': 'GTX', 'postOnly': True}
+                                params={'timeInForce': 'GTX', 'postOnly': True} if settings.use_post_only else {}
                             ),
                             ctx=f"create_limit_entry({symbol})"
                         )
@@ -1516,7 +1523,6 @@ class ExecutionEngine:
                 async with async_session() as session:
                     await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED"))
                     await session.commit()
-
                 _strat = signal_data.get("strategy", "?")
                 _tp_val = signal_data.get("take_profit")
                 _tp_str = f"{float(_tp_val):.4f}" if _tp_val else "—"
@@ -1558,12 +1564,19 @@ class ExecutionEngine:
                 )
 
             except Exception as e:
+                # Если мы зафейлили вход, освобождаем монету
+                if symbol in self.active_trades and self.active_trades[symbol].get("stage") == "PENDING_EXECUTION":
+                    del self.active_trades[symbol]
+                
                 reason = e.reason if isinstance(e, EntryExecutionError) else "unexpected_entry_error"
                 self._record_entry_failure(reason)
                 logger.error(f"❌ Entry Error {symbol} [{reason}]: {e}", exc_info=True)
+
+                # Помечаем сигнал как FAILED в БД
                 async with async_session() as session:
-                    await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="FAILED"))
+                    await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="FAILED", comment=str(e)[:200]))
                     await session.commit()
+
                 try:
                     await send_telegram_msg(
                         f"❌ **ОШИБКА ВХОДА**\n\n"
@@ -1573,28 +1586,28 @@ class ExecutionEngine:
                     )
                 except Exception:
                     pass
+                raise e
 
     async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None, cvd_val: float = 0.0):
         """Вызывается каждую минуту для трейлинга и trade management."""
         async with self._get_symbol_lock(symbol):
-            async with self._get_symbol_lock(symbol):
-                async with self._trades_lock: # Блокируем чтение
-                    if symbol not in self.active_trades: return
-                    trade = self.active_trades[symbol]
-                    trade['current_price'] = current_price
-                    live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
-                    if live_size <= 1e-8:
-                        await self._close_position(symbol, reason="EXTERNAL")
-                        return
-                    if abs(live_size - float(trade.get("current_size", 0.0))) > 1e-8:
-                        trade["current_size"] = live_size
-                        async with async_session() as session:
-                            await session.execute(
-                                update(PositionModel)
-                                .where(PositionModel.id == trade["position_db_id"])
-                                .values(size=float(live_size))
-                                )
-                            await session.commit()
+            async with self._trades_lock: # Блокируем чтение
+                if symbol not in self.active_trades: return
+                trade = self.active_trades[symbol]
+                trade['current_price'] = current_price
+                live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
+                if live_size <= 1e-8:
+                    await self._close_position(symbol, reason="EXTERNAL")
+                    return
+                if abs(live_size - float(trade.get("current_size", 0.0))) > 1e-8:
+                    trade["current_size"] = live_size
+                    async with async_session() as session:
+                        await session.execute(
+                            update(PositionModel)
+                            .where(PositionModel.id == trade["position_db_id"])
+                            .values(size=float(live_size))
+                        )
+                        await session.commit()
                             
             # Trade management cycle (invalidation, time stop, partial, confirmed trailing)
             try:
@@ -2223,7 +2236,7 @@ class ExecutionEngine:
                 )
                 try:
                     bal, _, _ = await self.get_account_metrics()
-                    self.risk_manager.record_closed_pnl(pnl_usd, bal)
+                    await self.risk_manager.record_closed_pnl(pnl_usd, bal)
                 except Exception:
                     pass
 

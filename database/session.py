@@ -10,7 +10,9 @@ engine = create_async_engine(
     settings.database_url, 
     echo=False,
     pool_size=10, 
-    max_overflow=20
+    max_overflow=20,
+    pool_pre_ping=True,       # Проверка живого соединения перед использованием
+    pool_recycle=3600         # Сброс старых соединений раз в час
 )
 
 # Shared async session factory

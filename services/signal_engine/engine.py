@@ -399,6 +399,8 @@ class TradingOrchestrator:
     async def start(self):
         if self.ml_classifier:
             await self.ml_classifier.start()
+            
+        await self.risk_manager.initialize_redis()
 
         logger.info(f"Запуск Торгового Движка (8 стратегий, Schwager-based ensemble)...")
         await self._prefetch_history()
@@ -579,11 +581,15 @@ class TradingOrchestrator:
         try:
             await asyncio.sleep(0.05)
             self.processed_candles += 1
-            df = self._calculate_indicators(df)
+            
+            # Оптимизация: Считаем все индикаторы только для сигнальных ТФ
+            is_signal_tf = timeframe in TRADING_SIGNAL_TIMEFRAMES
+            df = self._calculate_indicators(df, minimal=not is_signal_tf)
+            
             df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
             self.market_history[symbol][timeframe] = df
 
-            if timeframe not in TRADING_SIGNAL_TIMEFRAMES:
+            if not is_signal_tf:
                 return
 
             # Сигналы только по закрытым свечам
@@ -592,8 +598,11 @@ class TradingOrchestrator:
             df_eval = df.iloc[:-1].copy()
             if len(df_eval) < 60:
                 return
-            df_eval = self._calculate_indicators(df_eval)
-            df_eval['funding_rate'] = self.funding_rates.get(symbol, 0.0)
+            # df_eval уже содержит индикаторы из df выше 
+            # (но только если мы не в 1m)
+            # Если мы в signal timeframe, df уже полностью посчитан.
+            # Если нет - мы уже вышли выше.
+            # Так что df_eval уже готов.
 
             eval_candle_ts = df_eval.iloc[-1]['timestamp']
             try:
@@ -1176,7 +1185,13 @@ class TradingOrchestrator:
                     f"⚠️ Ошибка: {str(e)[:200]}"
                 )
 
-    def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _calculate_indicators(self, df: pd.DataFrame, minimal: bool = False) -> pd.DataFrame:
+        if minimal:
+            df['atr'] = calculate_atr(df, period=14)
+            adx_df = calculate_adx(df, period=14)
+            df['adx'] = adx_df['adx']
+            return df
+            
         df['ema9'] = calculate_ema(df['close'], 9)
         df['ema20'] = calculate_ema(df['close'], 20)
         df['ema30'] = calculate_ema(df['close'], 30)

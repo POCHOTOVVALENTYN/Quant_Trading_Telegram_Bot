@@ -1,7 +1,7 @@
 import time
 import logging
 from typing import Dict, Any
-import redis
+import redis.asyncio as aioredis
 from config.settings import settings
 
 _rm_logger = logging.getLogger("risk_manager")
@@ -15,20 +15,13 @@ class RiskManager:
 
         # Daily PnL tracking — auto-stop at 5% daily drawdown
         self.max_daily_drawdown_pct = 0.05
-        try:
-            self.redis = redis.Redis.from_url(settings.redis_url, decode_responses=True)
-            self.redis.ping()
-        except Exception as e:
-            _rm_logger.warning(f"Could not connect to Redis for RiskManager Daily PnL: {e}")
-            self.redis = None
+        self.redis: Optional[aioredis.Redis] = None
 
         self._daily_pnl_usd = 0.0
         self._daily_start_balance = 0.0
         self._daily_reset_ts = 0.0
         self._daily_halted = False
         
-        self._load_from_redis()
-
         # Streak-based adaptive risk
         self._consecutive_losses = 0
         self._consecutive_wins = 0
@@ -42,44 +35,54 @@ class RiskManager:
         }
         self.max_correlated_same_direction = 2
 
-    def _load_from_redis(self):
+    async def initialize_redis(self):
+        """Asynchronous initialization of Redis connection."""
+        try:
+            self.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            await self.redis.ping()
+            await self._load_from_redis()
+        except Exception as e:
+            _rm_logger.warning(f"Could not connect to Redis for RiskManager Daily PnL: {e}")
+            self.redis = None
+
+    async def _load_from_redis(self):
         if not self.redis: return
         try:
-            pnl = self.redis.get("rm_daily_pnl")
+            pnl = await self.redis.get("rm_daily_pnl")
             if pnl is not None: self._daily_pnl_usd = float(pnl)
             
-            bal = self.redis.get("rm_daily_bal")
+            bal = await self.redis.get("rm_daily_bal")
             if bal is not None: self._daily_start_balance = float(bal)
             
-            ts = self.redis.get("rm_daily_ts")
+            ts = await self.redis.get("rm_daily_ts")
             if ts is not None: self._daily_reset_ts = float(ts)
             
-            halt = self.redis.get("rm_daily_halt")
+            halt = await self.redis.get("rm_daily_halt")
             if halt is not None: self._daily_halted = (halt == "1")
             
-            w = self.redis.get("rm_cons_wins")
+            w = await self.redis.get("rm_cons_wins")
             if w is not None: self._consecutive_wins = int(w)
             
-            l = self.redis.get("rm_cons_loss")
+            l = await self.redis.get("rm_cons_loss")
             if l is not None: self._consecutive_losses = int(l)
         except Exception as e:
             _rm_logger.warning(f"Failed to load RiskManager state from Redis: {e}")
 
-    def _save_to_redis(self):
+    async def _save_to_redis(self):
         if not self.redis: return
         try:
-            self.redis.set("rm_daily_pnl", self._daily_pnl_usd)
-            self.redis.set("rm_daily_bal", self._daily_start_balance)
-            self.redis.set("rm_daily_ts", self._daily_reset_ts)
-            self.redis.set("rm_daily_halt", "1" if self._daily_halted else "0")
-            self.redis.set("rm_cons_wins", self._consecutive_wins)
-            self.redis.set("rm_cons_loss", self._consecutive_losses)
+            await self.redis.set("rm_daily_pnl", self._daily_pnl_usd)
+            await self.redis.set("rm_daily_bal", self._daily_start_balance)
+            await self.redis.set("rm_daily_ts", self._daily_reset_ts)
+            await self.redis.set("rm_daily_halt", "1" if self._daily_halted else "0")
+            await self.redis.set("rm_cons_wins", self._consecutive_wins)
+            await self.redis.set("rm_cons_loss", self._consecutive_losses)
         except Exception as e:
             _rm_logger.warning(f"Failed to save RiskManager state to Redis: {e}")
 
-    def record_closed_pnl(self, pnl_usd: float, account_balance: float) -> None:
+    async def record_closed_pnl(self, pnl_usd: float, account_balance: float) -> None:
         """Call on every closed trade. Tracks cumulative daily PnL, streaks, and halts if limit breached."""
-        self._ensure_daily_reset(account_balance)
+        await self._ensure_daily_reset(account_balance)
         self._daily_pnl_usd += pnl_usd
 
         # Streak tracking (Schwager-style adaptive risk)
@@ -117,10 +120,10 @@ class RiskManager:
                     f"({dd_pct*100:.1f}% >= {self.max_daily_drawdown_pct*100:.0f}%)"
                 )
                 
-        self._save_to_redis()
+        await self._save_to_redis()
 
-    def is_daily_halted(self) -> bool:
-        self._ensure_daily_reset(0)
+    async def is_daily_halted(self) -> bool:
+        await self._ensure_daily_reset(0)
         return self._daily_halted
 
     def get_daily_stats(self) -> dict:
@@ -135,7 +138,7 @@ class RiskManager:
             "streak_risk_mult": self._streak_risk_mult,
         }
 
-    def _ensure_daily_reset(self, account_balance: float) -> None:
+    async def _ensure_daily_reset(self, account_balance: float) -> None:
         now = time.time()
         if now - self._daily_reset_ts > 86400:
             self._daily_pnl_usd = 0.0
@@ -145,7 +148,7 @@ class RiskManager:
             self._consecutive_losses = 0
             if account_balance > 0:
                 self._daily_start_balance = account_balance
-            self._save_to_redis()
+            await self._save_to_redis()
 
     def check_listing_days(self, listing_date_str: str, min_days: int) -> bool:
         """Проверка даты листинга (Защита от новых монет)"""
@@ -157,7 +160,10 @@ class RiskManager:
         except Exception:
             return True # Если не смогли определить, пропускаем (или наоборот блокируем - на выбор)
 
-    def check_trade_allowed(self, current_open_trades: int, current_drawdown_pct: float) -> bool:
+    async def check_trade_allowed(self, current_open_trades: int, current_drawdown_pct: float) -> bool:
+        if await self.is_daily_halted():
+            return False
+
         if current_open_trades >= self.max_open_trades:
             return False
             
@@ -285,8 +291,17 @@ class RiskManager:
         elif ml_prob >= 0.55: ml_scale = 0.25 # Quarter size
         else:                ml_scale = 0.1  # Minimal (shadow/test)
         
-        position_size *= ml_scale
+        # Kelly Criterion integration (Phase 4C)
+        # If ml_prob is high, we can use Kelly to refine the margin
+        kelly_margin = self.kelly_position_size(account_balance, ml_prob)
+        # We take the minimum between our fixed strategy risk and Kelly for stability
+        margin_usd = min(margin_usd, kelly_margin)
+        
+        notional_usd = margin_usd * max(1, int(settings.leverage))
+        position_size = (notional_usd / entry_price) * ml_scale if entry_price > 0 else 0.0
+        
         result["ml_scale"] = ml_scale
+        result["kelly_limit_usd"] = kelly_margin
 
         if market_context:
             ctx_mult = self.context_risk_multiplier(
