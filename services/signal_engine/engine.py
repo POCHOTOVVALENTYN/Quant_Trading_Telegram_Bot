@@ -651,6 +651,8 @@ class TradingOrchestrator:
                     )
                     return
 
+            candidate_signals = []
+
             for strategy in self.strategies:
                 allowed_tfs = _STRATEGY_TIMEFRAME_MATRIX.get(type(strategy))
                 if allowed_tfs is not None and timeframe not in allowed_tfs:
@@ -1155,12 +1157,26 @@ class TradingOrchestrator:
                     )
                     await send_telegram_msg(status_msg)
 
-                    if settings.is_trading_enabled:
-                        asyncio.create_task(
-                            self._execute_with_retry(enrich_signal, cached_balance, cached_drawdown, live_open_count)
-                        )
-                    else:
-                        logger.info(f"Trading disabled. Signal {symbol} saved but not executed.")
+                    # Add to candidates for priority sorting
+                    candidate_signals.append({
+                        "signal": enrich_signal,
+                        "prio": score * ai_prediction.get('win_prob', 0.5)
+                    })
+
+            # EXECUTION: Sort by priority and execute the best one for this symbol/candle
+            if candidate_signals:
+                candidate_signals.sort(key=lambda x: x['prio'], reverse=True)
+                winner = candidate_signals[0]['signal']
+                
+                if len(candidate_signals) > 1:
+                    logger.info(f"[{symbol}] Priority selection: {winner['strategy']} won over {[s['signal']['strategy'] for s in candidate_signals[1:]]}")
+
+                if settings.is_trading_enabled:
+                    asyncio.create_task(
+                        self._execute_with_retry(winner, cached_balance, cached_drawdown, live_open_count)
+                    )
+                else:
+                    logger.info(f"Trading disabled. Signal {symbol} saved but not executed.")
         except Exception as e:
             self.errors_count += 1
             app_logger.error(f"Error in signal loop for {symbol}: {e}\n{traceback.format_exc()}")
@@ -1213,6 +1229,8 @@ class TradingOrchestrator:
         df['-di'] = adx_df['-di']
 
         df['williams_r'] = calculate_williams_r(df, period=14)
+        df['vol_ma20'] = df['volume'].rolling(20).mean()
+        df['roc10'] = df['close'].pct_change(10)
 
         return df
 

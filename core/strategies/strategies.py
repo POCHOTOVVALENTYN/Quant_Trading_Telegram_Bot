@@ -32,11 +32,16 @@ class StrategyDonchian(BaseStrategy):
             return None
 
         # Подтверждение: close выше/ниже уровня + закрытие свечи за пределами канала
-        if close > highest:
+        # Schwager: Пробой должен сопровождаться ростом объёма (подтверждение силы)
+        vol_v = df.iloc[-1].get('volume', 0)
+        vol_ma = df.iloc[-1].get('vol_ma20', 0)
+        vol_ok = vol_v > vol_ma if vol_ma > 0 else True
+
+        if close > highest and vol_ok:
             strength = (close - highest) / atr
             conf = min(0.9, 0.6 + strength * 0.1)
             return {"strategy": "Donchian", "signal": "LONG", "entry_price": close, "confidence": conf}
-        elif close < lowest:
+        elif close < lowest and vol_ok:
             strength = (lowest - close) / atr
             conf = min(0.9, 0.6 + strength * 0.1)
             return {"strategy": "Donchian", "signal": "SHORT", "entry_price": close, "confidence": conf}
@@ -78,6 +83,12 @@ class StrategyWRD(BaseStrategy):
         if body_ratio < 0.5:
             return None
 
+        # ЭВОЛЮЦИЯ: Проверка ускорения (Range > 1.2 * Avg Range последних 3)
+        prev_ranges = (df['high'] - df['low']).iloc[-4:-1]
+        avg_prev_range = prev_ranges.mean()
+        if bar_range < (1.2 * avg_prev_range):
+             return None
+
         conf = min(0.85, 0.6 + (bar_range / atr - self.atr_multiplier) * 0.1)
 
         if body > 0:
@@ -117,18 +128,26 @@ class StrategyMATrend(BaseStrategy):
         is_cross_down = fast_prev >= slow_prev and fast_curr < slow_curr
 
         # Фильтр глобального тренда: если EMA200 есть, используем для подтверждения
+        # ШВАГЕР: Добавляем фильтр силы тренда ADX > 25 и RSI (не перекуплен/перепродан)
+        adx = last_row.get('adx', 0)
+        rsi = last_row.get('RSI_fast', 50)
+        
         has_global = global_col in df.columns and not pd.isna(last_row.get(global_col))
         if has_global:
             global_v = last_row[global_col]
             if is_cross_up and last_row['close'] > fast_curr and last_row['close'] > global_v:
-                return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.75}
+                if adx > 25 and rsi < 70:
+                    return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.80}
             elif is_cross_down and last_row['close'] < fast_curr and last_row['close'] < global_v:
-                return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.75}
+                if adx > 25 and rsi > 30:
+                    return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.80}
         else:
             if is_cross_up and last_row['close'] > fast_curr:
-                return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.70}
+                if adx > 20:
+                    return {"strategy": "MA Trend", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.70}
             elif is_cross_down and last_row['close'] < fast_curr:
-                return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.70}
+                if adx > 20:
+                    return {"strategy": "MA Trend", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.70}
         return None
 
 
@@ -159,9 +178,14 @@ class StrategyPullback(BaseStrategy):
         global_trend_up = last_row['close'] > global_v
         global_trend_down = last_row['close'] < global_v
 
-        if global_trend_up and last_row['close'] > ma_v and prev_row['low'] <= prev_row[ma_col] and last_row['close'] > prev_row['close']:
+        # ШВАГЕР: Откат должен быть на пониженном объёме (profit taking, а не разворот)
+        vol_curr = last_row.get('volume', 0)
+        vol_avg = last_row.get('vol_ma20', 1)
+        vol_confirm = vol_curr < (vol_avg * 1.5) # Не аномальный объём против тренда
+
+        if global_trend_up and last_row['close'] > ma_v and prev_row['low'] <= prev_row[ma_col] and last_row['close'] > prev_row['close'] and vol_confirm:
             return {"strategy": "Pullback", "signal": "LONG", "entry_price": last_row['close'], "confidence": 0.75}
-        elif global_trend_down and last_row['close'] < ma_v and prev_row['high'] >= prev_row[ma_col] and last_row['close'] < prev_row['close']:
+        elif global_trend_down and last_row['close'] < ma_v and prev_row['high'] >= prev_row[ma_col] and last_row['close'] < prev_row['close'] and vol_confirm:
             return {"strategy": "Pullback", "signal": "SHORT", "entry_price": last_row['close'], "confidence": 0.75}
         return None
 
@@ -190,15 +214,21 @@ class StrategyVolContraction(BaseStrategy):
         if atr_recent >= (atr_baseline * self.contraction_ratio):
             return None
 
-        # Сжатие обнаружено — ищем пробой
+        # Сжатие обнаружено — ищем пробой с ростом объема
         highest = df['high'].iloc[-self.lookback:-1].max()
         lowest = df['low'].iloc[-self.lookback:-1].min()
-        curr_close = df.iloc[-1]['close']
+        curr_row = df.iloc[-1]
+        curr_close = curr_row['close']
+        
+        # Schwager: Прорыв из консолидации должен идти на "взрыве" объема
+        vol_curr = curr_row.get('volume', 0)
+        vol_ma = curr_row.get('vol_ma20', 0)
+        vol_spike = (vol_curr > vol_ma * 1.3) if vol_ma > 0 else True
 
-        if curr_close > highest:
-            return {"strategy": "Vol Contraction", "signal": "LONG", "entry_price": curr_close, "confidence": 0.80}
-        elif curr_close < lowest:
-            return {"strategy": "Vol Contraction", "signal": "SHORT", "entry_price": curr_close, "confidence": 0.80}
+        if curr_close > highest and vol_spike:
+            return {"strategy": "Vol Contraction", "signal": "LONG", "entry_price": curr_close, "confidence": 0.85}
+        elif curr_close < lowest and vol_spike:
+            return {"strategy": "Vol Contraction", "signal": "SHORT", "entry_price": curr_close, "confidence": 0.85}
         return None
 
 
@@ -226,15 +256,20 @@ class StrategyWideRangeReversal(BaseStrategy):
 
         body_ratio = abs(prev['close'] - prev['open']) / prev_range
 
+        # Проверка объема: разворот должен идти на повышенном интересе
+        vol_curr = curr.get('volume', 0)
+        vol_prev = prev.get('volume', 0)
+        vol_ok = vol_curr > vol_prev * 0.8 # Разворотная свеча не должна быть "пустой"
+
         # Бычий разворот: prev закрылся у low, curr закрылся выше prev high
         if prev['close'] < (prev['low'] + prev_range * 0.25) and body_ratio > 0.4:
-            if curr['close'] > prev['high']:
-                return {"strategy": "WRD Reversal", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.80}
+            if curr['close'] > prev['high'] and vol_ok:
+                return {"strategy": "WRD Reversal", "signal": "LONG", "entry_price": curr['close'], "confidence": 0.82}
 
         # Медвежий разворот: prev закрылся у high, curr закрылся ниже prev low
         if prev['close'] > (prev['high'] - prev_range * 0.25) and body_ratio > 0.4:
-            if curr['close'] < prev['low']:
-                return {"strategy": "WRD Reversal", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.80}
+            if curr['close'] < prev['low'] and vol_ok:
+                return {"strategy": "WRD Reversal", "signal": "SHORT", "entry_price": curr['close'], "confidence": 0.82}
         return None
 
 

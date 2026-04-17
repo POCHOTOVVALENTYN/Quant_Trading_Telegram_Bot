@@ -546,13 +546,21 @@ class ExecutionEngine:
             logger.warning(f"⚠️ [AUDIT] fetch_my_trades: {e}")
             return 0.0, 0.0
         total = 0.0
+        total_fees = 0.0
         for t in raw or []:
             info = t.get("info") or {}
             rp = info.get("realizedPnl") or info.get("realizedProfit")
+            
+            # Binance realizedPnl already includes fees, but let's log fees separately for audit
+            fee = t.get("fee", {})
+            if fee:
+                total_fees += float(fee.get("cost", 0.0))
+                
             try:
                 total += float(rp or 0)
             except (TypeError, ValueError):
                 pass
+        
         entry = float(trade.get("entry", 0) or 0)
         size = float(trade.get("current_size", 0) or 0)
         notional = abs(entry * size) if entry and size else 0.0

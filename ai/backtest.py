@@ -50,6 +50,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['adx'] = adx_df['adx']
 
     df['williams_r'] = calculate_williams_r(df, period=14)
+    df['vol_ma20'] = df['volume'].rolling(20).mean()
+    df['roc10'] = df['close'].pct_change(10)
     df['funding_rate'] = 0.0
 
     return df
@@ -168,6 +170,7 @@ class BacktestEngine:
             if pd.isna(atr) or atr <= 0:
                 continue
 
+            candidates = []
             for strategy in self.strategies:
                 signal = strategy.evaluate(eval_df)
                 if not signal:
@@ -192,6 +195,20 @@ class BacktestEngine:
                     self.signals_filtered += 1
                     continue
 
+                candidates.append({
+                    "signal": signal,
+                    "score": score,
+                    "win_prob": ai['win_prob'],
+                    "prio": score * ai['win_prob']
+                })
+
+            if candidates:
+                candidates.sort(key=lambda x: x['prio'], reverse=True)
+                top = candidates[0]
+                signal = top['signal']
+                score = top['score']
+                win_prob = top['win_prob']
+
                 # Execute trade
                 entry = bar['close']
                 direction = signal['signal']
@@ -213,10 +230,9 @@ class BacktestEngine:
                     "strategy": signal['strategy'],
                     "size": size,
                     "score": score,
-                    "win_prob": ai['win_prob'],
+                    "win_prob": win_prob,
                     "bar_idx": i,
                 }
-                break
 
         return self._compile_results()
 
