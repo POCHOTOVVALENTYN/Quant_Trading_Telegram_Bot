@@ -1,0 +1,114 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Account Balance (USDT)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "trading_balance_usdt", "legendFormat": "Balance"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "thresholds": {"steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 10}, {"color": "green", "value": 50}]}}}
+    },
+    {
+      "title": "Drawdown %",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "trading_drawdown_pct", "legendFormat": "Drawdown"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"color": "green", "value": 0}, {"color": "yellow", "value": 3}, {"color": "red", "value": 5}]}}}
+    },
+    {
+      "title": "Open Positions",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "trading_open_positions", "legendFormat": "Positions"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"color": "green", "value": 0}, {"color": "yellow", "value": 2}, {"color": "red", "value": 3}]}}}
+    },
+    {
+      "title": "Balance Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [{"expr": "trading_balance_usdt", "legendFormat": "Balance USDT"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "custom": {"fillOpacity": 10, "lineWidth": 2}}}
+    },
+    {
+      "title": "PnL Distribution (per trade)",
+      "type": "histogram",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "trading_pnl_per_trade_usdt_bucket", "legendFormat": "{{le}}"}]
+    },
+    {
+      "title": "Signals Generated (rate/5m)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {"expr": "sum(rate(trading_signals_generated_total[5m])) by (strategy)", "legendFormat": "{{strategy}}"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 20}}}
+    },
+    {
+      "title": "Signals Filtered (rate/5m)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        {"expr": "sum(rate(trading_signals_filtered_total[5m])) by (filter_name)", "legendFormat": "{{filter_name}}"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"fillOpacity": 20}}}
+    },
+    {
+      "title": "Signal Score Distribution",
+      "type": "histogram",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [{"expr": "trading_signal_score_bucket", "legendFormat": "{{le}}"}]
+    },
+    {
+      "title": "AI Latency (ms)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, rate(trading_ai_latency_ms_bucket[5m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, rate(trading_ai_latency_ms_bucket[5m]))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, rate(trading_ai_latency_ms_bucket[5m]))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "title": "Accepted vs Filtered Signals",
+      "type": "piechart",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 28},
+      "targets": [
+        {"expr": "sum(trading_signals_accepted_total)", "legendFormat": "Accepted"},
+        {"expr": "sum(trading_signals_filtered_total)", "legendFormat": "Filtered"}
+      ]
+    },
+    {
+      "title": "Drawdown Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 28},
+      "targets": [{"expr": "trading_drawdown_pct", "legendFormat": "Drawdown %"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "custom": {"fillOpacity": 15}, "thresholds": {"steps": [{"color": "green", "value": 0}, {"color": "red", "value": 5}]}}}
+    },
+    {
+      "title": "Trades Opened / Closed (rate/1h)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 28},
+      "targets": [
+        {"expr": "sum(rate(trading_trades_opened_total[1h]))", "legendFormat": "Opened"},
+        {"expr": "sum(rate(trading_trades_closed_total[1h]))", "legendFormat": "Closed"}
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["trading", "bot"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Trading Bot Overview",
+  "uid": "trading-bot-overview",
+  "version": 1
+}

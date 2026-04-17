@@ -148,3 +148,54 @@ class AIDecisionLog(Base):
     win_prob = Column(Float, nullable=True)
     latency_ms = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class SignalDecisionLog(Base):
+    """Every signal attempt with all filter outcomes for post-analysis and ML training."""
+    __tablename__ = "signal_decision_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    timeframe = Column(String, nullable=False)
+    strategy = Column(String, nullable=False)
+    direction = Column(String, nullable=False)
+    entry_price = Column(Float, nullable=True)
+    adx = Column(Float, nullable=True)
+    atr = Column(Float, nullable=True)
+    rsi = Column(Float, nullable=True)
+    volume_ratio = Column(Float, nullable=True)
+    funding_rate = Column(Float, nullable=True)
+    regime = Column(String, nullable=True)
+    daily_bias = Column(String, nullable=True)
+    volatility_regime = Column(String, nullable=True)
+    funding_regime = Column(String, nullable=True)
+    session = Column(String, nullable=True)
+    score = Column(Float, nullable=True)
+    win_prob = Column(Float, nullable=True)
+    ai_recommendation = Column(String, nullable=True)
+    ai_confidence = Column(Float, nullable=True)
+    # Filter pass/fail flags (True = passed, False = blocked)
+    f_daily_filter = Column(Boolean, nullable=True)
+    f_regime_router = Column(Boolean, nullable=True)
+    f_adx_threshold = Column(Boolean, nullable=True)
+    f_cooldown = Column(Boolean, nullable=True)
+    f_daily_halt = Column(Boolean, nullable=True)
+    f_duplicate_pos = Column(Boolean, nullable=True)
+    f_side_filter = Column(Boolean, nullable=True)
+    f_expiry = Column(Boolean, nullable=True)
+    f_listing_age = Column(Boolean, nullable=True)
+    f_max_positions = Column(Boolean, nullable=True)
+    f_correlation = Column(Boolean, nullable=True)
+    f_funding_rate = Column(Boolean, nullable=True)
+    f_volatility = Column(Boolean, nullable=True)
+    f_score = Column(Boolean, nullable=True)
+    f_ai_prob = Column(Boolean, nullable=True)
+    f_ext_ai = Column(Boolean, nullable=True)
+    f_ml_validator = Column(Boolean, nullable=True)
+    ml_confidence = Column(Float, nullable=True)
+    outcome = Column(String, nullable=True)  # ACCEPTED / FILTERED:<reason> / ERROR
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_sdl_symbol_ts", "symbol", "created_at"),
+    )

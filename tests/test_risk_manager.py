@@ -32,6 +32,28 @@ def test_calculate_position_size():
     # stop_loss_price теперь не влияет на размер, но некорректная цена входа должна давать 0
     assert rm.calculate_position_size(10000, 0, 100) == 0.0
 
+def test_assess_trade_feasibility_below_min_notional():
+    rm = RiskManager(max_risk_pct=0.02)
+    result = rm.assess_trade_feasibility(
+        account_balance=10,
+        entry_price=100,
+        stop_loss_price=95,
+        market_info={"limits": {"cost": {"min": 100}, "amount": {"min": 0.001}}},
+    )
+    assert result["feasible"] is False
+    assert result["reason"] == "below_min_notional"
+
+def test_assess_trade_feasibility_below_min_amount():
+    rm = RiskManager(max_risk_pct=0.02)
+    result = rm.assess_trade_feasibility(
+        account_balance=10,
+        entry_price=100000,
+        stop_loss_price=99000,
+        market_info={"limits": {"cost": {"min": 1}, "amount": {"min": 0.01}}},
+    )
+    assert result["feasible"] is False
+    assert result["reason"] == "below_min_amount"
+
 def test_calculate_atr_stop_long():
     rm = RiskManager()
     # No ATR -> use settings.sl_long_pct (default 0.003 or similar)

@@ -18,6 +18,7 @@ logger.add(os.path.join(log_dir, "trade.log"), filter=lambda record: "trade" in 
 logger.add(os.path.join(log_dir, "error.log"), level="ERROR", rotation="10 MB")
 logger.add(os.path.join(log_dir, "signal.log"), filter=lambda record: "signal" in record["extra"], rotation="10 MB")
 logger.add(os.path.join(log_dir, "execution.log"), filter=lambda record: "execution" in record["extra"], rotation="10 MB")
+logger.add(os.path.join(log_dir, "market_data.log"), filter=lambda record: "market_data" in record["extra"], rotation="10 MB")
 
 # Utility functions to log specific events easily
 def get_trade_logger():
@@ -28,6 +29,9 @@ def get_signal_logger():
 
 def get_execution_logger():
     return logger.bind(execution=True)
+
+def get_market_data_logger():
+    return logger.bind(market_data=True)
 
 # default export
 app_logger = logger

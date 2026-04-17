@@ -1,5 +1,6 @@
 import time
 import logging
+from typing import Dict, Any
 
 _rm_logger = logging.getLogger("risk_manager")
 
@@ -17,6 +18,11 @@ class RiskManager:
         self._daily_reset_ts = 0.0
         self._daily_halted = False
 
+        # Streak-based adaptive risk
+        self._consecutive_losses = 0
+        self._consecutive_wins = 0
+        self._streak_risk_mult = 1.0
+
         # Correlation groups — max 2 positions in same direction per cluster
         self.correlation_groups = {
             "BTC_cluster": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "LTC/USDT", "BCH/USDT"],
@@ -26,9 +32,36 @@ class RiskManager:
         self.max_correlated_same_direction = 2
 
     def record_closed_pnl(self, pnl_usd: float, account_balance: float) -> None:
-        """Call on every closed trade. Tracks cumulative daily PnL and halts if limit breached."""
+        """Call on every closed trade. Tracks cumulative daily PnL, streaks, and halts if limit breached."""
         self._ensure_daily_reset(account_balance)
         self._daily_pnl_usd += pnl_usd
+
+        # Streak tracking (Schwager-style adaptive risk)
+        if pnl_usd > 0:
+            self._consecutive_wins += 1
+            self._consecutive_losses = 0
+        elif pnl_usd < 0:
+            self._consecutive_losses += 1
+            self._consecutive_wins = 0
+
+        # Risk multiplier: reduce after 3+ losses, cautiously increase after 3+ wins
+        if self._consecutive_losses >= 5:
+            self._streak_risk_mult = 0.25
+        elif self._consecutive_losses >= 3:
+            self._streak_risk_mult = 0.5
+        elif self._consecutive_wins >= 5:
+            self._streak_risk_mult = 1.25
+        elif self._consecutive_wins >= 3:
+            self._streak_risk_mult = 1.1
+        else:
+            self._streak_risk_mult = 1.0
+
+        if self._streak_risk_mult != 1.0:
+            _rm_logger.info(
+                f"STREAK: W={self._consecutive_wins} L={self._consecutive_losses} "
+                f"-> risk_mult={self._streak_risk_mult:.2f}"
+            )
+
         if self._daily_start_balance > 0:
             dd_pct = abs(min(0.0, self._daily_pnl_usd)) / self._daily_start_balance
             if dd_pct >= self.max_daily_drawdown_pct:
@@ -49,6 +82,9 @@ class RiskManager:
             "daily_pnl_usd": round(self._daily_pnl_usd, 2),
             "daily_drawdown_pct": round(dd * 100, 2),
             "halted": self._daily_halted,
+            "consecutive_wins": self._consecutive_wins,
+            "consecutive_losses": self._consecutive_losses,
+            "streak_risk_mult": self._streak_risk_mult,
         }
 
     def _ensure_daily_reset(self, account_balance: float) -> None:
@@ -96,6 +132,27 @@ class RiskManager:
         return True
 
     @staticmethod
+    def context_risk_multiplier(
+        session: str = "US",
+        volatility: str = "NORMAL",
+        funding: str = "NORMAL",
+        symbol: str = "",
+    ) -> float:
+        """
+        Multiplicative risk scaler based on market context.
+        Returns a factor in (0, 1] to apply to position size.
+        """
+        from config.settings import settings
+        mult = 1.0
+        if session == "ASIA" and "BTC" not in symbol:
+            mult *= float(getattr(settings, "session_asia_risk_mult", 0.5))
+        if volatility == "HIGH":
+            mult *= float(getattr(settings, "session_volatility_high_risk_mult", 0.7))
+        if funding in ("EXTREME_LONG", "EXTREME_SHORT"):
+            mult *= float(getattr(settings, "session_funding_extreme_risk_mult", 0.8))
+        return max(0.1, mult)
+
+    @staticmethod
     def kelly_position_size(account_balance: float, win_prob: float, avg_win_pct: float = 1.5, avg_loss_pct: float = 1.0) -> float:
         """
         R1: Kelly Criterion для оптимального размера позиции.
@@ -132,6 +189,89 @@ class RiskManager:
         volatility_ratio = last_row['atr'] / last_row['close']
         return volatility_ratio >= threshold
 
+    def assess_trade_feasibility(
+        self,
+        account_balance: float,
+        entry_price: float,
+        stop_loss_price: float,
+        market_info: dict = None,
+        market_context: dict = None,
+    ) -> Dict[str, Any]:
+        """
+        Returns sizing feasibility details before the execution stage.
+        """
+        from config.settings import settings
+
+        result: Dict[str, Any] = {
+            "feasible": False,
+            "reason": "unknown",
+            "margin_usd": 0.0,
+            "notional_usd": 0.0,
+            "position_size": 0.0,
+            "min_notional": 0.0,
+            "min_amount": 0.0,
+        }
+        if account_balance <= 0 or entry_price <= 0:
+            result["reason"] = "invalid_account_or_entry"
+            return result
+
+        fixed_usdt = float(getattr(settings, "position_size_usdt", 0.0) or 0.0)
+        margin_usd = min(fixed_usdt, account_balance) if fixed_usdt > 0 else account_balance * settings.per_trade_margin_pct
+        notional_usd = margin_usd * max(1, int(settings.leverage))
+        position_size = notional_usd / entry_price if entry_price > 0 else 0.0
+
+        if market_context:
+            ctx_mult = self.context_risk_multiplier(
+                session=market_context.get("session", "US"),
+                volatility=market_context.get("volatility", "NORMAL"),
+                funding=market_context.get("funding", "NORMAL"),
+                symbol=market_context.get("symbol", ""),
+            )
+            position_size *= ctx_mult
+
+        if self._streak_risk_mult != 1.0:
+            position_size *= self._streak_risk_mult
+
+        result.update(
+            {
+                "margin_usd": float(margin_usd),
+                "notional_usd": float(notional_usd),
+                "position_size": float(max(0.0, position_size)),
+            }
+        )
+
+        limits = (market_info or {}).get("limits", {}) if market_info else {}
+        try:
+            result["min_notional"] = float(limits.get("cost", {}).get("min", 0) or 0)
+        except Exception:
+            result["min_notional"] = 0.0
+        try:
+            result["min_amount"] = float(limits.get("amount", {}).get("min", 0) or 0)
+        except Exception:
+            result["min_amount"] = 0.0
+
+        if result["min_notional"] > 0 and notional_usd < result["min_notional"]:
+            result["reason"] = "below_min_notional"
+            return result
+        if result["min_amount"] > 0 and position_size < result["min_amount"]:
+            result["reason"] = "below_min_amount"
+            return result
+
+        if stop_loss_price > 0 and entry_price > 0:
+            sl_distance_pct = abs(entry_price - stop_loss_price) / entry_price
+            if sl_distance_pct > 0:
+                round_trip_fee = (settings.maker_fee_pct + settings.taker_fee_pct) * 2
+                tp_distance_pct = sl_distance_pct * 2.0
+                net_r = (tp_distance_pct - round_trip_fee) / (sl_distance_pct + round_trip_fee)
+                if net_r < settings.min_r_multiple_after_fees:
+                    result["reason"] = "below_min_r_after_fees"
+                    result["net_r"] = float(net_r)
+                    return result
+
+        result["feasible"] = result["position_size"] > 0
+        result["reason"] = "ok" if result["feasible"] else "zero_position_size"
+        return result
+
     def calculate_usd_stop(self, entry_price: float, risk_usd: float, amount: float, signal_type: str = "LONG") -> float:
         """Расчет цены стопа исходя из допустимого убытка в USD для заданного объема"""
         if amount <= 0: return entry_price * 0.9 if signal_type == "LONG" else entry_price * 1.1
@@ -142,26 +282,98 @@ class RiskManager:
         else:
             return entry_price + price_diff
 
-    def calculate_position_size(self, account_balance: float, entry_price: float, stop_loss_price: float) -> float:
+    def calculate_position_size(
+        self,
+        account_balance: float,
+        entry_price: float,
+        stop_loss_price: float,
+        market_info: dict = None,
+        market_context: dict = None,
+    ) -> float:
         """
-        Новый режим размера позиции:
-        - на одну сделку выделяем фиксированную долю маржи (settings.per_trade_margin_pct)
-        - размер позиции считается из выделенной маржи и плеча
+        Position sizing with micro-account adaptation:
+        - Checks minimum notional for the symbol
+        - Commission-aware R-multiple check
+        - Forces max_open_trades=1 when below micro threshold
         """
         from config.settings import settings
 
         if account_balance <= 0 or entry_price <= 0:
             return 0.0
 
-        # Приоритет 1: ручной фиксированный объём (USDT) из Telegram/runtime.
-        fixed_usdt = float(getattr(settings, "position_size_usdt", 0.0) or 0.0)
-        if fixed_usdt > 0:
-            margin_usd = min(fixed_usdt, account_balance)
-        else:
-            margin_usd = account_balance * settings.per_trade_margin_pct
-        notional_usd = margin_usd * max(1, int(settings.leverage))
-        position_size = notional_usd / entry_price
-        return max(0.0, position_size)
+        # Micro-account auto-adaptation
+        if settings.micro_account_mode and account_balance < settings.micro_account_threshold:
+            if self.max_open_trades > 1:
+                self.max_open_trades = 1
+                _rm_logger.info(f"MICRO MODE: balance={account_balance:.2f} < {settings.micro_account_threshold}, forcing max_open_trades=1")
+
+        feasibility = self.assess_trade_feasibility(
+            account_balance=account_balance,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            market_info=market_info,
+            market_context=market_context,
+        )
+        if not feasibility["feasible"]:
+            reason = feasibility.get("reason", "unknown")
+            if reason == "below_min_notional":
+                _rm_logger.warning(
+                    f"SKIP: notional {feasibility['notional_usd']:.2f} < min_notional {feasibility['min_notional']:.2f}"
+                )
+            elif reason == "below_min_amount":
+                _rm_logger.warning(
+                    f"SKIP: size {feasibility['position_size']:.6f} < min_amount {feasibility['min_amount']:.6f}"
+                )
+            elif reason == "below_min_r_after_fees":
+                _rm_logger.info(
+                    f"SKIP: net R-multiple {feasibility.get('net_r', 0.0):.2f} < {settings.min_r_multiple_after_fees} "
+                    f"(fees eat too much at this size)"
+                )
+            return 0.0
+        return max(0.0, float(feasibility["position_size"]))
+
+    @staticmethod
+    def break_even_price(entry_price: float, signal_type: str, buffer_pct: float = 0.0004) -> float:
+        """BE price with a small buffer to cover commissions/slippage."""
+        buf = entry_price * abs(buffer_pct)
+        return (entry_price + buf) if signal_type.upper() == "LONG" else (entry_price - buf)
+
+    @staticmethod
+    def risk_unit(entry_price: float, initial_stop: float) -> float:
+        """1R distance (always positive)."""
+        return abs(entry_price - initial_stop) if entry_price > 0 and initial_stop > 0 else 0.0
+
+    @staticmethod
+    def current_r_multiple(entry_price: float, initial_stop: float, current_price: float, signal_type: str) -> float:
+        """Current R-multiple (positive = favorable, negative = adverse)."""
+        r = RiskManager.risk_unit(entry_price, initial_stop)
+        if r <= 0:
+            return 0.0
+        if signal_type.upper() == "LONG":
+            return (current_price - entry_price) / r
+        return (entry_price - current_price) / r
+
+    @staticmethod
+    def favorable_bar_confirmed(bar: dict, signal_type: str) -> bool:
+        """A bar is 'confirmed favorable' if it closes in the trade direction with body > 50% of range."""
+        o, c, h, l = float(bar.get("open", 0)), float(bar.get("close", 0)), float(bar.get("high", 0)), float(bar.get("low", 0))
+        bar_range = h - l
+        if bar_range <= 0:
+            return False
+        body = abs(c - o)
+        if body / bar_range < 0.5:
+            return False
+        return (c > o) if signal_type.upper() == "LONG" else (c < o)
+
+    @staticmethod
+    def adverse_bar_is_strong(bar: dict, signal_type: str, atr: float) -> bool:
+        """A bar is 'strongly adverse' if it closes against trade with body > 0.8 ATR."""
+        o, c = float(bar.get("open", 0)), float(bar.get("close", 0))
+        if atr <= 0:
+            return False
+        body = abs(c - o)
+        direction_ok = (c < o) if signal_type.upper() == "LONG" else (c > o)
+        return direction_ok and body > 0.8 * atr
 
     @staticmethod
     def calculate_atr_stop(entry_price: float, atr: float, signal_type: str = "LONG", multiplier: float = 2.0) -> float:

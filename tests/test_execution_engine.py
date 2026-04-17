@@ -138,6 +138,41 @@ async def test_execute_signal_emergency_close_when_sl_not_created(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_signal_normalized_to_zero_fails_before_order_placement(monkeypatch):
+    exchange = MagicMock()
+    exchange.create_order = AsyncMock()
+    engine = ExecutionEngine(exchange_client=exchange, risk_manager=RiskManager())
+    engine._entry_policy_activated = True
+    engine._set_leverage_best_effort = AsyncMock()
+    engine._normalize_amount = AsyncMock(return_value=0.0)
+    engine.risk_manager.check_trade_allowed = MagicMock(return_value=True)
+    engine.risk_manager.calculate_atr_stop = MagicMock(return_value=95.0)
+
+    session_factory = _SessionFactory()
+    notify = AsyncMock()
+    monkeypatch.setattr("core.execution.engine.async_session", session_factory)
+    monkeypatch.setattr("core.execution.engine.send_telegram_msg", notify)
+
+    await engine.execute_signal(
+        {
+            "id": 1,
+            "symbol": "BTC/USDT",
+            "signal": "LONG",
+            "entry_price": 100.0,
+            "atr": 2.0,
+            "take_profit": 110.0,
+            "timeframe": "1h",
+        },
+        account_balance=1000.0,
+        drawdown=0.0,
+        open_count=0,
+    )
+
+    exchange.create_order.assert_not_awaited()
+    assert notify.await_count >= 1
+
+
+@pytest.mark.asyncio
 async def test_execute_signal_waits_until_flat_before_new_policy(monkeypatch):
     from config.settings import settings
 

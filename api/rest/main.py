@@ -102,14 +102,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app_logger.error(f"Не удалось загрузить markets: {e}")
     
-    # 1. Загрузка списка символов для мониторинга
-    # Возвращаем ПОЛНЫЙ список после оптимизации CPU
-    desired_symbols = [
+    # Startup validation: verify API key permissions and balance
+    startup_balance = 0.0
+    try:
+        balance_info = await exchange_client.fetch_balance()
+        startup_balance = float(balance_info.get("total", {}).get("USDT", 0) or 0)
+        app_logger.info(f"✅ API key valid. Futures balance: {startup_balance:.2f} USDT")
+
+        if startup_balance <= 0 and not settings.testnet:
+            app_logger.warning(
+                "⚠️ ZERO BALANCE on real account — bot will run but cannot open positions"
+            )
+    except Exception as e:
+        err_msg = str(e)
+        if "APIError" in err_msg or "AuthenticationError" in err_msg:
+            app_logger.error(f"❌ API KEY VALIDATION FAILED: {err_msg[:200]}")
+        else:
+            app_logger.warning(f"⚠️ Balance check failed (non-fatal): {err_msg[:200]}")
+
+    # Symbol list — reduced for micro accounts
+    desired_symbols_full = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
         "DOGE/USDT", "ADA/USDT", "TRX/USDT", "LINK/USDT", "DOT/USDT",
-        "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT", 
+        "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT",
         "MATIC/USDT", "FIL/USDT", "ICP/USDT", "APT/USDT"
     ]
+    micro_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+    is_micro = settings.micro_account_mode and startup_balance < settings.micro_account_threshold
+    desired_symbols = micro_symbols if is_micro else desired_symbols_full
+    if is_micro:
+        app_logger.info(
+            f"💰 MICRO-ACCOUNT MODE: balance={startup_balance:.2f} < {settings.micro_account_threshold}, "
+            f"reduced to {len(desired_symbols)} liquid symbols"
+        )
     
     # K2: Фильтрация — оставляем только символы, реально доступные на бирже
     available_markets = set(exchange_client.markets.keys()) if exchange_client.markets else set()
@@ -187,6 +212,14 @@ async def lifespan(app: FastAPI):
                 # Вывод текущих метрик для отладки
                 bal, dd, count = await execution_engine.get_account_metrics()
                 app_logger.info(f"📊 [MONITOR] Balance={bal:.2f} USDT | Drawdown={dd*100:.2f}% | Positions={count}")
+                # Update Prometheus gauges
+                try:
+                    from utils.metrics import balance_gauge, drawdown_gauge, open_positions_gauge
+                    balance_gauge.set(bal)
+                    drawdown_gauge.set(dd * 100)
+                    open_positions_gauge.set(count)
+                except Exception:
+                    pass
             except Exception as e:
                 app_logger.error(f"Periodic reconcile error: {e}")
     reconcile_task = asyncio.create_task(_reconcile_loop())
@@ -225,6 +258,14 @@ app = FastAPI(title="Quant Trading System API", lifespan=lifespan)
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "service": "trading-engine"}
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    from utils.metrics import get_metrics_response
+    from fastapi.responses import Response
+    body, content_type = get_metrics_response()
+    return Response(content=body, media_type=content_type)
 
 @app.get("/api/v1/status")
 async def get_system_status():
@@ -513,11 +554,20 @@ async def get_trade_history(limit: int = 20):
 
     items = []
     for r in rows:
+        pnl_usd = float(r.pnl_usd or 0.0)
+        pnl_pct = float(r.pnl_pct or 0.0)
+        notional_usd = 0.0
+        try:
+            if abs(pnl_pct) > 1e-12:
+                notional_usd = abs(pnl_usd) / (abs(pnl_pct) / 100.0)
+        except Exception:
+            notional_usd = 0.0
         items.append({
             "id": r.id,
             "symbol": r.symbol,
-            "pnl_usd": float(r.pnl_usd or 0.0),
-            "pnl_pct": float(r.pnl_pct or 0.0),
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "notional_usd": float(notional_usd or 0.0),
             "leverage": int(r.leverage or 1),
             "reason": r.reason or "AUTO",
             "closed_at": r.closed_at.isoformat() if r.closed_at else None,
@@ -531,6 +581,7 @@ async def get_orders_audit(limit: int = 100, symbol: Optional[str] = None):
     from database.session import async_session
     from database.models.all_models import Order as OrderModel
     from sqlalchemy import select, desc
+    from datetime import datetime, timedelta
 
     clamped = max(1, min(500, int(limit)))
     async with async_session() as session:
@@ -570,70 +621,45 @@ async def get_active_trades():
     if not orchestrator:
         return {"trades": {}}
 
-    # Принудительная синхронизация перед отдачей в UI:
-    # убирает "призрачные" позиции в Telegram/дашборде после внешних закрытий.
-    try:
-        await orchestrator.execution.reconcile_full()
-    except Exception as e:
-        app_logger.warning(f"⚠️ reconcile_full before /trades failed: {e}")
-
-    trades = orchestrator.execution.active_trades.copy()
+    trades = {k: dict(v) for k, v in orchestrator.execution.active_trades.items()}
     if not trades:
         return {"trades": {}}
-    
-    try:
-        # Пытаемся получить текущие цены
-        symbols = list(trades.keys())
-        # Используем fetch_ticker если fetch_tickers не вернул данные
-        tickers = {}
-        try:
-            app_logger.info(f"📊 [DEBUG] Запрос цен для: {symbols}")
-            # Используем ГЛОБАЛЬНЫЙ exchange_client
-            tickers = await exchange_client.fetch_tickers(symbols)
-            app_logger.info(f"📊 [DEBUG] Получено тикеров: {list(tickers.keys())}")
-        except Exception as te:
-            app_logger.warning(f"Ошибка fetch_tickers, пробуем по одному: {te}")
-            for s in symbols:
-                try:
-                    tickers[s] = await exchange_client.fetch_ticker(s)
-                except:
-                    continue
 
-        for symbol, info in trades.items():
-            # Пробуем найти тикер (учитываем, что CCXT может добавить :USDT для фьючерсов)
-            ticker = tickers.get(symbol) or tickers.get(symbol + ":USDT")
-            
-            if ticker and (ticker.get('last') or ticker.get('close')):
-                curr_price = ticker.get('last') or ticker.get('close')
-                info['current_price'] = curr_price
-                
-                # Расчет PnL
-                entry = info.get('entry', 0)
-                size = float(info.get('current_size') or 0)
-                is_long = str(info.get('signal_type', '')).upper() == "LONG"
-                
-                if entry > 0 and size > 0:
-                    if is_long:
-                        pnl_usd = (curr_price - entry) * size
-                        pnl_pct = ((curr_price / entry) - 1) * 100
-                    else:
-                        pnl_usd = (entry - curr_price) * size
-                        pnl_pct = ((entry / curr_price) - 1) * 100
-                        
-                    info['pnl_usd'] = pnl_usd
-                    info['pnl_pct'] = pnl_pct
-                else:
-                    info['pnl_usd'] = 0.0
-                    info['pnl_pct'] = 0.0
+    for symbol, info in trades.items():
+        curr_price = info.get('current_price')
+        entry = float(info.get('entry', 0) or 0)
+        size = float(info.get('current_size', 0) or 0)
+        is_long = str(info.get('signal_type', '')).upper() == "LONG"
+
+        if curr_price and entry > 0 and size > 0:
+            if is_long:
+                info['pnl_usd'] = (curr_price - entry) * size
+                info['pnl_pct'] = ((curr_price / entry) - 1) * 100
             else:
-                # Если цену так и не нашли
-                info['current_price'] = None
-                info['pnl_usd'] = 0.0
-                info['pnl_pct'] = 0.0
+                info['pnl_usd'] = (entry - curr_price) * size
+                info['pnl_pct'] = ((entry / curr_price) - 1) * 100
+        else:
+            info.setdefault('pnl_usd', 0.0)
+            info.setdefault('pnl_pct', 0.0)
 
-    except Exception as e:
-        app_logger.error(f"Глобальная ошибка при расчете PnL: {e}")
-        
+    # Non-blocking background price refresh — fire-and-forget
+    if exchange_client:
+        async def _bg_refresh():
+            try:
+                symbols = list(trades.keys())
+                tickers = await asyncio.wait_for(
+                    exchange_client.fetch_tickers(symbols), timeout=4.0
+                )
+                for sym in symbols:
+                    t = tickers.get(sym) or tickers.get(sym + ":USDT")
+                    if t and (t.get('last') or t.get('close')):
+                        p = t.get('last') or t.get('close')
+                        if sym in orchestrator.execution.active_trades:
+                            orchestrator.execution.active_trades[sym]['current_price'] = p
+            except Exception:
+                pass
+        asyncio.create_task(_bg_refresh())
+
     return {"trades": trades}
 
 @app.post("/api/v1/trades/close/{symbol}")
@@ -686,27 +712,62 @@ async def get_positions():
 
 @app.get("/api/v1/signals")
 async def get_recent_signals(limit: int = 30):
-    """Recent signals from DB."""
+    """Recent signals from DB.
+
+    Primary source: accepted `signals`.
+    Fallback source (when accepted stream is quiet): `signal_decision_logs`.
+    """
     from database.session import async_session as _async_session
-    from database.models.all_models import Signal
-    from sqlalchemy import select
+    from database.models.all_models import Signal, SignalDecisionLog
+    from sqlalchemy import select, desc
+    from datetime import datetime, timedelta
 
     async with _async_session() as session:
         stmt = select(Signal).order_by(Signal.id.desc()).limit(min(limit, 100))
         rows = (await session.execute(stmt)).scalars().all()
-    return [
-        {
-            "id": r.id, "symbol": r.symbol,
-            "signal_type": r.signal_type.value if hasattr(r.signal_type, 'value') else str(r.signal_type),
-            "strategy": r.strategy, "confidence": r.confidence,
-            "win_prob": r.win_prob, "expected_return": r.expected_return,
-            "risk": r.risk, "status": r.status,
-            "entry_price": r.entry_price, "stop_loss": r.stop_loss,
-            "take_profit": r.take_profit,
-            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-        }
-        for r in rows
-    ]
+        fresh_cutoff = datetime.utcnow() - timedelta(hours=6)
+        has_fresh_signal = any((r.timestamp and r.timestamp >= fresh_cutoff) for r in rows)
+        if rows and has_fresh_signal:
+            return [
+                {
+                    "id": r.id, "symbol": r.symbol,
+                    "signal_type": r.signal_type.value if hasattr(r.signal_type, 'value') else str(r.signal_type),
+                    "strategy": r.strategy, "confidence": r.confidence,
+                    "win_prob": r.win_prob, "expected_return": r.expected_return,
+                    "risk": r.risk, "status": r.status,
+                    "entry_price": r.entry_price, "stop_loss": r.stop_loss,
+                    "take_profit": r.take_profit,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                    "source": "signals",
+                }
+                for r in rows
+            ]
+
+        sdl_stmt = (
+            select(SignalDecisionLog)
+            .order_by(desc(SignalDecisionLog.created_at))
+            .limit(min(limit, 100))
+        )
+        sdl_rows = (await session.execute(sdl_stmt)).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "symbol": r.symbol,
+                "signal_type": r.direction,
+                "strategy": r.strategy,
+                "confidence": r.score,
+                "win_prob": r.win_prob,
+                "expected_return": None,
+                "risk": None,
+                "status": r.outcome or "UNKNOWN",
+                "entry_price": r.entry_price,
+                "stop_loss": None,
+                "take_profit": None,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "source": "decision_logs",
+            }
+            for r in sdl_rows
+        ]
 
 
 @app.get("/api/v1/ai/status")
@@ -771,6 +832,108 @@ async def get_ai_decisions_summary():
             "avg_latency_ms": round(float(avg_lat or 0), 0),
         }
     return summary
+
+
+@app.get("/api/v1/decision-logs")
+async def get_decision_logs(limit: int = 100, symbol: Optional[str] = None, outcome: Optional[str] = None):
+    """Signal decision journal — every filter step for post-analysis."""
+    from database.session import async_session as _async_session
+    from database.models.all_models import SignalDecisionLog
+    from sqlalchemy import select, desc
+
+    clamped = max(1, min(500, int(limit)))
+    async with _async_session() as session:
+        q = select(SignalDecisionLog).order_by(desc(SignalDecisionLog.created_at))
+        if symbol:
+            q = q.where(SignalDecisionLog.symbol == symbol)
+        if outcome:
+            q = q.where(SignalDecisionLog.outcome.ilike(f"%{outcome}%"))
+        q = q.limit(clamped)
+        rows = (await session.execute(q)).scalars().all()
+
+    items = []
+    for r in rows:
+        items.append({
+            "id": r.id, "symbol": r.symbol, "timeframe": r.timeframe,
+            "strategy": r.strategy, "direction": r.direction,
+            "entry_price": r.entry_price,
+            "adx": r.adx, "atr": r.atr, "rsi": r.rsi,
+            "volume_ratio": r.volume_ratio, "funding_rate": r.funding_rate,
+            "regime": r.regime, "daily_bias": r.daily_bias,
+            "volatility_regime": r.volatility_regime,
+            "funding_regime": r.funding_regime, "session": r.session,
+            "score": r.score, "win_prob": r.win_prob,
+            "ai_recommendation": r.ai_recommendation,
+            "ai_confidence": r.ai_confidence,
+            "filters": {
+                "daily_filter": r.f_daily_filter, "regime_router": r.f_regime_router,
+                "adx_threshold": r.f_adx_threshold, "cooldown": r.f_cooldown,
+                "daily_halt": r.f_daily_halt, "duplicate_pos": r.f_duplicate_pos,
+                "side_filter": r.f_side_filter, "expiry": r.f_expiry,
+                "listing_age": r.f_listing_age, "max_positions": r.f_max_positions,
+                "correlation": r.f_correlation, "funding_rate": r.f_funding_rate,
+                "volatility": r.f_volatility, "score": r.f_score,
+                "ai_prob": r.f_ai_prob, "ext_ai": r.f_ext_ai,
+            },
+            "outcome": r.outcome,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/v1/ml/status")
+async def get_ml_status():
+    """ML signal classifier status."""
+    if not orchestrator or not orchestrator.ml_classifier:
+        return {"enabled": False, "status": "disabled"}
+    return {
+        "enabled": True,
+        "shadow_mode": settings.ml_validator_shadow_mode,
+        **orchestrator.ml_classifier.get_status(),
+    }
+
+
+@app.post("/api/v1/ml/train")
+async def trigger_ml_training():
+    """Manually trigger walk-forward ML training."""
+    from ai.ml.signal_classifier import train_walk_forward
+    classifier, stats = await train_walk_forward()
+    if classifier and orchestrator:
+        orchestrator.ml_classifier = classifier
+    return stats
+
+
+@app.get("/api/v1/strategy-scoring")
+async def get_strategy_scoring():
+    """Dynamic strategy scoring adjustments."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    return orchestrator.dynamic_strategy_scorer.get_all_adjustments()
+
+
+@app.get("/api/v1/cvd")
+async def get_cvd():
+    """Current CVD (Cumulative Volume Delta) per symbol."""
+    if not orchestrator:
+        return {}
+    return orchestrator.cvd_tracker.get_all_symbols()
+
+
+@app.get("/api/v1/news-filter")
+async def get_news_filter_status():
+    """NLP news filter status."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    return orchestrator.news_filter.get_status()
+
+
+@app.post("/api/v1/news-filter/check")
+async def trigger_news_check():
+    """Manually trigger news sentiment check."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    result = await orchestrator.news_filter.check_sentiment(orchestrator.external_ai)
+    return result
 
 
 @app.get("/api/v1/risk/daily")

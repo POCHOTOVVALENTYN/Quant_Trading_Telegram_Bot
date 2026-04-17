@@ -18,8 +18,22 @@ from config.settings import settings
 from utils.logger import get_execution_logger
 from utils.notifier import send_telegram_msg
 from core.risk.risk_manager import RiskManager, TimeExitSystem, PyramidingSystem
+try:
+    from utils.metrics import (
+        trades_opened, trades_closed, pnl_per_trade, entry_failures,
+        trade_mgmt_events, trade_mgmt_r_at_exit, trade_mgmt_max_favorable_r,
+    )
+except ImportError:
+    trades_opened = trades_closed = pnl_per_trade = entry_failures = None
+    trade_mgmt_events = trade_mgmt_r_at_exit = trade_mgmt_max_favorable_r = None
 
 logger = get_execution_logger()
+
+
+class EntryExecutionError(Exception):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 class ExecutionEngine:
     def __init__(self, exchange_client, risk_manager: RiskManager):
@@ -57,11 +71,30 @@ class ExecutionEngine:
         self._entry_policy_activated: bool = False
         self._rescue_cooldown_until: Dict[str, float] = {}
         self._soft_cleanup_last_ts: float = 0.0
+        self._trade_close_callbacks: list = []
+        # WS-петли: последнее успешное событие (для watchdog)
+        self._last_ws_orders_event_ts: float = time.time()
+        self._last_ws_positions_event_ts: float = time.time()
+        # Throttle для _tm_partial_reduce skip-лога: symbol -> last_log_ts
+        self._tm_partial_reduce_skip_log_ts: Dict[str, float] = {}
+        # Фоновые задачи (periodic reconcile, ws watchdog)
+        self._periodic_reconcile_task: Optional[asyncio.Task] = None
+
+    def register_trade_close_callback(self, cb):
+        """Register a callback(strategy: str, pnl_usd: float) called on every trade close."""
+        self._trade_close_callbacks.append(cb)
 
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         if symbol not in self._symbol_locks:
             self._symbol_locks[symbol] = asyncio.Lock()
         return self._symbol_locks[symbol]
+
+    def _record_entry_failure(self, reason: str) -> None:
+        try:
+            if entry_failures:
+                entry_failures.labels(reason=reason).inc()
+        except Exception:
+            pass
 
     def _norm_sym(self, s: str) -> str:
         """Единый стандарт символа: BTC/USDT"""
@@ -240,6 +273,35 @@ class ExecutionEngine:
             self._user_position_stream_task = asyncio.create_task(self._watch_user_positions_loop())
             logger.info("📡 [EXEC] WebSocket ПОЗИЦИИ: OK")
 
+        if self._periodic_reconcile_task is None:
+            self._periodic_reconcile_task = asyncio.create_task(self._periodic_reconcile_loop())
+            logger.info("🔄 [EXEC] Периодический reconcile (60с): OK")
+
+    async def _periodic_reconcile_loop(self):
+        """
+        Гарантированный периодический reconcile каждые 60 секунд.
+        Не зависит от WS-событий — защита от зависших WS-петель.
+        """
+        _INTERVAL = 60.0
+        await asyncio.sleep(15.0)   # небольшой сдвиг от старта, чтобы не гонять сразу
+        while self._running:
+            try:
+                # Для user-stream'ов отсутствие событий может быть нормой (нет fill/update),
+                # поэтому перезапускаем только реально "умершие" задачи.
+                for task_attr, restart_coro, name in (
+                    ("_user_order_stream_task", self._watch_user_orders_loop, "WS_ORDERS"),
+                    ("_user_position_stream_task", self._watch_user_positions_loop, "WS_POS"),
+                ):
+                    task = getattr(self, task_attr, None)
+                    if task is None or task.done():
+                        logger.warning(f"⚠️ [WS_WATCHDOG] {name} task is not running — restart")
+                        setattr(self, task_attr, asyncio.create_task(restart_coro()))
+
+                await self.reconcile_full()
+            except Exception as e:
+                logger.warning(f"⚠️ [PERIODIC_RECONCILE] ошибка: {e}")
+            await asyncio.sleep(_INTERVAL)
+
     async def stop(self):
         self._running = False
         for t in [self._user_order_stream_task, self._user_position_stream_task]:
@@ -252,6 +314,7 @@ class ExecutionEngine:
         while self._running:
             try:
                 orders = await self.exchange.watch_orders()
+                self._last_ws_orders_event_ts = time.time()
                 for order in orders:
                     await self._handle_order_update(order)
             except Exception as e:
@@ -270,6 +333,7 @@ class ExecutionEngine:
         while self._running:
             try:
                 positions = await self.exchange.watch_positions()
+                self._last_ws_positions_event_ts = time.time()
                 for pos in positions:
                     symbol = self._norm_sym(pos.get('symbol'))
                     contracts = float(pos.get('contracts', 0) or pos.get('pa', 0) or 0)
@@ -325,11 +389,24 @@ class ExecutionEngine:
                         ot = (db_order.order_type or "").upper()
                         if any(x in ot for x in ["STOP", "TAKE", "TRAILING"]):
                             is_protective_fill = True
-                            logger.info(f"💾 [WS_DB] Защитный ордер исполнен: {symbol} {ot}")
+                            fill_price = float(order.get('average') or order.get('price') or 0.0)
+                            fill_size = float(order.get('filled') or order.get('amount') or 0.0)
+                            fill_type = "SL" if "STOP" in ot else ("TP" if "TAKE" in ot else "TRAILING")
+                            trade = self.active_trades.get(symbol, {})
+                            entry = trade.get("entry", 0)
+                            pnl_est = 0.0
+                            if entry > 0 and fill_price > 0 and fill_size > 0:
+                                is_long = trade.get("signal_type") == "LONG"
+                                pnl_est = (fill_price - entry) * fill_size if is_long else (entry - fill_price) * fill_size
+                            logger.info(
+                                f"💾 [WS_FILL] {fill_type} hit for {symbol}: "
+                                f"order_type={ot} fill_price={fill_price:.6f} size={fill_size} | "
+                                f"entry={entry:.6f} est_PnL={pnl_est:+.4f} USDT"
+                            )
                         await session.commit()
 
                 if is_protective_fill and symbol in self.active_trades:
-                    logger.info(f"🔄 [WS_ORDERS] Удаляю {symbol} из active_trades (SL/TP сработал)")
+                    logger.info(f"🔄 [WS_ORDERS] Closing {symbol} from active_trades (SL/TP triggered)")
                     await self._close_position(symbol, reason="EXTERNAL")
 
                 if not is_protective_fill and symbol in self.active_trades:
@@ -866,7 +943,7 @@ class ExecutionEngine:
     async def reconcile_full(self):
         """Полная синхронизация: Биржа -> БД -> Memory"""
         try:
-            await self.exchange.load_time_difference()
+            await self._prepare_private_ops(ctx="reconcile_full")
             pos_data = await self._with_time_sync_retry(
                 lambda: self.exchange.fetch_positions(),
                 ctx="reconcile.fetch_positions"
@@ -1013,11 +1090,12 @@ class ExecutionEngine:
                                 logger.warning(f"[RECONCILE] Invalid stop for {symbol}: {cache_stop} vs entry={entry}. Fallback={fallback_stop}")
                                 cache_stop = fallback_stop
 
+                    prev_trade = self.active_trades.get(symbol, {})
                     new_active[symbol] = {
                         "entry": entry,
                         "stop": cache_stop,
                         "take_profit_live": found_tp or dbp.take_profit,
-                        "stage": 0,
+                        "stage": prev_trade.get("stage", 0),
                         "opened_at": dbp.opened_at.timestamp(),
                         "signal_type": "LONG" if is_long else "SHORT",
                         "current_size": contracts,
@@ -1026,6 +1104,8 @@ class ExecutionEngine:
                         "tp_order_id": tp_id,
                         "initial_stop": float(dbp.stop_loss or cache_stop or 0.0),
                         "be_moved": (float(cache_stop) >= entry) if is_long else (float(cache_stop) <= entry),
+                        "strategy": prev_trade.get("strategy", "unknown"),
+                        "timeframe": prev_trade.get("timeframe", "1h"),
                     }
 
                 # Закрываем "призраков" (позиции в БД без живой позиции на бирже)
@@ -1084,7 +1164,26 @@ class ExecutionEngine:
                             logger.warning(f"⚠️ [ORPHAN] Could not cancel {oid} for {orphan_sym}: {e}")
 
             self.active_trades = new_active
-            logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
+
+            # Cleanup stale PENDING/EXECUTING signals older than 10 minutes
+            try:
+                async with async_session() as session:
+                    cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
+                    stale_result = await session.execute(
+                        update(SignalModel)
+                        .where(
+                            SignalModel.status.in_(["PENDING", "EXECUTING"]),
+                            SignalModel.timestamp < cutoff
+                        )
+                        .values(status="EXPIRED")
+                    )
+                    if stale_result.rowcount > 0:
+                        logger.info(f"🧹 [RECONCILE] Expired {stale_result.rowcount} stale signals")
+                    await session.commit()
+            except Exception as sig_err:
+                logger.debug(f"Signal cleanup error: {sig_err}")
+
+            logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)} | Orphan orders cleaned: {len(orphan_symbols)}")
         except Exception as e:
             logger.error(f"Reconcile Error: {e}\n{traceback.format_exc()}")
 
@@ -1138,10 +1237,30 @@ class ExecutionEngine:
                     logger.error(f"[{symbol}] ATR invalid ({raw_atr}), cannot enter — aborting")
                     raise Exception(f"Invalid ATR={raw_atr}, cannot compute stop-loss")
                 stop_price = self.risk_manager.calculate_atr_stop(entry_price, safe_atr, direction)
-                lot_size = self.risk_manager.calculate_position_size(account_balance, entry_price, stop_price)
-                lot_size = await self._normalize_amount(symbol, lot_size)
-                
-                if lot_size <= 0: raise Exception("Zero lot size after normalization")
+
+                market_info_data = None
+                try:
+                    market_obj = self.exchange.market(symbol) if hasattr(self.exchange, "market") else None
+                    if market_obj:
+                        market_info_data = market_obj
+                except Exception:
+                    pass
+                market_ctx_data = signal_data.get("market_context")
+
+                size_check = self.risk_manager.assess_trade_feasibility(
+                    account_balance, entry_price, stop_price,
+                    market_info=market_info_data,
+                    market_context=market_ctx_data,
+                )
+                if not size_check.get("feasible", False):
+                    raise EntryExecutionError(
+                        size_check.get("reason", "size_infeasible"),
+                        f"Size infeasible: {size_check.get('reason', 'unknown')}"
+                    )
+                lot_size = await self._normalize_amount(symbol, float(size_check["position_size"]))
+
+                if lot_size <= 0:
+                    raise EntryExecutionError("normalized_to_zero", "Zero lot size after normalization")
 
                 # 4. Умный Вход (Limit Chasing)
                 await self._set_leverage_best_effort(symbol, settings.leverage)
@@ -1152,6 +1271,7 @@ class ExecutionEngine:
                 remaining_size = lot_size
                 filled_total = 0.0
                 entry_audit: List[Dict[str, Any]] = []
+                saw_no_book = False
 
                 for attempt in range(max_retries):
                     if remaining_size <= 0: break
@@ -1160,6 +1280,10 @@ class ExecutionEngine:
                             lambda: self.exchange.fetch_order_book(symbol, limit=5),
                             ctx=f"fetch_order_book({symbol})"
                         )
+                        if not ob or not ob.get('bids') or not ob.get('asks'):
+                            saw_no_book = True
+                            logger.warning(f"Limit chase error: no book")
+                            break
                         best_price = ob['bids'][0][0] if side == 'buy' else ob['asks'][0][0]
                         best_price = await self._normalize_price(symbol, best_price)
                         
@@ -1198,9 +1322,14 @@ class ExecutionEngine:
                             
                     except Exception as e:
                         logger.warning(f"Limit chase error: {e}")
+                        if "no book" in str(e).lower():
+                            saw_no_book = True
+                            break
                         
                 # 5. Fallback (Market)
                 if remaining_size > 0:
+                    if saw_no_book:
+                        logger.warning(f"⚡️ [FALLBACK] No book for {symbol}, switching straight to market entry")
                     logger.warning(f"⚡️ [FALLBACK] Добиваем остаток {remaining_size} Market ордером для {symbol}")
                     try:
                         fallback_order = await self._with_time_sync_retry(
@@ -1213,9 +1342,12 @@ class ExecutionEngine:
                         filled_total += float(fallback_order.get("filled", remaining_size))
                     except Exception as e:
                         logger.error(f"Market fallback error: {e}")
-                        if filled_total == 0: raise e
+                        if filled_total == 0:
+                            raise EntryExecutionError("market_fallback_failed", f"Market fallback error: {e}")
                 
                 lot_size = filled_total
+                if lot_size <= 0:
+                    raise EntryExecutionError("entry_not_filled", "Entry did not fill any size")
 
                 # 6. Пересчёт стопа от ФАКТИЧЕСКОЙ цены входа (а не теоретической из сигнала)
                 if abs(entry_exec - entry_price) > entry_price * 0.0001:
@@ -1262,6 +1394,11 @@ class ExecutionEngine:
                 )
                 if not sl_id:
                     # Best practice: не оставлять открытую позицию без стопа.
+                    logger.error(
+                        f"❌ [PROTECT] Missing STOP after entry for {symbol}: "
+                        f"direction={direction} entry={entry_exec:.6f} stop={stop_price:.6f} "
+                        f"tp={targets} size={lot_size}"
+                    )
                     emergency_side = 'sell' if direction.upper() == "LONG" else 'buy'
                     em_o = await self._with_time_sync_retry(
                         lambda: self.exchange.create_order(symbol, 'market', emergency_side, lot_size),
@@ -1285,7 +1422,10 @@ class ExecutionEngine:
                             .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
                         )
                         await session.commit()
-                    raise Exception("Protective STOP was not created; position closed by emergency market order")
+                    raise EntryExecutionError(
+                        "protective_stop_missing",
+                        "Protective STOP was not created; position closed by emergency market order"
+                    )
 
                 # 8. Финализация
                 self.active_trades[symbol] = {
@@ -1295,7 +1435,19 @@ class ExecutionEngine:
                     "tp_order_id": tp_id,
                     "initial_stop": stop_price,
                     "be_moved": False,
-                    "timeframe": signal_data.get("timeframe", "1h")
+                    "timeframe": signal_data.get("timeframe", "1h"),
+                    "strategy": signal_data.get("strategy", "unknown"),
+                    # Trade management context
+                    "setup_group": signal_data.get("setup_group", "trend"),
+                    "breakout_level": signal_data.get("breakout_level"),
+                    "invalidation_level": signal_data.get("invalidation_level"),
+                    "ma_at_entry": signal_data.get("ma_at_entry", {}),
+                    "be_armed": False,
+                    "partial_done": False,
+                    "max_favorable_r": 0.0,
+                    "max_adverse_r": 0.0,
+                    "bars_since_entry": 0,
+                    "last_mgmt_bar_ts": 0.0,
                 }
                 
                 # Обновляем сигнал в БД как EXECUTED
@@ -1307,29 +1459,55 @@ class ExecutionEngine:
                 _tp_val = signal_data.get("take_profit")
                 _tp_str = f"{float(_tp_val):.4f}" if _tp_val else "—"
                 _dir_emoji = "🟢 LONG" if direction.upper() == "LONG" else "🔴 SHORT"
+
+                _sl_dist_pct = abs(entry_exec - stop_price) / entry_exec * 100 if entry_exec > 0 else 0
+                _risk_usdt = abs(entry_exec - stop_price) * lot_size
+
+                if trades_opened:
+                    trades_opened.labels(symbol=symbol, direction=direction.upper()).inc()
+                logger.info(
+                    f"✅ [ENTRY] {symbol} {direction.upper()} | "
+                    f"strategy={_strat} entry={entry_exec:.6f} "
+                    f"SL={stop_price:.6f} ({_sl_dist_pct:.2f}%) "
+                    f"TP={_tp_str} size={lot_size} ATR={safe_atr:.6f} | "
+                    f"risk={_risk_usdt:.4f} USDT SL_order={sl_id} TP_order={tp_id} "
+                    f"balance={account_balance:.2f}"
+                )
+
                 await send_telegram_msg(
                     f"✅ **НОВАЯ ПОЗИЦИЯ**\n\n"
                     f"🔹 Символ: `{symbol}`\n"
                     f"📌 Направление: {_dir_emoji}\n"
                     f"📊 Стратегия: {_strat}\n"
                     f"💰 Цена входа: `{entry_exec:.4f}`\n"
-                    f"🛡 Стоп-лосс: `{stop_price:.4f}`\n"
+                    f"🛡 Стоп-лосс: `{stop_price:.4f}` ({_sl_dist_pct:.2f}%)\n"
                     f"🎯 Тейк-профит: `{_tp_str}`\n"
-                    f"📦 Объём: `{lot_size}`"
+                    f"📦 Объём: `{lot_size}` | Риск: `{_risk_usdt:.2f}` USDT"
                 )
 
             except Exception as e:
-                logger.error(f"❌ Entry Error {symbol}: {e}")
+                reason = e.reason if isinstance(e, EntryExecutionError) else "unexpected_entry_error"
+                self._record_entry_failure(reason)
+                logger.error(f"❌ Entry Error {symbol} [{reason}]: {e}", exc_info=True)
                 async with async_session() as session:
                     await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="FAILED"))
                     await session.commit()
+                try:
+                    await send_telegram_msg(
+                        f"❌ **ОШИБКА ВХОДА**\n\n"
+                        f"🔹 Символ: `{symbol}`\n"
+                        f"📊 Стратегия: {signal_data.get('strategy', 'N/A')}\n"
+                        f"⚠️ Причина: `{reason}: {str(e)[:180]}`"
+                    )
+                except Exception:
+                    pass
 
-    async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None):
-        """Вызывается каждую минуту для трейлинга"""
+    async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None):
+        """Вызывается каждую минуту для трейлинга и trade management."""
         async with self._get_symbol_lock(symbol):
             if symbol not in self.active_trades: return
             trade = self.active_trades[symbol]
-            # Синхронизируем размер из биржи: после partial TP локальный current_size может устареть.
+            trade['current_price'] = current_price
             live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
             if live_size <= 1e-8:
                 await self._close_position(symbol, reason="EXTERNAL")
@@ -1343,6 +1521,14 @@ class ExecutionEngine:
                         .values(size=float(live_size))
                     )
                     await session.commit()
+
+            # Trade management cycle (invalidation, time stop, partial, confirmed trailing)
+            try:
+                await self.evaluate_position_management(symbol, current_price, atr, adx=adx, df_tf=df_tf)
+            except Exception as e:
+                logger.debug(f"[TM] {symbol}: management cycle error: {e}")
+            if symbol not in self.active_trades:
+                return
 
             # Явный BE-триггер (отдельно от trailing):
             # 1) reached 1R
@@ -1371,6 +1557,13 @@ class ExecutionEngine:
                         improves = (side == "LONG" and be_stop > current_stop) or (side == "SHORT" and be_stop < current_stop)
 
                         if improves:
+                            logger.info(
+                                f"🔰 [BE-TRIGGER] {symbol} {side}: "
+                                f"entry={entry:.6f} initial_stop={initial_stop:.6f} "
+                                f"current_stop={current_stop:.6f} -> BE={be_stop:.6f} | "
+                                f"price={current_price:.6f} 1R_target={'%.6f' % (entry + risk_distance if side == 'LONG' else entry - risk_distance)} "
+                                f"ADX={'%.1f' % float(adx) if adx else 'N/A'} adx_ok={adx_ok} breakout_ok={breakout_ok}"
+                            )
                             await self._cancel_all_orders(symbol)
                             tp_ref = trade.get("take_profit_live")
                             sl_id, tp_id = await self._set_protective_orders(
@@ -1390,21 +1583,50 @@ class ExecutionEngine:
                                         .values(stop_loss=float(be_stop))
                                     )
                                     await session.commit()
+                                logger.info(
+                                    f"✅ [BE-DONE] {symbol}: stop moved to BE={be_stop:.6f}, "
+                                    f"SL order={sl_id}, DB updated"
+                                )
+                                await self._db_persist_order(
+                                    position_id=trade.get("position_db_id"),
+                                    symbol=symbol,
+                                    exchange_order_id=str(sl_id) if sl_id else None,
+                                    client_order_id=None,
+                                    order_type="SL_BREAKEVEN_MOVE",
+                                    position_side=side,
+                                    price=float(be_stop),
+                                    size=float(trade['current_size']),
+                                    status=OrderStatus.OPEN,
+                                )
                                 await send_telegram_msg(
                                     f"🟡 **БЕЗУБЫТОК: {symbol}**\n\n"
                                     f"🛡 Стоп перенесён на: `{be_stop:.6f}`\n"
-                                    f"📈 Триггер: 1R + {'ADX ≥ 20' if adx_ok else 'Пробой'}"
+                                    f"📈 Триггер: 1R + {'ADX ≥ 20' if adx_ok else 'Пробой'}\n"
+                                    f"📊 Цена: `{current_price:.6f}` | Risk dist: `{risk_distance:.6f}`"
+                                )
+                            else:
+                                logger.warning(
+                                    f"⚠️ [BE-FAIL] {symbol}: could not place BE stop order "
+                                    f"(target={be_stop:.6f})"
                                 )
             
             # Трейлинг-стоп (skip if ATR is invalid to prevent stop jump to current price)
             if atr <= 0:
                 return
             new_stop = self.risk_manager.calculate_trailing_stop(trade['stop'], current_price, atr, trade['signal_type'])
-            if abs(new_stop - trade['stop']) > (current_price * 0.001):
-                logger.info(f"🔄 [TRAILING] Moving {symbol} stop: {trade['stop']} -> {new_stop}")
-                # Перевыставляем ордер
+            trail_delta = abs(new_stop - trade['stop'])
+            trail_threshold = current_price * 0.001
+            if trail_delta > trail_threshold:
+                old_stop = trade['stop']
+                pnl_vs_entry = ((current_price - trade['entry']) / trade['entry'] * 100) if trade.get('entry') else 0
+                logger.info(
+                    f"🔄 [TRAILING] {symbol} {trade['signal_type']}: "
+                    f"stop {old_stop:.6f} -> {new_stop:.6f} "
+                    f"(delta={trail_delta:.6f}, ATR={atr:.6f}) | "
+                    f"price={current_price:.6f} entry={trade.get('entry', 0):.6f} "
+                    f"PnL={pnl_vs_entry:+.2f}% BE={trade.get('be_moved', False)}"
+                )
                 await self._cancel_all_orders(symbol)
-                # TP должны оставаться активными после трейлинга.
                 tp_ref = trade.get("take_profit_live")
                 sl_id, tp_id = await self._set_protective_orders(
                     symbol, trade['signal_type'], trade['current_size'], new_stop, tp_ref,
@@ -1416,6 +1638,23 @@ class ExecutionEngine:
                 async with async_session() as session:
                     await session.execute(update(PositionModel).where(PositionModel.id == trade["position_db_id"]).values(stop_loss=float(new_stop)))
                     await session.commit()
+                await self._db_persist_order(
+                    position_id=trade.get("position_db_id"),
+                    symbol=symbol,
+                    exchange_order_id=str(sl_id) if sl_id else None,
+                    client_order_id=None,
+                    order_type="SL_TRAILING_UPDATE",
+                    position_side=str(trade.get("signal_type") or "LONG"),
+                    price=float(new_stop),
+                    size=float(trade['current_size']),
+                    status=OrderStatus.OPEN,
+                )
+            else:
+                if trail_delta > 0:
+                    logger.debug(
+                        f"[TRAILING] {symbol}: skip micro-move "
+                        f"delta={trail_delta:.8f} < threshold={trail_threshold:.8f}"
+                    )
 
             # Временной выход (M5: используем реальный ТФ сигнала вместо хардкода "1h")
             trade_tf = trade.get('timeframe', '1h')
@@ -1486,6 +1725,316 @@ class ExecutionEngine:
                         except Exception as e:
                             logger.error(f"Pyramid error for {symbol}: {e}")
 
+    # ─── Trade Management (loss minimization) ───────────────────────────
+
+    def _tm_record(self, action: str) -> None:
+        try:
+            if trade_mgmt_events:
+                trade_mgmt_events.labels(action=action).inc()
+        except Exception:
+            pass
+
+    def _tm_bars_since_entry(self, trade: dict, timeframe: str) -> int:
+        from core.strategies.strategies import get_timeframe_seconds
+        opened = trade.get("opened_at", 0)
+        if not opened:
+            return 0
+        tf_sec = get_timeframe_seconds(timeframe)
+        if tf_sec <= 0:
+            return 0
+        return int((time.time() - opened) / tf_sec)
+
+    def _tm_should_time_stop(self, trade: dict, current_price: float) -> bool:
+        """No-progress time stop: exit if position made no meaningful profit after N bars."""
+        setup_group = trade.get("setup_group", "trend")
+        tf = trade.get("timeframe", "1h")
+        bars = self._tm_bars_since_entry(trade, tf)
+        trade["bars_since_entry"] = bars
+
+        if bars >= settings.time_stop_hard_limit_bars:
+            return True
+
+        limit_map = {
+            "breakout": settings.time_stop_max_bars_breakout,
+            "trend": settings.time_stop_max_bars_trend,
+            "mean_reversion": settings.time_stop_max_bars_mean_reversion,
+        }
+        soft_limit = limit_map.get(setup_group, settings.time_stop_max_bars_trend)
+
+        if bars >= soft_limit:
+            entry = float(trade.get("entry", 0))
+            if entry <= 0:
+                return True
+            side = str(trade.get("signal_type", "")).upper()
+            min_pct = settings.time_stop_min_profit_pct / 100.0
+            if side == "LONG" and current_price < entry * (1 + min_pct):
+                return True
+            if side == "SHORT" and current_price > entry * (1 - min_pct):
+                return True
+        return False
+
+    def _tm_should_invalidation_exit(self, trade: dict, current_price: float, df: "pd.DataFrame | None" = None) -> bool:
+        """Setup invalidation exit: the original technical premise is broken."""
+        if not settings.invalidation_exit_enabled:
+            return False
+        inv_level = trade.get("invalidation_level")
+        if inv_level is None or float(inv_level) <= 0:
+            return False
+        inv = float(inv_level)
+        side = str(trade.get("signal_type", "")).upper()
+        setup_group = trade.get("setup_group", "trend")
+
+        if setup_group == "breakout":
+            if side == "LONG" and current_price < inv:
+                return True
+            if side == "SHORT" and current_price > inv:
+                return True
+
+        elif setup_group == "trend":
+            ma_entry = trade.get("ma_at_entry", {})
+            if df is not None and not df.empty and 'ema50' in df.columns:
+                current_ma50 = float(df.iloc[-1].get('ema50', 0) or 0)
+                if current_ma50 > 0:
+                    if side == "LONG" and current_price < current_ma50:
+                        return True
+                    if side == "SHORT" and current_price > current_ma50:
+                        return True
+            elif inv > 0:
+                if side == "LONG" and current_price < inv:
+                    return True
+                if side == "SHORT" and current_price > inv:
+                    return True
+
+        elif setup_group == "mean_reversion":
+            r = self.risk_manager.current_r_multiple(
+                float(trade.get("entry", 0)),
+                float(trade.get("initial_stop", trade.get("stop", 0))),
+                current_price,
+                side,
+            )
+            bars = trade.get("bars_since_entry", 0)
+            if bars > 8 and r < -0.5:
+                return True
+
+        return False
+
+    def _tm_should_arm_break_even(self, trade: dict, current_r: float, adx: "float | None") -> bool:
+        """Decide if we should move stop to break-even (1R + confirmation)."""
+        if trade.get("be_armed") or trade.get("be_moved"):
+            return False
+        if current_r < settings.be_trigger_r:
+            return False
+        if not settings.be_require_confirmation:
+            return True
+        adx_ok = adx is not None and float(adx) >= 20.0
+        return adx_ok
+
+    async def _tm_partial_reduce(self, symbol: str, trade: dict, current_r: float) -> bool:
+        """Reduce position by partial_fraction if partial trigger is met."""
+        if not settings.partial_enabled:
+            return False
+        if trade.get("partial_done"):
+            return False
+        if current_r < settings.partial_trigger_r:
+            return False
+
+        frac = settings.partial_fraction
+        side = 'sell' if trade.get('signal_type') == "LONG" else 'buy'
+        live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
+        base_size = live_size if live_size > 1e-8 else float(trade.get('current_size', 0))
+        reduce_amount = base_size * frac
+        if reduce_amount <= 0:
+            return False
+
+        try:
+            market = self.exchange.market(symbol) if hasattr(self.exchange, "market") else None
+            min_amount = float((market or {}).get("limits", {}).get("amount", {}).get("min") or 0)
+            if min_amount > 0 and reduce_amount < min_amount:
+                _now = time.time()
+                if (_now - self._tm_partial_reduce_skip_log_ts.get(symbol, 0.0)) > 60.0:
+                    logger.debug(f"[TM] {symbol}: partial reduce {reduce_amount} < min_amount {min_amount}, skip (throttled)")
+                    self._tm_partial_reduce_skip_log_ts[symbol] = _now
+                return False
+
+            params = {"reduceOnly": True}
+            ro = await self._with_time_sync_retry(
+                lambda: self.exchange.create_order(symbol, 'market', side, reduce_amount, None, params),
+                ctx=f"tm_partial_reduce({symbol})"
+            )
+            await self._db_persist_order(
+                position_id=trade.get("position_db_id"),
+                symbol=symbol,
+                exchange_order_id=str(ro.get("id")) if ro and ro.get("id") is not None else None,
+                client_order_id=str(ro.get("clientOrderId")) if ro and ro.get("clientOrderId") else None,
+                order_type="MARKET_PARTIAL_REDUCE_TM",
+                position_side=str(trade.get("signal_type") or "LONG"),
+                price=float(ro.get("average") or ro.get("price") or 0.0),
+                size=float(ro.get("filled") or reduce_amount),
+                status=OrderStatus.FILLED,
+            )
+            new_size = base_size - reduce_amount
+            trade["current_size"] = max(0.0, new_size)
+            trade["partial_done"] = True
+            async with async_session() as session:
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.id == trade["position_db_id"])
+                    .values(size=float(max(0.0, new_size)))
+                )
+                await session.commit()
+
+            self._tm_record("partial_reduce")
+            logger.info(
+                f"🔻 [TM-PARTIAL] {symbol}: reduced {frac*100:.0f}% at {current_r:.2f}R "
+                f"(closed {reduce_amount:.6f}, remaining {new_size:.6f})"
+            )
+            await send_telegram_msg(
+                f"🔻 **ЧАСТИЧНОЕ ЗАКРЫТИЕ**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"📊 R-множитель: `{current_r:.2f}R`\n"
+                f"📦 Закрыто: `{frac*100:.0f}%` ({reduce_amount:.6f})\n"
+                f"📦 Осталось: `{new_size:.6f}`"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[TM] {symbol}: partial reduce failed: {e}")
+            return False
+
+    async def evaluate_position_management(
+        self,
+        symbol: str,
+        current_price: float,
+        atr: float,
+        adx: "float | None" = None,
+        df_tf: "pd.DataFrame | None" = None,
+    ) -> None:
+        """
+        Main trade management cycle: called every minute alongside trailing.
+        Checks invalidation, time stop, BE, partial reduce, confirmed trailing.
+        """
+        if not getattr(settings, "trade_mgmt_enabled", True):
+            return
+        if symbol not in self.active_trades:
+            return
+
+        trade = self.active_trades[symbol]
+        entry = float(trade.get("entry", 0))
+        initial_stop = float(trade.get("initial_stop", trade.get("stop", 0)))
+        side = str(trade.get("signal_type", "")).upper()
+
+        if entry <= 0 or initial_stop <= 0:
+            return
+
+        current_r = self.risk_manager.current_r_multiple(entry, initial_stop, current_price, side)
+        trade["max_favorable_r"] = max(float(trade.get("max_favorable_r", 0)), current_r)
+        trade["max_adverse_r"] = min(float(trade.get("max_adverse_r", 0)), current_r)
+
+        # 1. Setup invalidation exit
+        if self._tm_should_invalidation_exit(trade, current_price, df_tf):
+            self._tm_record("invalidation_exit")
+            if trade_mgmt_r_at_exit:
+                trade_mgmt_r_at_exit.observe(current_r)
+            if trade_mgmt_max_favorable_r:
+                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
+            logger.info(
+                f"⚠️ [TM-INVALIDATION] {symbol} {side}: setup invalidated at {current_r:.2f}R, closing"
+            )
+            await send_telegram_msg(
+                f"⚠️ **ИНВАЛИДАЦИЯ СЕТАПА**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"📊 R: `{current_r:.2f}` | Группа: `{trade.get('setup_group')}`\n"
+                f"🔴 Позиция закрыта досрочно"
+            )
+            await self._close_position(symbol, reason="INVALIDATION")
+            return
+
+        # 2. Time stop
+        if self._tm_should_time_stop(trade, current_price):
+            self._tm_record("time_stop")
+            if trade_mgmt_r_at_exit:
+                trade_mgmt_r_at_exit.observe(current_r)
+            if trade_mgmt_max_favorable_r:
+                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
+            logger.info(
+                f"⏰ [TM-TIMESTOP] {symbol} {side}: bars={trade.get('bars_since_entry', 0)}, "
+                f"R={current_r:.2f}, closing"
+            )
+            await send_telegram_msg(
+                f"⏰ **ТАЙМСТОП**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"📊 Баров: `{trade.get('bars_since_entry', 0)}` | R: `{current_r:.2f}`\n"
+                f"🔴 Позиция закрыта по таймауту"
+            )
+            await self._close_position(symbol, reason="TIME_MGMT")
+            return
+
+        # 3. Break-even (arm flag, actual BE move happens in schedule_update_positions)
+        if self._tm_should_arm_break_even(trade, current_r, adx):
+            trade["be_armed"] = True
+            self._tm_record("be_move")
+            logger.info(f"🔰 [TM-BE-ARM] {symbol} {side}: armed BE at {current_r:.2f}R")
+
+        # 4. Partial reduction
+        if not trade.get("partial_done") and current_r >= settings.partial_trigger_r:
+            await self._tm_partial_reduce(symbol, trade, current_r)
+
+        # 5. Confirmed trailing: only tighten trailing stop on favorable confirmed bars
+        if (
+            settings.confirmed_trailing_enabled
+            and trade.get("be_armed")
+            and current_r >= settings.confirmed_trailing_min_r
+            and df_tf is not None
+            and not df_tf.empty
+            and len(df_tf) >= 2
+        ):
+            last_bar = df_tf.iloc[-2]
+            bar_ts = last_bar.get("timestamp", 0)
+            try:
+                bar_ts = float(bar_ts.timestamp()) if hasattr(bar_ts, "timestamp") else float(bar_ts)
+            except Exception:
+                bar_ts = 0
+            if bar_ts > float(trade.get("last_mgmt_bar_ts", 0)):
+                bar_dict = {
+                    "open": float(last_bar.get("open", 0)),
+                    "close": float(last_bar.get("close", 0)),
+                    "high": float(last_bar.get("high", 0)),
+                    "low": float(last_bar.get("low", 0)),
+                }
+                if self.risk_manager.favorable_bar_confirmed(bar_dict, side):
+                    tighter_mult = 2.0
+                    new_trail = self.risk_manager.calculate_trailing_stop(
+                        float(trade.get("stop", 0)), current_price, atr, side, multiplier=tighter_mult
+                    )
+                    current_stop = float(trade.get("stop", 0))
+                    improved = (side == "LONG" and new_trail > current_stop) or (side == "SHORT" and new_trail < current_stop)
+                    if improved:
+                        delta = abs(new_trail - current_stop)
+                        threshold = current_price * 0.001
+                        if delta > threshold:
+                            logger.info(
+                                f"📈 [TM-CONFIRMED-TRAIL] {symbol}: "
+                                f"stop {current_stop:.6f} -> {new_trail:.6f} (R={current_r:.2f})"
+                            )
+                            await self._cancel_all_orders(symbol)
+                            tp_ref = trade.get("take_profit_live")
+                            sl_id, tp_id = await self._set_protective_orders(
+                                symbol, side, trade['current_size'], new_trail, tp_ref,
+                                position_id=trade.get("position_db_id"),
+                            )
+                            trade['stop'] = new_trail
+                            trade['stop_order_id'] = sl_id
+                            if tp_id:
+                                trade['tp_order_id'] = tp_id
+                            async with async_session() as session:
+                                await session.execute(
+                                    update(PositionModel)
+                                    .where(PositionModel.id == trade["position_db_id"])
+                                    .values(stop_loss=float(new_trail))
+                                )
+                                await session.commit()
+                            self._tm_record("confirmed_trailing")
+                trade["last_mgmt_bar_ts"] = bar_ts
+
     async def _close_position(self, symbol: str, reason: str = "AUTO"):
         if symbol not in self.active_trades: return
         trade = self.active_trades[symbol]
@@ -1502,7 +2051,21 @@ class ExecutionEngine:
                     logger.warning(f"⚠️ [CLOSE] Side mismatch for {symbol}: local={trade['signal_type']} live={live_side}. Skip market close.")
                     return
                 elif close_amount > 1e-8:
-                    co = await self.exchange.create_order(symbol, 'market', side, close_amount)
+                    # -4164: если нотионал < $5 биржа требует reduceOnly=True
+                    try:
+                        co = await self.exchange.create_order(symbol, 'market', side, close_amount)
+                    except Exception as _ce:
+                        _ce_str = str(_ce)
+                        if "-4164" in _ce_str or "notional must be no smaller" in _ce_str:
+                            logger.warning(
+                                f"⚠️ [CLOSE] {symbol}: notional too small, retrying with reduceOnly=True"
+                            )
+                            co = await self.exchange.create_order(
+                                symbol, 'market', side, close_amount,
+                                None, {"reduceOnly": True}
+                            )
+                        else:
+                            raise
                     ps = str(trade.get("signal_type") or "LONG").upper()
                     await self._db_persist_order(
                         position_id=trade.get("position_db_id"),
@@ -1574,7 +2137,10 @@ class ExecutionEngine:
                 "EXTERNAL": "🔄 Биржа (TP/SL)",
                 "MANUAL": "🖐 Ручное",
                 "TIME": "⏱ Тайм-аут",
+                "TIME_MGMT": "⏰ Тайм-стоп (TM)",
+                "INVALIDATION": "⚠️ Инвалидация сетапа",
                 "AUTO": "⚙️ Авто",
+                "RECONCILE_CLOSE": "🔃 Реконсил",
             }
             _reason_ru = _reason_map.get(reason, f"⚙️ {reason}")
             try:
@@ -1582,11 +2148,51 @@ class ExecutionEngine:
                 _pnl_msg = f"\n{_pnl_emoji} Результат: `{pnl_usd:+.2f} USDT ({pnl_pct:+.1f}%)`"
             except Exception:
                 pass
+
+            hold_time_str = ""
+            try:
+                opened = trade.get("opened_at", 0)
+                if opened:
+                    hold_secs = time.time() - opened
+                    hold_mins = hold_secs / 60
+                    if hold_mins >= 60:
+                        hold_time_str = f"\n⏱ Время: {hold_mins / 60:.1f}ч"
+                    else:
+                        hold_time_str = f"\n⏱ Время: {hold_mins:.0f}мин"
+            except Exception:
+                pass
+
+            max_fav_r = float(trade.get("max_favorable_r", 0))
+            if trade_mgmt_max_favorable_r and max_fav_r != 0:
+                trade_mgmt_max_favorable_r.observe(max_fav_r)
+            logger.info(
+                f"💰 [CLOSE] {symbol} {trade.get('signal_type')} | "
+                f"reason={reason} PnL={pnl_usd:+.4f} USDT ({pnl_pct:+.2f}%) | "
+                f"entry={trade.get('entry', 0):.6f} stop={trade.get('stop', 0):.6f} "
+                f"initial_stop={trade.get('initial_stop', 'N/A')} "
+                f"BE_moved={trade.get('be_moved', False)} "
+                f"max_R={max_fav_r:.2f} bars={trade.get('bars_since_entry', 0)} "
+                f"size={trade.get('current_size', 0)} "
+                f"strategy={trade.get('strategy', 'unknown')}"
+            )
+
+            if trades_closed:
+                trades_closed.labels(symbol=symbol, reason=reason).inc()
+            if pnl_per_trade:
+                pnl_per_trade.observe(pnl_usd)
+
+            strategy_name = trade.get("strategy", "unknown")
+            for cb in self._trade_close_callbacks:
+                try:
+                    cb(strategy_name, pnl_usd)
+                except Exception as cb_err:
+                    logger.debug(f"Trade close callback error: {cb_err}")
+
             self.active_trades.pop(symbol, None)
             await send_telegram_msg(
                 f"💰 **ПОЗИЦИЯ ЗАКРЫТА**\n\n"
                 f"🔹 Символ: `{symbol}`\n"
-                f"🏁 Причина: {_reason_ru}{_pnl_msg}"
+                f"🏁 Причина: {_reason_ru}{_pnl_msg}{hold_time_str}"
             )
         except Exception as e: logger.error(f"Error closing {symbol}: {e}")
 

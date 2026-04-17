@@ -18,4 +18,8 @@
     "new_accuracy": 0.5337,
     "new_loss": 0.6874,
     "accuracy": 0.5337,
-    "improved": 
+    "improved": false,
+    "win_rate": 0.0,
+    "strategies": {}
+  }
+}
