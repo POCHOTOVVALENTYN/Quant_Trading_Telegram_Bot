@@ -1,37 +1,72 @@
-import sys
-from loguru import logger
+import logging
+import logging.config
 import os
+import sys
+import structlog
+from datetime import datetime
 
 # Create logs directory if it doesn't exist
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
 
-# Configure Loguru
-logger.remove() # Remove default console logger
+def configure_logger():
+    # Use environment variable to toggle between JSON and Console output
+    # PRODUCTION (Docker) -> JSON
+    # DEVELOPMENT (Local) -> Console (Pretty-print)
+    log_format = os.environ.get("LOG_FORMAT", "json").lower()
+    
+    timestamper = structlog.processors.TimeStamper(fmt="iso")
 
-# Console logger for development/info
-logger.add(sys.stderr, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
+    shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.format_exc_info,
+        structlog.processors.StackInfoRenderer(),
+        timestamper,
+    ]
 
-# File loggers per requirement (trade logs, error logs, signal logs, execution logs)
-logger.add(os.path.join(log_dir, "trade.log"), filter=lambda record: "trade" in record["extra"], rotation="10 MB", compression="zip")
-logger.add(os.path.join(log_dir, "error.log"), level="ERROR", rotation="10 MB")
-logger.add(os.path.join(log_dir, "signal.log"), filter=lambda record: "signal" in record["extra"], rotation="10 MB")
-logger.add(os.path.join(log_dir, "execution.log"), filter=lambda record: "execution" in record["extra"], rotation="10 MB")
-logger.add(os.path.join(log_dir, "market_data.log"), filter=lambda record: "market_data" in record["extra"], rotation="10 MB")
+    if log_format == "json":
+        # Production JSON format
+        processors = shared_processors + [
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ]
+    else:
+        # Development Console format
+        processors = shared_processors + [
+            structlog.dev.ConsoleRenderer(),
+        ]
 
-# Utility functions to log specific events easily
+    structlog.configure(
+        processors=processors,
+        logger_factory=structlog.PrintLoggerFactory(),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        cache_logger_on_first_use=True,
+    )
+
+# Run configuration
+configure_logger()
+
+# Helper getters to maintain backward compatibility with current calls
+def get_logger(name: str):
+    return structlog.get_logger(name)
+
 def get_trade_logger():
-    return logger.bind(trade=True)
+    return structlog.get_logger("trade").bind(service="trade")
 
 def get_signal_logger():
-    return logger.bind(signal=True)
+    return structlog.get_logger("signal").bind(service="signal")
 
 def get_execution_logger():
-    return logger.bind(execution=True)
+    return structlog.get_logger("execution").bind(service="execution")
 
 def get_market_data_logger():
-    return logger.bind(market_data=True)
+    return structlog.get_logger("market_data").bind(service="market_data")
 
-# default export
-app_logger = logger
+def get_ml_logger():
+    return structlog.get_logger("ml").bind(service="ml")
+
+# Default export
+app_logger = structlog.get_logger("app")
+

@@ -91,14 +91,24 @@ class MarketDataService:
 
     def _mark_stream_alive(self, stream_key: str, now: float) -> None:
         self.last_candle_time[stream_key] = now
+        old_recovering = self._stream_recovering.get(stream_key, False)
         self._stream_recovering[stream_key] = False
         self._watchdog_consecutive_failures[stream_key] = 0
         self._set_stream_metrics(stream_key, age_seconds=0.0, recovering=False)
+        
+        if old_recovering:
+            symbol, timeframe = self._split_stream_key(stream_key)
+            for cb in self.callbacks:
+                asyncio.create_task(cb("status", symbol, timeframe, {"recovering": False}))
 
     def _mark_stream_recovering(self, stream_key: str, *, reason: str) -> None:
         self._stream_recovering[stream_key] = True
         self._watchdog_consecutive_failures[stream_key] = self._watchdog_consecutive_failures.get(stream_key, 0) + 1
         self._set_stream_metrics(stream_key, recovering=True)
+        
+        symbol, timeframe = self._split_stream_key(stream_key)
+        for cb in self.callbacks:
+            asyncio.create_task(cb("status", symbol, timeframe, {"recovering": True, "reason": reason}))
         try:
             if market_data_stream_restarts:
                 symbol, timeframe = self._split_stream_key(stream_key)

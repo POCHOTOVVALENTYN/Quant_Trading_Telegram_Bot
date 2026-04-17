@@ -9,10 +9,14 @@ from fastapi.security import APIKeyHeader
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def verify_api_key(api_key: str = Security(api_key_header)):
-    # Protect only if key is explicitly set in .env to something secure
-    if settings.internal_api_key and settings.internal_api_key != "changeme_for_prod":
-        if api_key != settings.internal_api_key:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
+    # Default Deny: If not configured or default, block access to prevent accidental exposure
+    if not settings.internal_api_key or settings.internal_api_key == "changeme_for_prod":
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="API key not configured on server. Set INTERNAL_API_KEY in .env"
+        )
+    if api_key != settings.internal_api_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
     return api_key
 
 # We will apply this dependency to all routes by replacing @app. with @app. (adding Depends)
@@ -24,7 +28,7 @@ import ccxt.pro as ccxtpro
 from config.settings import settings
 from database.session import engine, Base
 from database.models import all_models  # Загружает модели в Base.metadata
-from services.market_data.market_streamer import MarketDataService
+from services.market_data.client import MarketDataClient
 from core.risk.risk_manager import RiskManager
 from core.execution.engine import ExecutionEngine
 from services.signal_engine.engine import TradingOrchestrator
@@ -195,8 +199,8 @@ async def lifespan(app: FastAPI):
     
     app_logger.info(f"🚀 [1/6] Запуск мониторинга {len(base_symbols)} монет на {len(tfs)} ТФ...")
     
-    # 2. Инициализация сервисов
-    market_data = MarketDataService(
+    # 2. Инициализация сервисов (Client-side)
+    market_data = MarketDataClient(
         symbols=base_symbols, 
         timeframes=tfs,
         exchange=exchange_client
@@ -664,24 +668,6 @@ async def get_active_trades():
         else:
             info.setdefault('pnl_usd', 0.0)
             info.setdefault('pnl_pct', 0.0)
-
-    # Non-blocking background price refresh — fire-and-forget
-    if exchange_client:
-        async def _bg_refresh():
-            try:
-                symbols = list(trades.keys())
-                tickers = await asyncio.wait_for(
-                    exchange_client.fetch_tickers(symbols), timeout=4.0
-                )
-                for sym in symbols:
-                    t = tickers.get(sym) or tickers.get(sym + ":USDT")
-                    if t and (t.get('last') or t.get('close')):
-                        p = t.get('last') or t.get('close')
-                        if sym in orchestrator.execution.active_trades:
-                            orchestrator.execution.active_trades[sym]['current_price'] = p
-            except Exception:
-                pass
-        asyncio.create_task(_bg_refresh())
 
     return {"trades": trades}
 

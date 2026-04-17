@@ -34,10 +34,9 @@ BTN_STRATEGIES = "📚 Стратегии"
 BTN_FAQ = "❓ FAQ"
 BTN_HOME = "🏠 Главное меню"
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+from utils.logger import app_logger as logger
+
+# _log = logging.getLogger(__name__) # Use logger instead
 
 _action_cooldowns: dict[str, float] = {}
 _ACTION_COOLDOWN_BY_TYPE = {
@@ -677,7 +676,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-    logging.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
+    logger.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
     if text == BTN_ACTIVE:
         await show_active_positions(update, context)
     elif text == BTN_TOGGLE:
@@ -1362,7 +1361,7 @@ async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный перехватчик ошибок Telegram handlers."""
-    logging.exception("Unhandled Telegram handler error", exc_info=context.error)
+    logger.exception("Unhandled Telegram handler error", exc=context.error)
     try:
         if isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text("⚠️ Внутренняя ошибка обработчика. Попробуйте ещё раз через пару секунд.")
@@ -1389,7 +1388,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(global_error_handler)
 
-    logging.info("Telegram Bot is polling...")
+    logger.info("Telegram Bot is polling...")
     app.run_polling()
 
 if __name__ == "__main__":

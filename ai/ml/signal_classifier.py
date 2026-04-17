@@ -109,22 +109,24 @@ async def train_walk_forward(
         _log.warning("Insufficient validation samples or only one class in training")
         return None, {"error": "degenerate_split", "train": len(X_train), "val": len(X_val)}
 
-    clf = GradientBoostingClassifier(
-        max_depth=3,
-        n_estimators=80,
-        learning_rate=0.05,
-        subsample=0.8,
-        min_samples_leaf=5,
-        random_state=42,
-    )
-    clf.fit(X_train, y_train)
+    def _sync_train(X_tr, y_tr, X_v, y_v):
+        from sklearn.ensemble import GradientBoostingClassifier
+        from sklearn.metrics import accuracy_score, roc_auc_score
+        
+        m = GradientBoostingClassifier(
+            max_depth=3, n_estimators=80, learning_rate=0.05,
+            subsample=0.8, min_samples_leaf=5, random_state=42,
+        )
+        m.fit(X_tr, y_tr)
+        tr_acc = accuracy_score(y_tr, m.predict(X_tr))
+        v_acc = accuracy_score(y_v, m.predict(X_v))
+        try:
+            v_auc = roc_auc_score(y_v, m.predict_proba(X_v)[:, 1])
+        except Exception:
+            v_auc = 0.0
+        return m, tr_acc, v_acc, v_auc
 
-    train_acc = accuracy_score(y_train, clf.predict(X_train))
-    val_acc = accuracy_score(y_val, clf.predict(X_val))
-    try:
-        val_auc = roc_auc_score(y_val, clf.predict_proba(X_val)[:, 1])
-    except Exception:
-        val_auc = 0.0
+    clf_model, train_acc, val_acc, val_auc = await asyncio.to_thread(_sync_train, X_train, y_train, X_val, y_val)
 
     stats = {
         "train_samples": len(X_train),
@@ -143,7 +145,7 @@ async def train_walk_forward(
     # Save model
     model_path.parent.mkdir(parents=True, exist_ok=True)
     state = {
-        "model": clf,
+        "model": clf_model,
         "feature_names": feature_names,
         "trained_at": now,
         "train_accuracy": train_acc,

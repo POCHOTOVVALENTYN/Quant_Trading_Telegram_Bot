@@ -569,7 +569,9 @@ class TradingOrchestrator:
                 if symbol in self.execution.active_trades:
                     _ttf = self.execution.active_trades[symbol].get("timeframe", "1h")
                     trade_tf = self.market_history.get(symbol, {}).get(_ttf)
-                asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx, df_tf=trade_tf))
+                
+                cvd_val = self.cvd_tracker.get_normalized_delta(symbol) if self.cvd_tracker else 0.0
+                asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx, df_tf=trade_tf, cvd_val=cvd_val))
 
         if len(df) < 60:
             return
@@ -1004,6 +1006,7 @@ class TradingOrchestrator:
                         }
                         ml_prob = await self.ml_classifier.predict_proba(ml_features)
                         logger.info(f"[{symbol}] ML classifier: prob={ml_prob:.3f}")
+                        signal["ml_prob"] = ml_prob
 
                         if not settings.ml_validator_shadow_mode:
                             if ml_prob < settings.ml_validator_threshold:

@@ -25,6 +25,7 @@ services:
     depends_on:
       - redis
       - postgres
+      - market-data
     volumes:
       - .:/app
     command: uvicorn api.rest.main:app --host 0.0.0.0 --port 8000
@@ -80,6 +81,18 @@ services:
       resources:
         limits:
           memory: 1G
+
+  market-data:
+    build: .
+    container_name: quant_market_data
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+    command: python -m services.market_data.worker
 
   prometheus:
     image: prom/prometheus:v2.51.0

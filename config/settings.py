@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     is_trading_enabled: bool = True # Глобальный вкл/выкл
     api_timeout_seconds: float = 5.0 # Стандарт из статьи (контроль зависших запросов)
     
+    # Market Data
+    market_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOT/USDT,LINK/USDT,MATIC/USDT"
+    market_timeframes: str = "1m,5m,15m,1h,4h,1d"
+    
     # Advanced Filters (НОВОЕ)
     max_open_positions: int = 5
     signal_expiry_seconds: int = 120  # Защита от старых сигналов (120с)

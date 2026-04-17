@@ -17,8 +17,9 @@ import redis.asyncio as aioredis
 from config.settings import settings
 from ai.ml.signal_classifier import SignalClassifier
 
-_log = logging.getLogger("ml_worker")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+from utils.logger import get_ml_logger
+
+_log = get_ml_logger()
 
 CHANNEL_REQUEST = "ml:inference:request"
 CHANNEL_RESPONSE = "ml:inference:response"
@@ -71,7 +72,8 @@ class MLWorker:
                     await self._do_retrain()
                 elif channel == CHANNEL_REQUEST:
                     data = json.loads(message["data"])
-                    result = self._predict(data)
+                    # Offload CPU-bound ML inference to a technical thread pool to keep event loop responsive
+                    result = await asyncio.to_thread(self._predict, data)
                     await self.redis.publish(CHANNEL_RESPONSE, json.dumps(result))
             except Exception as e:
                 _log.error(f"Error processing message on {channel}: {e}")

@@ -247,9 +247,11 @@ class RiskManager:
         stop_loss_price: float,
         market_info: dict = None,
         market_context: dict = None,
+        ml_prob: float = 0.5,
     ) -> Dict[str, Any]:
         """
         Returns sizing feasibility details before the execution stage.
+        Applies Dynamic Scaling based on ML confidence.
         """
         from config.settings import settings
 
@@ -261,6 +263,7 @@ class RiskManager:
             "position_size": 0.0,
             "min_notional": 0.0,
             "min_amount": 0.0,
+            "ml_scale": 1.0,
         }
         if account_balance <= 0 or entry_price <= 0:
             result["reason"] = "invalid_account_or_entry"
@@ -270,6 +273,20 @@ class RiskManager:
         margin_usd = min(fixed_usdt, account_balance) if fixed_usdt > 0 else account_balance * settings.per_trade_margin_pct
         notional_usd = margin_usd * max(1, int(settings.leverage))
         position_size = notional_usd / entry_price if entry_price > 0 else 0.0
+
+        # ML Dynamic Scaling (Phase 4A)
+        # 0.50 neutral -> scaling reduces
+        # 0.70+ strong -> full size
+        ml_scale = 1.0
+        if ml_prob >= 0.75:   ml_scale = 1.2  # Aggressive for high confidence
+        elif ml_prob >= 0.70: ml_scale = 1.0  # Full base size
+        elif ml_prob >= 0.65: ml_scale = 0.75 # Conservative
+        elif ml_prob >= 0.60: ml_scale = 0.5  # Half size
+        elif ml_prob >= 0.55: ml_scale = 0.25 # Quarter size
+        else:                ml_scale = 0.1  # Minimal (shadow/test)
+        
+        position_size *= ml_scale
+        result["ml_scale"] = ml_scale
 
         if market_context:
             ctx_mult = self.context_risk_multiplier(

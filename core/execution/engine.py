@@ -1306,11 +1306,13 @@ class ExecutionEngine:
                 except Exception:
                     pass
                 market_ctx_data = signal_data.get("market_context")
+                ml_prob = signal_data.get("ml_prob", 0.5)
 
                 size_check = self.risk_manager.assess_trade_feasibility(
                     account_balance, entry_price, stop_price,
                     market_info=market_info_data,
                     market_context=market_ctx_data,
+                    ml_prob=ml_prob,
                 )
                 if not size_check.get("feasible", False):
                     raise EntryExecutionError(
@@ -1572,7 +1574,7 @@ class ExecutionEngine:
                 except Exception:
                     pass
 
-    async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None):
+    async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None, cvd_val: float = 0.0):
         """Вызывается каждую минуту для трейлинга и trade management."""
         async with self._get_symbol_lock(symbol):
             async with self._get_symbol_lock(symbol):
@@ -1591,12 +1593,12 @@ class ExecutionEngine:
                                 update(PositionModel)
                                 .where(PositionModel.id == trade["position_db_id"])
                                 .values(size=float(live_size))
-                            )
+                                )
                             await session.commit()
-
+                            
             # Trade management cycle (invalidation, time stop, partial, confirmed trailing)
             try:
-                await self.evaluate_position_management(symbol, current_price, atr, adx=adx, df_tf=df_tf)
+                await self.evaluate_position_management(symbol, current_price, atr, adx=adx, df_tf=df_tf, cvd_val=cvd_val)
             except Exception as e:
                 logger.debug(f"[TM] {symbol}: management cycle error: {e}")
             if symbol not in self.active_trades:
@@ -1979,6 +1981,7 @@ class ExecutionEngine:
         atr: float,
         adx: "float | None" = None,
         df_tf: "pd.DataFrame | None" = None,
+        cvd_val: float = 0.0,
     ) -> None:
         """
         Main trade management cycle: called every minute alongside trailing.
@@ -2042,9 +2045,31 @@ class ExecutionEngine:
 
         # 3. Break-even (arm flag, actual BE move happens in schedule_update_positions)
         if self._tm_should_arm_break_even(trade, current_r, adx):
-            trade["be_armed"] = True
-            self._tm_record("be_move")
-            logger.info(f"🔰 [TM-BE-ARM] {symbol} {side}: armed BE at {current_r:.2f}R")
+            if not trade.get("be_armed"):
+                trade["be_armed"] = True
+                self._tm_record("be_move")
+                logger.info(f"🔰 [TM-BE-ARM] {symbol} {side}: armed BE at {current_r:.2f}R")
+
+        # 3.1 CVD-based BE (Advanced Phase 4)
+        # If CVD shows strong reversal (delta > 0.7 against us) and we are in profit, protect at BE
+        is_in_profit = (current_price > entry) if side == "LONG" else (current_price < entry)
+        if not trade.get("be_armed") and is_in_profit:
+            cvd_threshold = 0.7
+            should_cvd_be = (side == "LONG" and cvd_val < -cvd_threshold) or (side == "SHORT" and cvd_val > cvd_threshold)
+            if should_cvd_be:
+                trade["be_armed"] = True
+                self._tm_record("be_cvd")
+                logger.info(f"🔰 [TM-BE-CVD] {symbol} {side}: armed BE due to CVD reversal ({cvd_val:.2f})")
+
+        # 3.2 Volspike Exhaustion Exit (Advanced Phase 4)
+        if df_tf is not None and not df_tf.empty and current_r >= 1.0:
+            last_vol = float(df_tf.iloc[-1].get("volume", 0))
+            avg_vol = float(df_tf["volume"].tail(20).mean())
+            if avg_vol > 0 and last_vol > avg_vol * 5.0: # 5x volume spike
+                logger.info(f"🚀 [TM-VOLSPIKE] {symbol} {side}: volume exhaustion {last_vol/avg_vol:.1f}x avg, closing at {current_r:.2f}R")
+                await send_telegram_msg(f"🚀 **VOLSPIKE EXIT**\n`{symbol}`: Volume spike {last_vol/avg_vol:.1f}x -> profit locked")
+                await self._close_position(symbol, reason="VOLSPIKE")
+                return
 
         # 4. Partial reduction
         if not trade.get("partial_done") and current_r >= settings.partial_trigger_r:
