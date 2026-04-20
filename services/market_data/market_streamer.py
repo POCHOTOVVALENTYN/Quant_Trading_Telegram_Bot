@@ -47,12 +47,12 @@ class MarketDataService:
             self.exchange = ccxtpro.binance({
                 'enableRateLimit': True,
                 'timeout': int(settings.api_timeout_seconds * 1000), 
-                'options': {'defaultType': 'future'}
+                'options': {'defaultType': 'future', 'fetchCurrencies': False, 'types': ['future']}
             })
             if settings.testnet:
-                self.exchange.set_sandbox_mode(True)
-                # Переопределяем WS на боевой для стабильности
-                self.exchange.urls['test']['ws']['future'] = "wss://fstream.binance.com/ws"
+                # Manual switch to Demo URLs to avoid CCXT NotSupported error
+                self.exchange.urls['api'] = self.exchange.urls['demo']
+                # Переопределяем WS на боевой для стабильности (as intended by previous dev)
                 self.exchange.urls['api']['ws']['future'] = "wss://fstream.binance.com/ws"
         self.running = False
         self.callbacks = [] # type: list[Callable]

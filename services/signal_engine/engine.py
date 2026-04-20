@@ -302,7 +302,7 @@ class TradingOrchestrator:
     def _compute_expiry_lag_after_close(
         candle_time,
         timeframe: str,
-        now_ts: float | None = None,
+        now_ts: Optional[float] = None,
         stream_recovering: bool = False,
     ) -> tuple[float, float, int, float]:
         """Return (lag_after_close, expiry_window, tf_secs, candle_ts_seconds)."""
@@ -1023,6 +1023,24 @@ class TradingOrchestrator:
                     # AI/Statistical prediction
                     ob = self.orderbooks.get(symbol)
                     cvd_val = self.cvd_tracker.get_cvd_normalized(symbol) if self.cvd_tracker else 0.0
+                    
+                    # CVD Delta Confirmation (New Optimization)
+                    momentum_strats = ["Rule of 7", "Donchian", "Vol Contraction"]
+                    if signal.get("strategy") in momentum_strats:
+                        cvd_thresh = float(getattr(settings, "cvd_threshold", 0.3) or 0.3)
+                        is_long = signal['signal'] == "LONG"
+                        
+                        # Direction check & magnitude check
+                        if is_long and cvd_val < cvd_thresh:
+                            logger.info(f"[{symbol}] CVD {cvd_val:.2f} too low for LONG, skip")
+                            _filter_flags["f_cvd"] = False
+                            continue
+                        elif not is_long and cvd_val > -cvd_thresh:
+                            logger.info(f"[{symbol}] CVD {cvd_val:.2f} too high for SHORT, skip")
+                            _filter_flags["f_cvd"] = False
+                            continue
+                    _filter_flags["f_cvd"] = True
+
                     features = FeatureGenerator.generate_features(df_eval, funding_rate=fr, orderbook=ob, cvd_norm=cvd_val)
                     ai_prediction = self.ai_model.predict_win_probability(features, signal['signal'])
                     sdl["win_prob"] = ai_prediction['win_prob']
@@ -1134,7 +1152,10 @@ class TradingOrchestrator:
                     lookback_p = df_eval.tail(20)
                     pattern_high = lookback_p['high'].max()
                     pattern_low = lookback_p['low'].min()
-                    targets = StrategyRuleOf7.calculate_targets(pattern_high, pattern_low, signal['signal'])
+                    targets = StrategyRuleOf7.calculate_targets(
+                        pattern_high, pattern_low, signal['signal'],
+                        atr=safe_atr, funding_rate=fr, cvd_bias=cvd_val
+                    )
                     sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], safe_atr, signal['signal'])
 
                     # Per-strategy ATR-based TP with proper R:R ratios

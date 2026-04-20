@@ -21,7 +21,7 @@ class MarketDataWorker:
         self._running = True
 
     async def start(self):
-        _log.info("Starting Market Data Microservice...")
+        _log.info(f"Starting Market Data Microservice using Redis: {settings.redis_url}")
         self.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
         
         # Setup symbols and timeframes (usually from settings)

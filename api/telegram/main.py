@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from typing import Optional, Union, Dict, Any, List
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, CallbackQueryHandler
 from telegram.error import BadRequest
@@ -22,7 +23,7 @@ async def get_http_client(*args, **kwargs):
 
 from collections import defaultdict
 
-ENGINE_URL = "http://trading-engine:8000" # URL внутри Docker сети
+ENGINE_URL = "http://localhost:8000" # URL для локального запуска
 
 BTN_AUTOTRADE_SETTINGS = "⚙️ Настройки автоторговли"
 BTN_API_SETTINGS = "⚙️ Настройки API"
@@ -98,7 +99,7 @@ async def _load_runtime_settings(client: httpx.AsyncClient) -> dict:
     }
 
 
-async def _safe_answer_callback(query, text: str | None = None, show_alert: bool = False):
+async def _safe_answer_callback(query, text: Optional[str] = None, show_alert: bool = False):
     """
     Безопасный answerCallbackQuery:
     - не роняет handler, если callback уже протух/некорректен.
@@ -115,7 +116,7 @@ async def _get_json_with_retry(
     client: httpx.AsyncClient,
     url: str,
     *,
-    params: dict | None = None,
+    params: Optional[dict] = None,
     timeout: float = 8.0,
     retries: int = 1,
 ) -> dict:
@@ -483,7 +484,7 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка переключения: {e}")
 
 
-def _risk_tag_for_trade(is_long: bool, entry: float, stop: float, current_price: float | None) -> str:
+def _risk_tag_for_trade(is_long: bool, entry: float, stop: float, current_price: Optional[float]) -> str:
     """Оценка близости цены к стопу для UX-индикатора."""
     try:
         if current_price is None:
@@ -667,7 +668,7 @@ def _escape_md(text: str) -> str:
     return text
 
 
-def _format_history_pct(pnl_pct: float, pnl_usd: float, notional_usd: float | None = None) -> tuple[str, bool]:
+def _format_history_pct(pnl_pct: float, pnl_usd: float, notional_usd: Optional[float] = None) -> tuple[str, bool]:
     """
     Format pnl_pct for human-readable history cards.
     Extremely large percentages are usually caused by tiny position notionals,
@@ -1011,7 +1012,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
     _answered = False
 
-    async def _answer_once(text: str | None = None, show_alert: bool = False):
+    async def _answer_once(text: Optional[str] = None, show_alert: bool = False):
         nonlocal _answered
         if not _answered:
             _answered = True

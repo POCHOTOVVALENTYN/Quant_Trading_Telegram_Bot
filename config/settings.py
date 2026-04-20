@@ -15,10 +15,10 @@ class Settings(BaseSettings):
     test_secret_api_key_binance: Optional[str] = None
     
     # Database
-    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/dbname"
+    database_url: str = "postgresql+asyncpg://user:password@127.0.0.1:5440/dbname"
     
     # Redis
-    redis_url: str = "redis://localhost:6379"
+    redis_url: str = "redis://127.0.0.1:6379"
     
     # Security
     encryption_key: str = "" # AES256 key base64 URL safe
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     min_listing_days: int = 100       # Фильтр новых монет (100 дней)
     max_funding_rate: float = 0.01    # 1% в час (очень высокий)
     max_open_trades: int = 3          # Новый лимит: не более 3 позиций
-    per_trade_margin_pct: float = 0.05 # 5% маржи на каждую новую позицию
+    per_trade_margin_pct: float = 0.02 # 2% маржи на каждую новую позицию
     position_size_usdt: float = 0.0   # Фиксированный объём позиции в USDT (0 = авто через % маржи)
     apply_new_entry_rules_after_flat: bool = False  # Включать новые правила только после полного закрытия текущих позиций
     allowed_position_side: str = "BOTH"  # LONG | SHORT | BOTH
@@ -120,8 +120,9 @@ class Settings(BaseSettings):
     ml_validator_enabled: bool = False       # Master switch for ML filtering
     ml_validator_shadow_mode: bool = True    # True = log only, False = actually filter
     ml_validator_threshold: float = 0.60     # Minimum confidence to pass (when not in shadow mode)
-    signal_score_threshold: float = 0.50
-    ai_win_prob_threshold: float = 0.50
+    signal_score_threshold: float = 0.58
+    ai_win_prob_threshold: float = 0.55
+    cvd_threshold: float = 0.3               # CVD delta confirmation
 
     # Self-learning scorer
     scoring_learner_enabled: bool = True

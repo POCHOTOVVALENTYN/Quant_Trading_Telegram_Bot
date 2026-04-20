@@ -47,8 +47,8 @@ async def lifespan(app: FastAPI):
     app_logger.info("🚀 [1/5] Инициализация базы данных...")
     try:
         from prometheus_client import start_http_server
-        start_http_server(8001)
-        app_logger.info("✅ Prometheus metrics server running on port 8001.")
+        start_http_server(9091)
+        app_logger.info("✅ Prometheus metrics server running on port 9091.")
     except Exception as e:
         app_logger.error(f"❌ Failed to start Prometheus server: {e}")
 
@@ -108,13 +108,18 @@ async def lifespan(app: FastAPI):
         'enableRateLimit': True,
         'options': {
             'defaultType': 'future',
-            'testnet': settings.testnet,
             'adjustForTimeDifference': True,
             'recvWindow': 10000, 
+            'fetchCurrencies': False, 'types': ['future'], # Disable SAPI-based currency loading
         },
         'timeout': 30000 # 30 секунд
     })
-    exchange_client.set_sandbox_mode(settings.testnet)
+    
+    if settings.testnet:
+        app_logger.info("🔮 Используем Binance DEMO Trading (новые эндпоинты)")
+        # Switch to demo URLs manually to bypass CCXT's NotSupported error
+        exchange_client.urls['api'] = exchange_client.urls['demo']
+    
     
     app_logger.info(f"API URLs: {exchange_client.urls}")
     try:

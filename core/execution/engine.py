@@ -443,6 +443,15 @@ class ExecutionEngine:
                                 f"order_type={ot} fill_price={fill_price:.6f} size={fill_size} | "
                                 f"entry={entry:.6f} est_PnL={pnl_est:+.4f} USDT"
                             )
+                            # Check for BE trigger (Target 2 hit)
+                            client_id = str(db_order.client_order_id or "")
+                            trade = self.active_trades.get(symbol, {})
+                            if "_2" in client_id and "atp_" in client_id:
+                                logger.info(f"🚀 [Scaling Out] Target 2 hit for {symbol}. Moving SL to Break Even.")
+                                asyncio.ensure_future(self._move_to_breakeven(symbol, trade))
+                                trade["trailing_active"] = True
+                                trade["trailing_source"] = "EMA20"
+
                         await session.commit()
 
                 if is_protective_fill and symbol in self.active_trades:
@@ -1074,7 +1083,7 @@ class ExecutionEngine:
             if tp:
                 tp_ids = []
                 if isinstance(tp, dict):
-                    portions = [0.5, 0.3, 0.2]
+                    portions = [0.4, 0.3, 0.3]
                     targets = list(tp.values())
                     remaining_amount = Decimal(str(amount))
                     
@@ -2072,6 +2081,23 @@ class ExecutionEngine:
                     if abs(new_best - best) > 1e-12:
                         best = new_best
                         src = "break_even" if src == "unchanged" else f"{src}+be"
+                        trade["be_moved"] = True
+
+        # --- Professional EMA20 Trailing (Scaling Out Phase) ---
+        if trade.get("trailing_active") and df_tf is not None and not getattr(df_tf, "empty", True) and len(df_tf) >= 20:
+            try:
+                # Use pandas to calculate EMA20 accurately
+                ema_series = df_tf['close'].ewm(span=20, adjust=False).mean()
+                ema20 = float(ema_series.iloc[-1])
+                # We normalize it for check consistency
+                ema20_norm = float(Decimal(str(ema20)).quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP))
+                
+                new_best = self._better_stop_for_side(is_long, best, ema20_norm)
+                if abs(new_best - best) > 1e-12:
+                    best = new_best
+                    src = "ema20_trail"
+            except Exception as e:
+                logger.error(f"Error calculating EMA trailing: {e}")
 
         return best, src
 
@@ -2212,7 +2238,7 @@ class ExecutionEngine:
                 return True
         return False
 
-    def _tm_should_invalidation_exit(self, trade: dict, current_price: float, df: "pd.DataFrame | None" = None) -> bool:
+    def _tm_should_invalidation_exit(self, trade: dict, current_price: float, df: "Optional[pd.DataFrame]" = None) -> bool:
         """Setup invalidation exit: the original technical premise is broken."""
         if not settings.invalidation_exit_enabled:
             return False
@@ -2257,7 +2283,7 @@ class ExecutionEngine:
 
         return False
 
-    def _tm_should_arm_break_even(self, trade: dict, current_r: float, adx: "float | None") -> bool:
+    def _tm_should_arm_break_even(self, trade: dict, current_r: float, adx: "Optional[float]") -> bool:
         """Decide if we should move stop to break-even (1R + confirmation)."""
         if trade.get("be_armed") or trade.get("be_moved"):
             return False
@@ -2348,6 +2374,7 @@ class ExecutionEngine:
                     "current_r": current_r,
                 },
             )
+            
             logger.info(
                 f"🔻 [TM-PARTIAL] {symbol}: reduced {frac*100:.0f}% at {current_r:.2f}R "
                 f"(closed {reduce_amount:.6f}, remaining {new_size:.6f})"
@@ -2360,8 +2387,24 @@ class ExecutionEngine:
                 f"📦 Осталось: `{new_size:.6f}`"
             )
             return True
+            
         except Exception as e:
-            logger.warning(f"[TM] {symbol}: partial reduce failed: {e}")
+            logger.error(f"Error in TM partial reduce for {symbol}: {e}")
+            return False
+
+    async def _move_to_breakeven(self, symbol: str, trade: dict):
+        """Moves STOP LOSS to entry price to eliminate risk."""
+        try:
+            entry = trade.get("entry")
+            if not entry: return
+            
+            be_price = entry
+            await self._update_stop_order_only(symbol, trade, be_price)
+            
+            logger.info(f"✅ [PROTECT] {symbol} moved to BREAK EVEN at {be_price}")
+            await send_telegram_msg(f"🛡 **BREAK EVEN**\n`{symbol}` стоп переставлен в безубыток ({be_price})")
+        except Exception as e:
+            logger.error(f"Error moving to BE for {symbol}: {e}")
             return False
 
     async def evaluate_position_management(
@@ -2369,8 +2412,8 @@ class ExecutionEngine:
         symbol: str,
         current_price: float,
         atr: float,
-        adx: "float | None" = None,
-        df_tf: "pd.DataFrame | None" = None,
+        adx: "Optional[float]" = None,
+        df_tf: "Optional[pd.DataFrame]" = None,
         cvd_val: float = 0.0,
     ) -> None:
         """
@@ -2394,6 +2437,45 @@ class ExecutionEngine:
         current_r = self.risk_manager.current_r_multiple(entry, initial_stop, current_price, side)
         trade["max_favorable_r"] = max(float(trade.get("max_favorable_r", 0)), current_r)
         trade["max_adverse_r"] = min(float(trade.get("max_adverse_r", 0)), current_r)
+
+        trade["max_adverse_r"] = min(float(trade.get("max_adverse_r", 0)), current_r)
+
+        # 1. Setup invalidation exit
+
+    async def _update_stop_order_only(self, symbol: str, trade: dict, new_price: float):
+        """Cancels ONLY the current Stop-Loss and places a new one at new_price."""
+        try:
+            sl_id = trade.get("stop_order_id")
+            clean_sym = symbol.replace("/", "").split(":")[0]
+            
+            # 1. Cancel old SL if exists
+            if sl_id:
+                try:
+                    await self._with_time_sync_retry(
+                        lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'DELETE', {'symbol': clean_sym, 'algoId': str(sl_id)}),
+                        ctx=f"cancel_sl_only({symbol})"
+                    )
+                except Exception as e:
+                    # If already canceled or hit, ignore
+                    if "-4130" not in str(e):
+                        logger.warning(f"Failed to cancel SL {sl_id} for {symbol}: {e}")
+
+            # 2. Place new SL
+            side = trade.get("signal_type")
+            lot_size, _ = await self._get_live_position(symbol, preferred_side=side)
+            if lot_size <= 0: return
+
+            new_price_norm = await self._normalize_price(symbol, new_price)
+            new_sl_id, _ = await self._set_protective_orders(
+                symbol, side, lot_size, new_price_norm, tp=None, position_id=trade.get("position_db_id")
+            )
+            
+            if new_sl_id:
+                trade["stop_order_id"] = new_sl_id
+                trade["stop"] = new_price_norm
+                logger.debug(f"[TRAIL_UPDATE] {symbol} SL updated to {new_price_norm}")
+        except Exception as e:
+            logger.error(f"Error in _update_stop_order_only for {symbol}: {e}")
 
         # 1. Setup invalidation exit
         if self._tm_should_invalidation_exit(trade, current_price, df_tf):
