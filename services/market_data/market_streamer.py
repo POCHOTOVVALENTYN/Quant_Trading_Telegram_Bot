@@ -137,17 +137,32 @@ class MarketDataService:
         stream_key = f"{symbol}:{timeframe}"
         return bool(self._stream_recovering.get(stream_key, False))
 
+    def _get_timeframe_seconds(self, timeframe: str) -> int:
+        mapping = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+        return mapping.get(timeframe, 60)
+
     async def _refresh_stream_via_rest(self, stream_key: str) -> bool:
-        """Try to refresh a stale OHLCV stream via REST without global WS reset."""
+        """Try to refresh a stale OHLCV stream via REST and fill the gap."""
         symbol, timeframe = self._split_stream_key(stream_key)
+        now_monotonic = asyncio.get_event_loop().time()
+        last_time = self.last_candle_time.get(stream_key, 0)
+        
+        gap_seconds = now_monotonic - last_time
+        tf_seconds = self._get_timeframe_seconds(timeframe)
+        
+        # Calculate how many candles we likely missed (min 3, max 500)
+        limit = min(500, max(3, int(gap_seconds / tf_seconds) + 2))
+        
         try:
             rest_candles = await self._rest_call(
-                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=3),
-                ctx=f"refresh_stream_via_rest({symbol},{timeframe})",
+                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
+                ctx=f"refresh_stream_via_rest({symbol},{timeframe},limit={limit})",
             )
             if not rest_candles:
                 return False
-            self._mark_stream_alive(stream_key, asyncio.get_event_loop().time())
+                
+            self._mark_stream_alive(stream_key, now_monotonic)
+            
             try:
                 if market_data_stream_restarts:
                     market_data_stream_restarts.labels(
@@ -155,10 +170,14 @@ class MarketDataService:
                     ).inc()
             except Exception:
                 pass
-            for cb in self.callbacks:
-                await cb("ohlcv", symbol, timeframe, rest_candles[-1])
+                
+            # Publish ALL fetched candles to fill the gap in subscribers
+            for candle in rest_candles:
+                for cb in self.callbacks:
+                    await cb("ohlcv", symbol, timeframe, candle)
             return True
-        except Exception:
+        except Exception as e:
+            app_logger.error(f"Failed to refresh gap for {stream_key}: {e}")
             return False
 
     async def _restart_stream(self, symbol: str, timeframe: str):

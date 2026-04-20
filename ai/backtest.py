@@ -15,6 +15,7 @@ import argparse
 import json
 import sys
 import os
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -69,8 +70,8 @@ class BacktestEngine:
         risk_per_trade_pct: float = 0.05,
         score_threshold: float = 0.55,
         ai_threshold: float = 0.55,
-        maker_fee_pct: float | None = None,
-        taker_fee_pct: float | None = None,
+        maker_fee_pct: Optional[float] = None,
+        taker_fee_pct: Optional[float] = None,
         entry_slippage_pct: float = 0.0003,
         exit_slippage_pct: float = 0.0005,
     ):
@@ -299,6 +300,45 @@ class BacktestEngine:
 
         return self._compile_results()
 
+    def run_monte_carlo(self, n_simulations: int = 1000) -> Dict[str, Any]:
+        """
+        Perform Monte Carlo simulation by shuffling trade sequences.
+        Helps understand the range of possible outcomes and risk of ruin.
+        """
+        if not self.trades:
+            return {"error": "No trades to simulate"}
+
+        original_trades = [t["pnl"] for t in self.trades]
+        final_balances = []
+        max_drawdowns = []
+
+        for _ in range(n_simulations):
+            shuffled = list(original_trades)
+            random.shuffle(shuffled)
+            
+            balance = self.initial_balance
+            peak = balance
+            mdd = 0
+            
+            for pnl in shuffled:
+                balance += pnl
+                peak = max(peak, balance)
+                dd = (peak - balance) / peak
+                mdd = max(mdd, dd)
+            
+            final_balances.append(balance)
+            max_drawdowns.append(mdd)
+
+        return {
+            "n_simulations": n_simulations,
+            "avg_final_balance": float(np.mean(final_balances)),
+            "median_final_balance": float(np.median(final_balances)),
+            "std_final_balance": float(np.std(final_balances)),
+            "avg_max_drawdown_pct": float(np.mean(max_drawdowns)) * 100,
+            "max_drawdown_95_percentile": float(np.percentile(max_drawdowns, 95)) * 100,
+            "prob_of_negative_return": float(len([b for b in final_balances if b < self.initial_balance]) / n_simulations) * 100
+        }
+
     def _compile_results(self) -> Dict[str, Any]:
         n_trades = len(self.trades)
         if n_trades == 0:
@@ -427,6 +467,39 @@ async def main():
     with open("data/backtest_results.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to data/backtest_results.json")
+
+    # --- NEW: Monte Carlo ---
+    if results.get("total_trades", 0) > 5:
+        print("\n Running Monte Carlo Simulation (1000 iterations)...")
+        mc_results = engine.run_monte_carlo(1000)
+        print("-" * 40)
+        print(f"  Avg Final Balance:  ${mc_results['avg_final_balance']:.2f}")
+        print(f"  Median Balance:     ${mc_results['median_final_balance']:.2f}")
+        print(f"  Avg Max Drawdown:   {mc_results['avg_max_drawdown_pct']:.2f}%")
+        print(f"  95% Prob Max DD:    {mc_results['max_drawdown_95_percentile']:.2f}%")
+        print(f"  Risk of Ruin/Loss:  {mc_results['prob_of_negative_return']:.1f}%")
+        print("-" * 40)
+        
+        with open("data/monte_carlo_results.json", "w") as f:
+            json.dump(mc_results, f, indent=2)
+
+    # --- NEW: Walk-Forward Analysis (Concept) ---
+    if args.days >= 60:
+        print("\n Running Walk-Forward Analysis (2 Segments)...")
+        mid_idx = len(df) // 2
+        df_is = df.iloc[:mid_idx]
+        df_oos = df.iloc[mid_idx:]
+        
+        print(f"  IS Period: {len(df_is)} candles | OOS Period: {len(df_oos)} candles")
+        
+        engine_oos = BacktestEngine(initial_balance=args.balance)
+        oos_results = engine_oos.run(df_oos)
+        
+        print(f"  OOS Return: {oos_results.get('return_pct', 0):.2f}% (vs {results.get('return_pct', 0):.2f}% total)")
+        if oos_results.get('return_pct', 0) > 0 and results.get('return_pct', 0) > 0:
+            print("  ✅ Strategy shows robustness on OOS data!")
+        elif oos_results.get('return_pct', 0) < 0:
+            print("  ⚠️ Warning: Strategy failed OOS validation. High risk of over-optimization.")
 
 
 if __name__ == "__main__":

@@ -496,9 +496,6 @@ class TradingOrchestrator:
 
     async def on_market_data(self, data_type: str, symbol: str, timeframe: str, data: Any):
         if data_type == "ohlcv":
-            # Pulse log to verify data flow
-            if symbol.startswith("BTC"):
-                logger.info(f"📈 [PULSE] Receiving OHLCV for {symbol}:{timeframe}")
             await self._process_ohlcv(symbol, timeframe, data)
         elif data_type == "orderbook":
             self.orderbooks[symbol] = data
