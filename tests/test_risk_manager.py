@@ -19,18 +19,31 @@ def test_check_trade_allowed():
     # Case 3: Max drawdown reached
     assert rm.check_trade_allowed(current_open_trades=2, current_drawdown_pct=0.20) is False
 
+def test_max_risk_amount_per_trade():
+    rm = RiskManager(max_risk_pct=0.02)
+    assert rm.max_risk_amount(10000) == pytest.approx(200.0)
+
+def test_max_drawdown_protection_helper():
+    rm = RiskManager(max_drawdown_pct=0.20)
+    assert rm.max_drawdown_exceeded(0.19) is False
+    assert rm.max_drawdown_exceeded(0.20) is True
+
 def test_calculate_position_size():
     rm = RiskManager(max_risk_pct=0.02)
-    # Новый режим: 5% маржи на сделку * leverage(settings)
-    # При дефолтных settings.leverage=10:
-    # margin = 10000 * 0.05 = 500 USDT
-    # notional = 500 * 10 = 5000 USDT
-    # size = 5000 / 100 = 50
+    # Риск на сделку 2% от 10_000 = 200 USDT.
+    # Риск на единицу = |100 - 90| = 10.
+    # Размер позиции = 200 / 10 = 20.
     size = rm.calculate_position_size(account_balance=10000, entry_price=100, stop_loss_price=90)
-    assert size == 50.0
+    assert size == 20.0
     
     # stop_loss_price теперь не влияет на размер, но некорректная цена входа должна давать 0
     assert rm.calculate_position_size(10000, 0, 100) == 0.0
+
+def test_calculate_position_size_by_risk():
+    rm = RiskManager(max_risk_pct=0.02)
+    size = rm.calculate_position_size_by_risk(account_balance=5000, entry_price=250, stop_loss_price=245)
+    # max risk = 100, risk per unit = 5, so size = 20
+    assert size == pytest.approx(20.0)
 
 def test_assess_trade_feasibility_below_min_notional():
     rm = RiskManager(max_risk_pct=0.02)

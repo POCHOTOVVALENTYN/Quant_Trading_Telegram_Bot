@@ -29,6 +29,7 @@ from core.strategies.strategies import (
     StrategyFundingSqueeze, StrategyRuleOf7,
     get_timeframe_seconds,
 )
+from core.strategies.meta_strategy import MetaStrategy
 from core.indicators.indicators import (
     calculate_atr, calculate_rsi, calculate_bollinger_bands, calculate_csi, calculate_sma,
     calculate_ema, calculate_adx, calculate_williams_r, calculate_vwap
@@ -90,6 +91,10 @@ class TradingOrchestrator:
             StrategyWideRangeReversal(),
             StrategyFundingSqueeze(),
         ]
+        self.meta_strategy = MetaStrategy(
+            adx_trend_min=float(getattr(settings, "regime_adx_trend_min", 22.0)),
+            adx_flat_max=float(getattr(settings, "regime_adx_range_max", 18.0)),
+        )
 
         self.dynamic_strategy_scorer = DynamicStrategyScorer()
         self.scorer = SignalScorer(dynamic_scorer=self.dynamic_strategy_scorer)
@@ -321,7 +326,13 @@ class TradingOrchestrator:
             allowed = rules.get(dim, ["*"])
             if "*" in allowed:
                 continue
-            if current_val not in allowed:
+            compatible_values = {current_val}
+            if dim == "trend":
+                if current_val == "FLAT":
+                    compatible_values.update({"RANGE", "NEUTRAL"})
+                elif current_val in {"RANGE", "NEUTRAL"}:
+                    compatible_values.add("FLAT")
+            if compatible_values.isdisjoint(set(allowed)):
                 return False
         return True
 
@@ -651,9 +662,13 @@ class TradingOrchestrator:
                     )
                     return
 
+            meta_selection = self.meta_strategy.select_strategies(df_eval, self.strategies)
+            market_regime = meta_selection.regime
+            mkt_ctx = self._build_market_context(symbol, df_eval, market_regime, current_adx)
+
             candidate_signals = []
 
-            for strategy in self.strategies:
+            for strategy in meta_selection.strategies:
                 allowed_tfs = _STRATEGY_TIMEFRAME_MATRIX.get(type(strategy))
                 if allowed_tfs is not None and timeframe not in allowed_tfs:
                     continue

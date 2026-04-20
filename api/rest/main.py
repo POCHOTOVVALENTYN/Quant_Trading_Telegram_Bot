@@ -661,6 +661,43 @@ async def get_orders_audit(limit: int = 100, symbol: Optional[str] = None):
     return {"items": items, "count": len(items)}
 
 
+@app.get("/api/v1/execution-audit", dependencies=[Depends(verify_api_key)])
+async def get_execution_audit(limit: int = 100, symbol: Optional[str] = None, event_type: Optional[str] = None):
+    """Execution audit trail for signal/order/position lifecycle."""
+    from database.session import async_session
+    from database.models.all_models import ExecutionAuditLog
+    from sqlalchemy import select, desc
+
+    clamped = max(1, min(500, int(limit)))
+    async with async_session() as session:
+        stmt = select(ExecutionAuditLog).order_by(desc(ExecutionAuditLog.created_at))
+        if symbol:
+            stmt = stmt.where(ExecutionAuditLog.symbol == symbol)
+        if event_type:
+            stmt = stmt.where(ExecutionAuditLog.event_type == event_type)
+        stmt = stmt.limit(clamped)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    items = []
+    for row in rows:
+        items.append({
+            "id": row.id,
+            "user_id": row.user_id,
+            "signal_id": row.signal_id,
+            "position_id": row.position_id,
+            "order_id": row.order_id,
+            "symbol": row.symbol,
+            "strategy": row.strategy,
+            "event_type": row.event_type,
+            "severity": row.severity,
+            "message": row.message,
+            "payload": row.payload or {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        })
+    return {"items": items, "count": len(items)}
+
+
 @app.get("/api/v1/trades", dependencies=[Depends(verify_api_key)])
 async def get_active_trades():
     if not orchestrator:
@@ -1186,5 +1223,4 @@ setInterval(tick, 1000);
 </script>
 </body>
 </html>"""
-
 

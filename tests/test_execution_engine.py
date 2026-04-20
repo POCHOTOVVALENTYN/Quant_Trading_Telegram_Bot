@@ -34,9 +34,11 @@ class _DummySessionCtx:
 class _SessionFactory:
     def __init__(self):
         self.sessions = []
+        self.execute_result = SimpleNamespace(rowcount=1)
 
     def __call__(self):
         s = _DummySession()
+        s.execute = AsyncMock(return_value=self.execute_result)
         self.sessions.append(s)
         return _DummySessionCtx(s)
 
@@ -212,6 +214,29 @@ async def test_execute_signal_waits_until_flat_before_new_policy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_signal_blocks_when_open_position_exists_in_db(monkeypatch):
+    exchange = MagicMock()
+    exchange.create_order = AsyncMock()
+    engine = ExecutionEngine(exchange_client=exchange, risk_manager=RiskManager())
+    engine.risk_manager.check_trade_allowed = MagicMock(return_value=True)
+    engine._get_live_position = AsyncMock(return_value=(0.0, None))
+
+    session_factory = _SessionFactory()
+    session_factory.execute_result = SimpleNamespace(scalar_one_or_none=lambda: 42)
+    monkeypatch.setattr("core.execution.engine.async_session", session_factory)
+
+    await engine.execute_signal(
+        {"id": 1, "symbol": "BTC/USDT", "signal": "LONG", "entry_price": 100.0, "atr": 1.0},
+        account_balance=1000.0,
+        drawdown=0.0,
+        open_count=0,
+    )
+
+    exchange.create_order.assert_not_awaited()
+    assert "BTC/USDT" not in engine.active_trades
+
+
+@pytest.mark.asyncio
 async def test_close_position_side_mismatch_skips_market_close(monkeypatch):
     exchange = MagicMock()
     exchange.cancel_all_orders = AsyncMock()
@@ -233,6 +258,43 @@ async def test_close_position_side_mismatch_skips_market_close(monkeypatch):
     exchange.create_order.assert_not_awaited()
     # И запись в памяти не должна удаляться, т.к. закрытие не выполнено.
     assert "BTC/USDT" in engine.active_trades
+
+
+@pytest.mark.asyncio
+async def test_tm_partial_reduce_updates_position_lifecycle(monkeypatch):
+    from config.settings import settings
+
+    monkeypatch.setattr(settings, "partial_enabled", True)
+    monkeypatch.setattr(settings, "partial_trigger_r", 1.0)
+    monkeypatch.setattr(settings, "partial_fraction", 0.5)
+    exchange = MagicMock()
+    exchange.create_order = AsyncMock(return_value={"id": "reduce-1", "average": 110.0, "filled": 0.5})
+    exchange.market = MagicMock(return_value={"limits": {"amount": {"min": 0.001}}})
+
+    engine = ExecutionEngine(exchange_client=exchange, risk_manager=RiskManager())
+    engine.active_trades["BTC/USDT"] = {
+        "signal_type": "LONG",
+        "entry": 100.0,
+        "current_size": 1.0,
+        "position_db_id": 10,
+        "partial_done": False,
+        "realized_pnl": 0.0,
+    }
+    engine._get_live_position = AsyncMock(return_value=(1.0, "LONG"))
+    engine._db_persist_order = AsyncMock()
+    engine._tm_record = MagicMock()
+    monkeypatch.setattr("core.execution.engine.send_telegram_msg", AsyncMock())
+
+    session_factory = _SessionFactory()
+    monkeypatch.setattr("core.execution.engine.async_session", session_factory)
+
+    result = await engine._tm_partial_reduce("BTC/USDT", engine.active_trades["BTC/USDT"], current_r=10.0)
+
+    assert result is True
+    assert engine.active_trades["BTC/USDT"]["current_size"] == pytest.approx(0.5)
+    assert engine.active_trades["BTC/USDT"]["realized_pnl"] == pytest.approx(4.9725)
+    assert engine.active_trades["BTC/USDT"]["position_is_open"] is True
+    assert session_factory.sessions[-1].execute.await_count == 1
 
 
 @pytest.mark.asyncio

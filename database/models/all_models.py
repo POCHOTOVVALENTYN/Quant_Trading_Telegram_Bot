@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Enum, BigInteger, Index, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Enum, BigInteger, Index, UniqueConstraint, JSON
 from sqlalchemy.orm import relationship
 import enum
 
@@ -198,4 +198,27 @@ class SignalDecisionLog(Base):
 
     __table_args__ = (
         Index("ix_sdl_symbol_ts", "symbol", "created_at"),
+    )
+
+
+class ExecutionAuditLog(Base):
+    """Execution audit trail for signal/order/position lifecycle reconstruction."""
+    __tablename__ = "execution_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    signal_id = Column(Integer, ForeignKey("signals.id"), nullable=True, index=True)
+    position_id = Column(Integer, ForeignKey("positions.id"), nullable=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=True, index=True)
+    symbol = Column(String, nullable=True, index=True)
+    strategy = Column(String, nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    severity = Column(String, nullable=False, default="INFO")
+    message = Column(String, nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+    __table_args__ = (
+        Index("ix_execution_audit_symbol_ts", "symbol", "created_at"),
+        Index("ix_execution_audit_event_ts", "event_type", "created_at"),
     )

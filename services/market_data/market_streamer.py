@@ -4,6 +4,7 @@ import ccxt.pro as ccxtpro
 from typing import Dict, Callable, Tuple
 from core.strategies.strategies import get_timeframe_seconds
 from utils.logger import get_market_data_logger
+from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_binance_retry
 
 try:
     from utils.metrics import (
@@ -63,6 +64,19 @@ class MarketDataService:
         self._last_global_ws_reset_ts: float = 0.0
         self._tasks: Dict[str, asyncio.Task] = {}
         self._streaming_active = False
+        self._rest_limiter = BinanceRateLimiter(max_concurrent=2)
+
+    async def _rest_call(self, op, *, ctx: str):
+        try:
+            return await call_with_binance_retry(
+                op=op,
+                exchange=self.exchange,
+                limiter=self._rest_limiter,
+                policy=BinanceCallPolicy(max_attempts=4, base_delay=0.5, max_delay=5.0, timeout_seconds=20.0),
+            )
+        except Exception as e:
+            app_logger.warning(f"⚠️ [BINANCE_REST] {ctx}: {e}")
+            raise
 
     @staticmethod
     def _split_stream_key(stream_key: str) -> Tuple[str, str]:
@@ -127,7 +141,10 @@ class MarketDataService:
         """Try to refresh a stale OHLCV stream via REST without global WS reset."""
         symbol, timeframe = self._split_stream_key(stream_key)
         try:
-            rest_candles = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=3)
+            rest_candles = await self._rest_call(
+                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=3),
+                ctx=f"refresh_stream_via_rest({symbol},{timeframe})",
+            )
             if not rest_candles:
                 return False
             self._mark_stream_alive(stream_key, asyncio.get_event_loop().time())
@@ -234,7 +251,10 @@ class MarketDataService:
 
                 if reconnect_backoff >= 30.0:
                     try:
-                        rest_candles = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=5)
+                        rest_candles = await self._rest_call(
+                            lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=5),
+                            ctx=f"watch_ohlcv.rest_fallback({symbol},{timeframe})",
+                        )
                         if rest_candles:
                             self._mark_stream_alive(stream_key, asyncio.get_event_loop().time())
                             try:
@@ -298,7 +318,10 @@ class MarketDataService:
         app_logger.info("Начало проверки Funding Rates")
         while self.running:
             try:
-                rates = await self.exchange.fetch_funding_rates(self.symbols)
+                rates = await self._rest_call(
+                    lambda: self.exchange.fetch_funding_rates(self.symbols),
+                    ctx="fetch_funding_rates",
+                )
                 for cb in self.callbacks:
                     await cb("funding_rate", "ALL", None, rates)
             except Exception as e:
@@ -317,11 +340,17 @@ class MarketDataService:
                 try:
                     # Некоторые версии CCXT или биржи могут не поддерживать fetch_avg_price
                     if hasattr(self.exchange, 'fetch_avg_price'):
-                        res = await self.exchange.fetch_avg_price(symbol)
+                        res = await self._rest_call(
+                            lambda: self.exchange.fetch_avg_price(symbol),
+                            ctx=f"fetch_avg_price({symbol})",
+                        )
                         avg_price = float(res['price'])
                     else:
                         # Fallback: берем текущую цену из тикера
-                        res = await self.exchange.fetch_ticker(symbol)
+                        res = await self._rest_call(
+                            lambda: self.exchange.fetch_ticker(symbol),
+                            ctx=f"fetch_ticker({symbol})",
+                        )
                         avg_price = float(res['last'])
                     
                     for cb in self.callbacks:
@@ -333,7 +362,10 @@ class MarketDataService:
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
         """REST-запрос истории для холодного старта"""
         try:
-            return await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            return await self._rest_call(
+                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
+                ctx=f"fetch_ohlcv({symbol},{timeframe})",
+            )
         except Exception as e:
             app_logger.error(f"Ошибка fetch_ohlcv для {symbol}: {e}")
             return []
@@ -344,7 +376,10 @@ class MarketDataService:
             if symbol in self.instrument_info:
                 return self.instrument_info[symbol]
                 
-            markets = await self.exchange.fetch_markets()
+            markets = await self._rest_call(
+                lambda: self.exchange.fetch_markets(),
+                ctx=f"fetch_markets({symbol})",
+            )
             for m in markets:
                 if m['symbol'] == symbol:
                     # ccxt не всегда отдает 'info' с датой листинга напрямую в fetch_markets

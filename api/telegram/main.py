@@ -7,6 +7,8 @@ import time
 import httpx
 from contextlib import asynccontextmanager
 
+from config.settings import settings
+
 # Global client for preventing TIME_WAIT exhaustion
 global_client = httpx.AsyncClient(
     timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0),
@@ -19,7 +21,6 @@ async def get_http_client(*args, **kwargs):
     yield global_client
 
 from collections import defaultdict
-from config.settings import settings
 
 ENGINE_URL = "http://trading-engine:8000" # URL внутри Docker сети
 

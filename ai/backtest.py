@@ -35,6 +35,8 @@ from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
 from ai.model import AIModel
 from core.risk.risk_manager import RiskManager
+from core.pnl.pnl_calculator import PnLCalculator
+from config.settings import settings
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -67,6 +69,10 @@ class BacktestEngine:
         risk_per_trade_pct: float = 0.05,
         score_threshold: float = 0.55,
         ai_threshold: float = 0.55,
+        maker_fee_pct: float | None = None,
+        taker_fee_pct: float | None = None,
+        entry_slippage_pct: float = 0.0003,
+        exit_slippage_pct: float = 0.0005,
     ):
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -76,6 +82,10 @@ class BacktestEngine:
         self.risk_pct = risk_per_trade_pct
         self.score_threshold = score_threshold
         self.ai_threshold = ai_threshold
+        self.maker_fee_pct = float(settings.maker_fee_pct if maker_fee_pct is None else maker_fee_pct)
+        self.taker_fee_pct = float(settings.taker_fee_pct if taker_fee_pct is None else taker_fee_pct)
+        self.entry_slippage_pct = float(entry_slippage_pct)
+        self.exit_slippage_pct = float(exit_slippage_pct)
 
         self.strategies = [
             StrategyDonchian(period=20),
@@ -96,6 +106,72 @@ class BacktestEngine:
         self.signals_generated = 0
         self.signals_filtered = 0
 
+    def _apply_slippage(self, price: float, direction: str, *, is_entry: bool) -> float:
+        slip_pct = self.entry_slippage_pct if is_entry else self.exit_slippage_pct
+        side = str(direction or "").upper()
+        if side == "LONG":
+            factor = (1.0 + slip_pct) if is_entry else (1.0 - slip_pct)
+        else:
+            factor = (1.0 - slip_pct) if is_entry else (1.0 + slip_pct)
+        return float(price) * factor
+
+    def _entry_fill_price(self, bar: pd.Series, direction: str) -> float:
+        base_price = float(bar["open"])
+        slipped = self._apply_slippage(base_price, direction, is_entry=True)
+        low = float(bar["low"])
+        high = float(bar["high"])
+        return min(max(slipped, low), high)
+
+    def _exit_fill_price(self, bar: pd.Series, direction: str, trigger_price: float, reason: str) -> float:
+        low = float(bar["low"])
+        high = float(bar["high"])
+        open_price = float(bar["open"])
+        side = str(direction or "").upper()
+        trigger = float(trigger_price)
+
+        # Worst-case fill model inside a single OHLC bar:
+        # - Stop: allow gap-through beyond trigger against us
+        # - TP: require trade-through and then apply adverse slippage
+        if reason == "SL":
+            if side == "LONG":
+                raw_fill = min(trigger, open_price)
+            else:
+                raw_fill = max(trigger, open_price)
+        else:
+            if side == "LONG":
+                raw_fill = max(trigger, open_price)
+            else:
+                raw_fill = min(trigger, open_price)
+
+        slipped = self._apply_slippage(raw_fill, direction, is_entry=False)
+        return min(max(slipped, low), high)
+
+    def _close_trade(self, trade: Dict[str, Any], exit_price: float, exit_reason: str) -> Dict[str, Any]:
+        entry_fee = float(trade.get("entry_fee_usd", 0.0) or 0.0)
+        exit_fee = PnLCalculator.estimate_fee(
+            price=exit_price,
+            qty=float(trade["size"]),
+            fee_rate=self.taker_fee_pct,
+        )
+        pnl = PnLCalculator.calculate_realized_pnl(
+            side=str(trade["direction"]),
+            entry_price=float(trade["entry"]),
+            exit_price=float(exit_price),
+            qty=float(trade["size"]),
+            entry_fee_usd=entry_fee,
+            exit_fee_usd=exit_fee,
+        )
+        closed = dict(trade)
+        closed["exit_price"] = float(exit_price)
+        closed["exit_reason"] = exit_reason
+        closed["entry_fee_usd"] = entry_fee
+        closed["exit_fee_usd"] = exit_fee
+        closed["fees_usd"] = pnl.fees_usd
+        closed["gross_pnl"] = pnl.gross_pnl_usd
+        closed["pnl"] = pnl.pnl_usd
+        closed["pnl_pct"] = pnl.pnl_pct
+        return closed
+
     def run(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Run backtest on OHLCV DataFrame with pre-calculated indicators."""
         if len(df) < 200:
@@ -114,45 +190,21 @@ class BacktestEngine:
                 is_long = open_trade["direction"] == "LONG"
                 sl = open_trade["sl"]
                 tp = open_trade["tp"]
+                stop_hit = bool(is_long and bar['low'] <= sl) or bool((not is_long) and bar['high'] >= sl)
+                tp_hit = bool(is_long and bar['high'] >= tp) or bool((not is_long) and bar['low'] <= tp)
 
-                # SL hit
-                if is_long and bar['low'] <= sl:
-                    pnl = (sl - open_trade["entry"]) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = sl
-                    open_trade["exit_reason"] = "SL"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (sl / open_trade["entry"] - 1) * 100
-                    self.trades.append(open_trade)
+                # Conservative intrabar resolution: if both touched inside one bar, assume SL first.
+                if stop_hit:
+                    exit_price = self._exit_fill_price(bar, open_trade["direction"], sl, "SL")
+                    closed = self._close_trade(open_trade, exit_price, "SL")
+                    self.balance += closed["pnl"]
+                    self.trades.append(closed)
                     open_trade = None
-                elif not is_long and bar['high'] >= sl:
-                    pnl = (open_trade["entry"] - sl) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = sl
-                    open_trade["exit_reason"] = "SL"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (1 - sl / open_trade["entry"]) * 100
-                    self.trades.append(open_trade)
-                    open_trade = None
-
-                # TP hit
-                elif is_long and bar['high'] >= tp:
-                    pnl = (tp - open_trade["entry"]) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = tp
-                    open_trade["exit_reason"] = "TP"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (tp / open_trade["entry"] - 1) * 100
-                    self.trades.append(open_trade)
-                    open_trade = None
-                elif not is_long and bar['low'] <= tp:
-                    pnl = (open_trade["entry"] - tp) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = tp
-                    open_trade["exit_reason"] = "TP"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (1 - tp / open_trade["entry"]) * 100
-                    self.trades.append(open_trade)
+                elif tp_hit:
+                    exit_price = self._exit_fill_price(bar, open_trade["direction"], tp, "TP")
+                    closed = self._close_trade(open_trade, exit_price, "TP")
+                    self.balance += closed["pnl"]
+                    self.trades.append(closed)
                     open_trade = None
                 else:
                     continue
@@ -210,7 +262,7 @@ class BacktestEngine:
                 win_prob = top['win_prob']
 
                 # Execute trade
-                entry = bar['close']
+                entry = self._entry_fill_price(bar, signal['signal'])
                 direction = signal['signal']
                 sl_price = self.risk.calculate_atr_stop(entry, atr, direction, self.sl_mult)
 
@@ -221,6 +273,11 @@ class BacktestEngine:
 
                 margin = self.balance * self.risk_pct
                 size = (margin * self.leverage) / entry
+                entry_fee = PnLCalculator.estimate_fee(
+                    price=entry,
+                    qty=size,
+                    fee_rate=self.taker_fee_pct,
+                )
 
                 open_trade = {
                     "entry": entry,
@@ -232,6 +289,7 @@ class BacktestEngine:
                     "score": score,
                     "win_prob": win_prob,
                     "bar_idx": i,
+                    "entry_fee_usd": entry_fee,
                 }
 
         return self._compile_results()

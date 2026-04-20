@@ -17,7 +17,11 @@ from database.models.all_models import (
 from config.settings import settings
 from utils.logger import get_execution_logger
 from utils.notifier import send_telegram_msg
+from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_binance_retry
+from core.audit.audit_trail import AuditTrail
 from core.risk.risk_manager import RiskManager, TimeExitSystem, PyramidingSystem
+from core.position.position_manager import PositionManager, PositionState
+from core.pnl.pnl_calculator import PnLCalculator
 try:
     from utils.metrics import (
         trades_opened, trades_closed, pnl_per_trade, entry_failures,
@@ -85,6 +89,8 @@ class ExecutionEngine:
         self._tm_partial_reduce_skip_log_ts: Dict[str, float] = {}
         # Фоновые задачи (periodic reconcile, ws watchdog)
         self._periodic_reconcile_task: Optional[asyncio.Task] = None
+        self._binance_limiter = BinanceRateLimiter(max_concurrent=3)
+        self.audit_trail = AuditTrail(user_id=self.user_id)
 
         
     async def _get_market_rules(self, symbol: str) -> dict:
@@ -143,34 +149,17 @@ class ExecutionEngine:
         raise ValueError(f"Unsupported side: {side}")
 
     async def _with_time_sync_retry(self, op, ctx: str = ""):
-        """Единый retry для приватных Binance-запросов при -1021."""
-        max_attempts = 3
-        delay = 0.4
-        last_err = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                return await op()
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                if "429" in err_str or "RateLimit" in err_str or "rate limit" in err_str.lower():
-                    try:
-                        from utils.metrics import api_429_errors
-                        api_429_errors.inc()
-                    except Exception:
-                        pass
-
-                if "-1021" not in err_str:
-                    raise
-                try:
-                    await self.exchange.load_time_difference()
-                except Exception:
-                    pass
-                logger.warning(f"⏱ [TIME_SYNC] Retry {attempt}/{max_attempts} after -1021 ({ctx})")
-                if attempt < max_attempts:
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2.0, 2.0)
-        raise last_err
+        """Retry wrapper for Binance private calls: time-sync, transient network and rate-limit safe."""
+        try:
+            return await call_with_binance_retry(
+                op=op,
+                exchange=self.exchange,
+                limiter=self._binance_limiter,
+                policy=BinanceCallPolicy(max_attempts=4, base_delay=0.4, max_delay=3.0, timeout_seconds=30.0),
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ [BINANCE_API] {ctx}: {e}")
+            raise
 
     async def _prepare_private_ops(self, ctx: str = ""):
         """Preflight sync для серии приватных запросов."""
@@ -407,6 +396,8 @@ class ExecutionEngine:
             ex_id = str(order.get('id'))
             info = order.get('info') or {}
             algo_alt = str(info.get("algoId") or info.get("clientAlgoId") or "").strip()
+            protective_fill_price = 0.0
+            protective_fill_size = 0.0
 
             if status in ('canceled', 'cancelled', 'expired', 'rejected'):
                 async with async_session() as session:
@@ -438,6 +429,8 @@ class ExecutionEngine:
                             is_protective_fill = True
                             fill_price = float(order.get('average') or order.get('price') or 0.0)
                             fill_size = float(order.get('filled') or order.get('amount') or 0.0)
+                            protective_fill_price = fill_price
+                            protective_fill_size = fill_size
                             fill_type = "SL" if "STOP" in ot else ("TP" if "TAKE" in ot else "TRAILING")
                             trade = self.active_trades.get(symbol, {})
                             entry = trade.get("entry", 0)
@@ -453,8 +446,35 @@ class ExecutionEngine:
                         await session.commit()
 
                 if is_protective_fill and symbol in self.active_trades:
-                    logger.info(f"🔄 [WS_ORDERS] Closing {symbol} from active_trades (SL/TP triggered)")
-                    await self._close_position(symbol, reason="EXTERNAL")
+                    trade = self.active_trades.get(symbol)
+                    live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
+                    if live_size <= 1e-8:
+                        logger.info(f"🔄 [WS_ORDERS] Closing {symbol} from active_trades (SL/TP triggered)")
+                        await self._close_position(symbol, reason="EXTERNAL")
+                    else:
+                        position_update = PositionManager.partial_close(
+                            state=self._trade_position_state(trade),
+                            qty=protective_fill_size,
+                            exit_price=protective_fill_price or float(trade.get("entry") or 0.0),
+                            exit_fee_usd=self._extract_order_fee_usd(order, "protective_fill"),
+                        )
+                        self._apply_position_update_to_trade(trade, position_update)
+                        async with async_session() as session:
+                            await session.execute(
+                                update(PositionModel)
+                                .where(PositionModel.id == trade["position_db_id"])
+                                .values(
+                                    size=float(live_size),
+                                    realized_pnl=float(position_update.state.realized_pnl),
+                                )
+                            )
+                            await session.commit()
+                        trade["current_size"] = float(live_size)
+                        logger.info(
+                            f"📉 [WS_ORDERS] Partial protective fill for {symbol}: "
+                            f"closed={position_update.closed_qty:.6f} remaining={live_size:.6f} "
+                            f"realized={position_update.realized_pnl:+.4f}"
+                        )
 
                 if not is_protective_fill and symbol in self.active_trades:
                     order_type = str(order.get('type', '')).upper()
@@ -523,6 +543,31 @@ class ExecutionEngine:
         except Exception as e:
             logger.warning(f"⚠️ [AUDIT] order persist failed ({symbol}): {e}")
 
+    async def _audit_event(
+        self,
+        *,
+        event_type: str,
+        severity: str = "INFO",
+        message: Optional[str] = None,
+        symbol: Optional[str] = None,
+        strategy: Optional[str] = None,
+        signal_id: Optional[int] = None,
+        position_id: Optional[int] = None,
+        order_id: Optional[int] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        await self.audit_trail.record(
+            event_type=event_type,
+            severity=severity,
+            message=message,
+            symbol=symbol,
+            strategy=strategy,
+            signal_id=signal_id,
+            position_id=position_id,
+            order_id=order_id,
+            payload=payload,
+        )
+
     def _position_side_from_entry_side(self, side: str) -> str:
         s = (side or "").upper()
         if s in ("BUY", "LONG"):
@@ -530,6 +575,112 @@ class ExecutionEngine:
         if s in ("SELL", "SHORT"):
             return "SHORT"
         return "LONG"
+
+    def _trade_position_state(self, trade: Dict[str, Any]) -> PositionState:
+        side = trade.get("signal_type")
+        qty = float(trade.get("current_size", 0.0) or 0.0)
+        return PositionState(
+            is_open=qty > 1e-12 and bool(side),
+            entry_price=float(trade.get("entry", 0.0) or 0.0),
+            qty=qty,
+            side=str(side).upper() if side else None,
+            realized_pnl=float(trade.get("realized_pnl", 0.0) or 0.0),
+            open_fees_usd=float(trade.get("open_fees_usd", 0.0) or 0.0),
+        )
+
+    def _apply_position_update_to_trade(self, trade: Dict[str, Any], update_result) -> Dict[str, Any]:
+        state = update_result.state
+        trade["current_size"] = float(state.qty)
+        trade["realized_pnl"] = float(state.realized_pnl)
+        trade["position_is_open"] = bool(state.is_open)
+        trade["open_fees_usd"] = float(state.open_fees_usd)
+        if state.is_open and state.side:
+            trade["entry"] = float(state.entry_price)
+            trade["signal_type"] = str(state.side)
+        return trade
+
+    async def _find_open_position_guard(self, symbol: str) -> Optional[str]:
+        local_trade = self.active_trades.get(symbol)
+        if local_trade:
+            if local_trade.get("stage") == "PENDING_EXECUTION":
+                return "active_trades_pending_execution"
+            if local_trade.get("position_is_open", False):
+                return "active_trades_open_position"
+            if float(local_trade.get("current_size", 0.0) or 0.0) > 1e-8:
+                return "active_trades_nonzero_size"
+
+        try:
+            async with async_session() as session:
+                res = await session.execute(
+                    select(PositionModel.id)
+                    .where(
+                        PositionModel.symbol == symbol,
+                        PositionModel.status == PositionStatus.OPEN,
+                    )
+                    .limit(1)
+                )
+                if res.scalar_one_or_none() is not None:
+                    return "db_open_position"
+        except Exception as e:
+            logger.debug(f"[GUARD] DB open-position check failed for {symbol}: {e}")
+
+        try:
+            live_size, _ = await self._get_live_position(symbol)
+            if live_size > 1e-8:
+                return "exchange_live_position"
+        except Exception as e:
+            logger.debug(f"[GUARD] Exchange open-position check failed for {symbol}: {e}")
+
+        return None
+
+    def _estimate_fee_rate(self, order_kind: str = "") -> float:
+        kind = str(order_kind or "").lower()
+        if "limit" in kind or "maker" in kind:
+            return float(getattr(settings, "maker_fee_pct", 0.0) or 0.0)
+        return float(getattr(settings, "taker_fee_pct", 0.0) or 0.0)
+
+    def _extract_order_fee_usd(self, order: Optional[Dict[str, Any]], order_kind: str = "") -> float:
+        if not order:
+            return 0.0
+
+        fee = order.get("fee")
+        if isinstance(fee, dict):
+            try:
+                return abs(float(fee.get("cost", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                pass
+
+        fees = order.get("fees")
+        if isinstance(fees, list):
+            total = 0.0
+            seen = False
+            for item in fees:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    total += abs(float(item.get("cost", 0.0) or 0.0))
+                    seen = True
+                except (TypeError, ValueError):
+                    continue
+            if seen:
+                return total
+
+        info = order.get("info") or {}
+        for key in ("commission", "cumQuoteCommission", "executedCommission"):
+            try:
+                val = info.get(key)
+                if val is not None:
+                    return abs(float(val))
+            except (TypeError, ValueError):
+                continue
+
+        price = float(order.get("average") or order.get("price") or 0.0)
+        qty = float(order.get("filled") or order.get("amount") or 0.0)
+        return PnLCalculator.estimate_fee(
+            price=price,
+            qty=qty,
+            fee_rate=self._estimate_fee_rate(order_kind),
+        )
 
     async def _realized_pnl_from_exchange_trades(
         self, symbol: str, trade: Dict[str, Any]
@@ -582,18 +733,35 @@ class ExecutionEngine:
             "entry": float(snap.get("entry_price") or 0),
             "current_size": float(snap.get("size") or 0),
             "signal_type": side_str,
+            "open_fees_usd": 0.0,
         }
         pnl_usd, pnl_pct = await self._realized_pnl_from_exchange_trades(sym, trade)
         if abs(pnl_usd) < 1e-12 and trade["entry"] > 0 and trade["current_size"] > 0:
             try:
                 ticker = await self.exchange.fetch_ticker(sym)
                 exit_price = float(ticker.get("last") or 0)
-                entry = trade["entry"]
-                size = trade["current_size"]
-                is_long = side_str.upper() == "LONG"
                 if exit_price > 0:
-                    pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
-                    pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
+                    fee_rate = float(getattr(settings, "taker_fee_pct", 0.0) or 0.0)
+                    est_entry_fee = PnLCalculator.estimate_fee(
+                        price=trade["entry"],
+                        qty=trade["current_size"],
+                        fee_rate=fee_rate,
+                    )
+                    est_exit_fee = PnLCalculator.estimate_fee(
+                        price=exit_price,
+                        qty=trade["current_size"],
+                        fee_rate=fee_rate,
+                    )
+                    pnl = PnLCalculator.calculate_realized_pnl(
+                        side=side_str,
+                        entry_price=trade["entry"],
+                        exit_price=exit_price,
+                        qty=trade["current_size"],
+                        entry_fee_usd=est_entry_fee,
+                        exit_fee_usd=est_exit_fee,
+                    )
+                    pnl_usd = pnl.pnl_usd
+                    pnl_pct = pnl.pnl_pct
             except Exception:
                 pass
         try:
@@ -1168,6 +1336,9 @@ class ExecutionEngine:
                         "position_db_id": dbp.id,
                         "stop_order_id": sl_id,
                         "tp_order_id": tp_id,
+                        "position_is_open": True,
+                        "realized_pnl": prev_trade.get("realized_pnl", 0.0),
+                        "open_fees_usd": prev_trade.get("open_fees_usd", 0.0),
                         "initial_stop": float(dbp.stop_loss or cache_stop or 0.0),
                         "be_moved": (float(cache_stop) >= entry) if is_long else (float(cache_stop) <= entry),
                         "strategy": prev_trade.get("strategy", "unknown"),
@@ -1264,17 +1435,35 @@ class ExecutionEngine:
         signal_id = signal_data.get("id")
 
         if not settings.is_trading_enabled: return
-        
+
         # 1. Быстрая проверка вне лока (оптимизация)
-        if symbol in self.active_trades:
-            logger.info(f"⏭ [{symbol}] Уже в работе (пре-чек). Пропускаю.")
+        guard_reason = await self._find_open_position_guard(symbol)
+        if guard_reason:
+            await self._audit_event(
+                event_type="entry_blocked",
+                symbol=symbol,
+                strategy=signal_data.get("strategy"),
+                signal_id=signal_id,
+                message=f"Entry blocked before order placement: {guard_reason}",
+                payload={"guard_reason": guard_reason, "direction": direction},
+            )
+            logger.info(f"⏭ [{symbol}] Вход заблокирован до размещения ордера: {guard_reason}")
             return
 
         # 2. Блокировка по символу для предотвращения гонки сигналов
         async with self._get_symbol_lock(symbol):
             # Повторная проверка внутри лока (Double-Checked Locking)
-            if symbol in self.active_trades:
-                logger.info(f"⏭ [{symbol}] Уже в работе (лочед-чек). Пропускаю.")
+            guard_reason = await self._find_open_position_guard(symbol)
+            if guard_reason:
+                await self._audit_event(
+                    event_type="entry_blocked",
+                    symbol=symbol,
+                    strategy=signal_data.get("strategy"),
+                    signal_id=signal_id,
+                    message=f"Entry blocked inside symbol lock: {guard_reason}",
+                    payload={"guard_reason": guard_reason, "direction": direction},
+                )
+                logger.info(f"⏭ [{symbol}] Вход заблокирован внутри лока: {guard_reason}")
                 return
                 
             # Резервируем монету, чтобы параллельные тики по другим стратегиям не вошли сюда
@@ -1305,6 +1494,18 @@ class ExecutionEngine:
                     return
 
             try:
+                await self._audit_event(
+                    event_type="entry_started",
+                    symbol=symbol,
+                    strategy=signal_data.get("strategy"),
+                    signal_id=signal_id,
+                    message="Signal accepted for execution",
+                    payload={
+                        "direction": direction,
+                        "entry_price": signal_data.get("entry_price"),
+                        "timeframe": signal_data.get("timeframe"),
+                    },
+                )
                 await self._prepare_private_ops(ctx=f"execute_signal({symbol})")
                 # 3. Расчет параметров входа
                 entry_price = float(signal_data.get('entry_price', 0))
@@ -1434,12 +1635,38 @@ class ExecutionEngine:
                     stop_price = self.risk_manager.calculate_atr_stop(entry_exec, safe_atr, direction)
                     logger.info(f"[{symbol}] SL recalculated for actual fill: entry {entry_price:.6f} → {entry_exec:.6f}, stop → {stop_price:.6f}")
 
+                position_update = PositionManager.open_position(
+                    side=direction,
+                    qty=lot_size,
+                    entry_price=entry_exec,
+                    fee_paid_usd=sum(
+                        self._extract_order_fee_usd(aud.get("order") or {}, str(aud.get("kind") or ""))
+                        for aud in entry_audit
+                    ),
+                )
+                position_state = position_update.state
+
                 # 7. БД Позиция
                 async with async_session() as session:
                     pos = PositionModel(user_id=self.user_id, signal_id=signal_id, symbol=symbol, side=SignalType.LONG if direction.upper() == "LONG" else SignalType.SHORT,
-                                        entry_price=entry_exec, size=lot_size, stop_loss=stop_price, take_profit=signal_data.get("take_profit"),
+                                        entry_price=position_state.entry_price, size=position_state.qty, stop_loss=stop_price, take_profit=signal_data.get("take_profit"),
                                         status=PositionStatus.OPEN, opened_at=datetime.datetime.utcnow())
                     session.add(pos); await session.commit(); await session.refresh(pos)
+                await self._audit_event(
+                    event_type="position_opened",
+                    symbol=symbol,
+                    strategy=signal_data.get("strategy"),
+                    signal_id=signal_id,
+                    position_id=pos.id,
+                    message="Position opened after entry fill",
+                    payload={
+                        "entry_price": position_state.entry_price,
+                        "qty": position_state.qty,
+                        "side": position_state.side,
+                        "stop_loss": stop_price,
+                        "take_profit": signal_data.get("take_profit"),
+                    },
+                )
 
                 pos_side = self._position_side_from_entry_side(direction)
                 for aud in entry_audit:
@@ -1506,15 +1733,27 @@ class ExecutionEngine:
                         "protective_stop_missing",
                         "Protective STOP was not created; position closed by emergency market order"
                     )
+                await self._audit_event(
+                    event_type="protective_orders_set",
+                    symbol=symbol,
+                    strategy=signal_data.get("strategy"),
+                    signal_id=signal_id,
+                    position_id=pos.id,
+                    message="Protective orders linked to position",
+                    payload={"sl_id": sl_id, "tp_id": tp_id},
+                )
 
                 # 8. Финализация
                 self.active_trades[symbol] = {
-                    "entry": entry_exec, "stop": stop_price, "stage": 0, "opened_at": time.time(),
-                    "signal_type": direction.upper(), "current_size": lot_size, "position_db_id": pos.id, "stop_order_id": sl_id,
+                    "entry": position_state.entry_price, "stop": stop_price, "stage": 0, "opened_at": time.time(),
+                    "signal_type": position_state.side, "current_size": position_state.qty, "position_db_id": pos.id, "stop_order_id": sl_id,
                     "take_profit_live": signal_data.get("targets", signal_data.get("take_profit")),
                     "tp_order_id": tp_id,
                     "initial_stop": stop_price,
                     "be_moved": False,
+                    "position_is_open": position_state.is_open,
+                    "realized_pnl": position_state.realized_pnl,
+                    "open_fees_usd": position_state.open_fees_usd,
                     "timeframe": signal_data.get("timeframe", "1h"),
                     "strategy": signal_data.get("strategy", "unknown"),
                     # Trade management context
@@ -1582,6 +1821,15 @@ class ExecutionEngine:
                 reason = e.reason if isinstance(e, EntryExecutionError) else "unexpected_entry_error"
                 self._record_entry_failure(reason)
                 logger.error(f"❌ Entry Error {symbol} [{reason}]: {e}", exc_info=True)
+                await self._audit_event(
+                    event_type="entry_failed",
+                    severity="ERROR",
+                    symbol=symbol,
+                    strategy=signal_data.get("strategy"),
+                    signal_id=signal_id,
+                    message=f"Entry failed: {reason}",
+                    payload={"reason": reason, "error": str(e)[:300]},
+                )
 
                 # Помечаем сигнал как FAILED в БД
                 async with async_session() as session:
@@ -1683,14 +1931,20 @@ class ExecutionEngine:
                                 status=OrderStatus.FILLED,
                             )
                             
-                            # Обновляем среднюю и объем
-                            old_size = trade['current_size']
-                            new_size = old_size + add_size
-                            new_entry = ((trade['entry'] * old_size) + (current_price * add_size)) / new_size
-                            
+                            fill_size = float(pyr_o.get("filled") or add_size)
+                            fill_price = float(pyr_o.get("average") or pyr_o.get("price") or current_price)
+                            position_update = PositionManager.open_position(
+                                side=trade["signal_type"],
+                                qty=fill_size,
+                                entry_price=fill_price,
+                                state=self._trade_position_state(trade),
+                                fee_paid_usd=self._extract_order_fee_usd(pyr_o, "market_pyramid_add"),
+                            )
+                            new_size = float(position_update.state.qty)
+                            new_entry = float(position_update.state.entry_price)
+
                             trade['stage'] = next_stage
-                            trade['current_size'] = new_size
-                            trade['entry'] = new_entry
+                            self._apply_position_update_to_trade(trade, position_update)
                             
                             async with async_session() as session:
                                 await session.execute(
@@ -2057,18 +2311,43 @@ class ExecutionEngine:
                 size=float(ro.get("filled") or reduce_amount),
                 status=OrderStatus.FILLED,
             )
-            new_size = base_size - reduce_amount
-            trade["current_size"] = max(0.0, new_size)
+            fill_size = float(ro.get("filled") or reduce_amount)
+            fill_price = float(ro.get("average") or ro.get("price") or trade.get("entry") or 0.0)
+            position_update = PositionManager.partial_close(
+                state=self._trade_position_state(trade),
+                qty=fill_size,
+                exit_price=fill_price,
+                exit_fee_usd=self._extract_order_fee_usd(ro, "market_partial_reduce_tm"),
+            )
+            self._apply_position_update_to_trade(trade, position_update)
+            new_size = float(position_update.state.qty)
             trade["partial_done"] = True
             async with async_session() as session:
                 await session.execute(
                     update(PositionModel)
                     .where(PositionModel.id == trade["position_db_id"])
-                    .values(size=float(max(0.0, new_size)))
+                    .values(
+                        size=float(max(0.0, new_size)),
+                        realized_pnl=float(position_update.state.realized_pnl),
+                    )
                 )
                 await session.commit()
 
             self._tm_record("partial_reduce")
+            await self._audit_event(
+                event_type="position_partial_close",
+                symbol=symbol,
+                strategy=trade.get("strategy"),
+                position_id=trade.get("position_db_id"),
+                message="Trade management partial reduce executed",
+                payload={
+                    "closed_qty": fill_size,
+                    "remaining_qty": new_size,
+                    "realized_pnl": position_update.realized_pnl,
+                    "fees_usd": position_update.fees_usd,
+                    "current_r": current_r,
+                },
+            )
             logger.info(
                 f"🔻 [TM-PARTIAL] {symbol}: reduced {frac*100:.0f}% at {current_r:.2f}R "
                 f"(closed {reduce_amount:.6f}, remaining {new_size:.6f})"
@@ -2194,6 +2473,7 @@ class ExecutionEngine:
         trade = self.active_trades[symbol]
         pnl_usd = 0.0
         pnl_pct = 0.0
+        exit_price_hint = 0.0
         try:
             await self._cancel_all_orders(symbol)
             if reason != "EXTERNAL":
@@ -2232,6 +2512,7 @@ class ExecutionEngine:
                         size=float(co.get("filled") or close_amount),
                         status=OrderStatus.FILLED,
                     )
+                    exit_price_hint = float(co.get("average") or co.get("price") or 0.0)
             
             try:
                 lev = int(getattr(settings, "leverage", 1) or 1)
@@ -2239,6 +2520,7 @@ class ExecutionEngine:
                 lev = 1
 
             async with async_session() as session:
+                position_update = None
                 await session.execute(
                     update(PositionModel)
                     .where(PositionModel.id == trade["position_db_id"])
@@ -2258,15 +2540,33 @@ class ExecutionEngine:
                                 pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
                                 pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
                     else:
-                        ticker = await self.exchange.fetch_ticker(symbol)
-                        exit_price = float(ticker["last"])
-                        entry = float(trade["entry"])
-                        size = float(trade["current_size"])
-                        is_long = trade["signal_type"] == "LONG"
-                        pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
-                        pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
+                        exit_price = exit_price_hint
+                        if exit_price <= 0:
+                            ticker = await self.exchange.fetch_ticker(symbol)
+                            exit_price = float(ticker["last"])
+                        position_update = PositionManager.close_position(
+                            state=self._trade_position_state(trade),
+                            exit_price=exit_price,
+                            exit_fee_usd=self._extract_order_fee_usd(co, "market_close") if close_amount > 1e-8 else 0.0,
+                        )
+                        pnl_usd = float(position_update.realized_pnl)
+                        pnl_pct = PnLCalculator.calculate_realized_pnl(
+                            side=str(trade["signal_type"]),
+                            entry_price=float(trade["entry"]),
+                            exit_price=exit_price,
+                            qty=float(trade["current_size"]),
+                            entry_fee_usd=float(trade.get("open_fees_usd", 0.0) or 0.0),
+                            exit_fee_usd=self._extract_order_fee_usd(co, "market_close") if close_amount > 1e-8 else 0.0,
+                        ).pnl_pct
                 except Exception as e:
                     logger.warning(f"PnL record error: {e}")
+
+                final_realized = float((trade.get("realized_pnl") or 0.0) + pnl_usd)
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.id == trade["position_db_id"])
+                    .values(realized_pnl=final_realized)
+                )
 
                 session.add(
                     PnLModel(
@@ -2285,7 +2585,27 @@ class ExecutionEngine:
                     pass
 
                 await session.commit()
-            
+
+            closed_size = float(trade.get("current_size", 0.0) or 0.0)
+            trade["realized_pnl"] = float((trade.get("realized_pnl") or 0.0) + pnl_usd)
+            trade["current_size"] = 0.0
+            trade["position_is_open"] = False
+            trade["open_fees_usd"] = 0.0
+            await self._audit_event(
+                event_type="position_closed",
+                symbol=symbol,
+                strategy=trade.get("strategy"),
+                position_id=trade.get("position_db_id"),
+                message=f"Position closed: {reason}",
+                payload={
+                    "reason": reason,
+                    "pnl_usd": pnl_usd,
+                    "pnl_pct": pnl_pct,
+                    "entry_price": trade.get("entry"),
+                    "size": closed_size,
+                },
+            )
+
             _pnl_msg = ""
             _reason_map = {
                 "EXTERNAL": "🔄 Биржа (TP/SL)",

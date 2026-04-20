@@ -4,6 +4,7 @@ import logging
 from typing import List, Callable, Any, Dict
 import redis.asyncio as aioredis
 from config.settings import settings
+from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_binance_retry
 
 _log = logging.getLogger("market_data_client")
 
@@ -21,15 +22,30 @@ class MarketDataClient:
         self._running = False
         self._listen_task: asyncio.Task = None
         self._status_map: Dict[str, bool] = {} # "symbol:tf" -> recovering_bool
+        self._rest_limiter = BinanceRateLimiter(max_concurrent=2)
+
+    async def _rest_call(self, op, *, ctx: str):
+        return await call_with_binance_retry(
+            op=op,
+            exchange=self.exchange,
+            limiter=self._rest_limiter,
+            policy=BinanceCallPolicy(max_attempts=4, base_delay=0.5, max_delay=5.0, timeout_seconds=20.0),
+        )
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100):
         if self.exchange:
-            return await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            return await self._rest_call(
+                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit),
+                ctx=f"market_client.fetch_ohlcv({symbol},{timeframe})",
+            )
         return []
 
     async def fetch_instrument_info(self, symbol: str):
         if self.exchange:
-            markets = await self.exchange.load_markets()
+            markets = await self._rest_call(
+                lambda: self.exchange.load_markets(),
+                ctx=f"market_client.load_markets({symbol})",
+            )
             return markets.get(symbol)
         return None
 

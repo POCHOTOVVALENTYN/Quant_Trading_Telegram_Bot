@@ -1,6 +1,6 @@
 import time
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import redis.asyncio as aioredis
 from config.settings import settings
 
@@ -160,17 +160,49 @@ class RiskManager:
         except Exception:
             return True # Если не смогли определить, пропускаем (или наоборот блокируем - на выбор)
 
-    async def check_trade_allowed(self, current_open_trades: int, current_drawdown_pct: float) -> bool:
-        if await self.is_daily_halted():
+    def check_trade_allowed(self, current_open_trades: int, current_drawdown_pct: float) -> bool:
+        if self._daily_halted:
             return False
-
         if current_open_trades >= self.max_open_trades:
             return False
-            
         if current_drawdown_pct >= self.max_drawdown_pct:
             return False
-            
         return True
+
+    def max_risk_amount(self, account_balance: float) -> float:
+        """Maximum USD loss allowed for a new trade."""
+        if account_balance <= 0:
+            return 0.0
+        base_risk = account_balance * float(self.max_risk_pct)
+        return max(0.0, base_risk * float(self._streak_risk_mult))
+
+    @staticmethod
+    def drawdown_pct(account_balance: float, equity_peak: float) -> float:
+        if account_balance <= 0 or equity_peak <= 0:
+            return 0.0
+        if account_balance >= equity_peak:
+            return 0.0
+        return (equity_peak - account_balance) / equity_peak
+
+    def max_drawdown_exceeded(self, current_drawdown_pct: float) -> bool:
+        return float(current_drawdown_pct or 0.0) >= float(self.max_drawdown_pct)
+
+    def calculate_position_size_by_risk(
+        self,
+        account_balance: float,
+        entry_price: float,
+        stop_loss_price: float,
+    ) -> float:
+        """
+        Risk-based position sizing:
+        size = max_risk_amount / |entry - stop|
+        """
+        if account_balance <= 0 or entry_price <= 0 or stop_loss_price <= 0:
+            return 0.0
+        risk_per_unit = abs(entry_price - stop_loss_price)
+        if risk_per_unit <= 1e-12:
+            return 0.0
+        return self.max_risk_amount(account_balance) / risk_per_unit
 
     def check_correlation_limit(self, symbol: str, direction: str, active_trades: dict) -> bool:
         """
@@ -253,7 +285,7 @@ class RiskManager:
         stop_loss_price: float,
         market_info: dict = None,
         market_context: dict = None,
-        ml_prob: float = 0.5,
+        ml_prob: float = 0.70,
     ) -> Dict[str, Any]:
         """
         Returns sizing feasibility details before the execution stage.
@@ -264,6 +296,8 @@ class RiskManager:
         result: Dict[str, Any] = {
             "feasible": False,
             "reason": "unknown",
+            "risk_amount_usd": 0.0,
+            "risk_per_unit_usd": 0.0,
             "margin_usd": 0.0,
             "notional_usd": 0.0,
             "position_size": 0.0,
@@ -275,10 +309,15 @@ class RiskManager:
             result["reason"] = "invalid_account_or_entry"
             return result
 
+        risk_amount_usd = self.max_risk_amount(account_balance)
+        risk_per_unit = abs(entry_price - stop_loss_price) if stop_loss_price > 0 else 0.0
+
         fixed_usdt = float(getattr(settings, "position_size_usdt", 0.0) or 0.0)
         margin_usd = min(fixed_usdt, account_balance) if fixed_usdt > 0 else account_balance * settings.per_trade_margin_pct
         notional_usd = margin_usd * max(1, int(settings.leverage))
-        position_size = notional_usd / entry_price if entry_price > 0 else 0.0
+        margin_position_size = notional_usd / entry_price if entry_price > 0 else 0.0
+        risk_position_size = self.calculate_position_size_by_risk(account_balance, entry_price, stop_loss_price)
+        position_size = risk_position_size if risk_position_size > 0 else margin_position_size
 
         # ML Dynamic Scaling (Phase 4A)
         # 0.50 neutral -> scaling reduces
@@ -296,9 +335,14 @@ class RiskManager:
         kelly_margin = self.kelly_position_size(account_balance, ml_prob)
         # We take the minimum between our fixed strategy risk and Kelly for stability
         margin_usd = min(margin_usd, kelly_margin)
-        
         notional_usd = margin_usd * max(1, int(settings.leverage))
-        position_size = (notional_usd / entry_price) * ml_scale if entry_price > 0 else 0.0
+        margin_position_size = (notional_usd / entry_price) if entry_price > 0 else 0.0
+        risk_position_size = risk_position_size * ml_scale
+        margin_position_size = margin_position_size * ml_scale
+        if risk_position_size > 0:
+            position_size = min(risk_position_size, margin_position_size)
+        else:
+            position_size = margin_position_size
         
         result["ml_scale"] = ml_scale
         result["kelly_limit_usd"] = kelly_margin
@@ -317,6 +361,8 @@ class RiskManager:
 
         result.update(
             {
+                "risk_amount_usd": float(risk_amount_usd),
+                "risk_per_unit_usd": float(risk_per_unit),
                 "margin_usd": float(margin_usd),
                 "notional_usd": float(notional_usd),
                 "position_size": float(max(0.0, position_size)),
