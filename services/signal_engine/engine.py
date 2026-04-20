@@ -359,6 +359,21 @@ class TradingOrchestrator:
                 return False
         return True
 
+    def _get_weekly_trend_bias(self, symbol: str) -> Optional[str]:
+        """Detect global trend bias from 1W timeframe."""
+        df_1w = self.market_history.get(symbol, {}).get("1w")
+        if df_1w is None or len(df_1w) < 200:
+            return None
+        
+        last = df_1w.iloc[-1]
+        # Weekly EMA200 is a rock-solid trend line
+        ema200 = float(last.get("ema200", 0))
+        if ema200 == 0:
+            return None
+            
+        close = float(last["close"])
+        return "LONG" if close > ema200 else "SHORT"
+
     def _get_daily_trend_bias(self, symbol: str) -> Optional[str]:
         """
         Returns daily trend for a symbol: LONG / SHORT / None.
@@ -716,24 +731,39 @@ class TradingOrchestrator:
                     }
                     _filter_flags = {}
 
-                    # 1D higher-TF filter
+                    # MTF higher-TF filter (1W & 1D)
                     if getattr(settings, "use_daily_timeframe_filter", True):
                         daily_bias = self._get_daily_trend_bias(symbol)
+                        weekly_bias = self._get_weekly_trend_bias(symbol)
                         sdl["daily_bias"] = daily_bias
-                        if daily_bias is not None:
-                            mtf_guarded = {"Donchian", "WRD", "Vol Contraction", "MA Trend", "Pullback"}
-                            if signal.get("strategy") in mtf_guarded:
-                                if str(signal.get("signal", "")).upper() != daily_bias:
-                                    logger.info(
-                                        f"[{symbol}] 1D filter: {signal['strategy']} {signal['signal']} "
-                                        f"conflicts with daily {daily_bias}, skip"
-                                    )
-                                    _filter_flags["f_daily_filter"] = False
-                                    self._mark_signal_stage("filtered_daily_filter", signal.get("strategy", ""), timeframe)
-                                    await self._persist_decision_log(sdl, _filter_flags, "FILTERED:daily_filter")
-                                    continue
-                    _filter_flags["f_daily_filter"] = True
-                    self._mark_signal_stage("passed_daily_filter", signal.get("strategy", ""), timeframe)
+                        
+                        # We only allow trend following if W1 and D1 match and align with signal
+                        mtf_guarded = {"Donchian", "WRD", "Vol Contraction", "MA Trend", "Pullback"}
+                        if signal.get("strategy") in mtf_guarded:
+                            # 1. Weekly check
+                            if weekly_bias and str(signal.get("signal", "")).upper() != weekly_bias:
+                                logger.info(f"[{symbol}] 1W filter: {signal['strategy']} {signal['signal']} conflicts with weekly {weekly_bias}, skip")
+                                self._mark_signal_stage("filtered", signal['strategy'], timeframe, "1w-bias")
+                                _filter_flags["f_weekly_filter"] = False
+                                await self._persist_decision_log(sdl, _filter_flags, f"FILTERED:1w_bias_{weekly_bias}")
+                                continue
+                            
+                            # 2. Daily check
+                            if daily_bias and str(signal.get("signal", "")).upper() != daily_bias:
+                                logger.info(f"[{symbol}] 1D filter: {signal['strategy']} {signal['signal']} conflicts with daily {daily_bias}, skip")
+                                self._mark_signal_stage("filtered", signal['strategy'], timeframe, "1d-bias")
+                                _filter_flags["f_daily_filter"] = False
+                                await self._persist_decision_log(sdl, _filter_flags, f"FILTERED:1d_bias_{daily_bias}")
+                                continue
+
+                    _filter_flags["f_mtf_bias"] = True
+                    self._mark_signal_stage("passed_mtf_filter", signal.get("strategy", ""), timeframe)
+
+                    # --- PRECISION ENTRY (Low TF momentum check - TEMPORARILY DISABLED) ---
+                    # df_1h = self.market_history.get(symbol, {}).get("1h")
+                    # df_15m = self.market_history.get(symbol, {}).get("15m")
+                    # ... (Logic hidden to prioritize raw H4 trend)
+                    _filter_flags["f_precision_entry"] = True
 
                     # Regime router (multi-dimensional)
                     if getattr(settings, "strategy_regime_routing_enabled", True):
