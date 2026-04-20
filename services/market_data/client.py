@@ -73,35 +73,41 @@ class MarketDataClient:
             await self.redis.close()
 
     async def _listen(self):
-        pubsub = self.redis.pubsub()
-        await pubsub.subscribe("market:data")
-        _log.info("Subscribed to market:data channel")
-        
-        try:
-            async for message in pubsub.listen():
-                if not self._running:
-                    break
-                if message["type"] != "message":
-                    continue
+        while self._running:
+            try:
+                if not self.redis:
+                    self.redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+                
+                pubsub = self.redis.pubsub()
+                await pubsub.subscribe("market:data")
+                _log.info("Subscribed to market:data channel")
                 
                 try:
-                    payload = json.loads(message["data"])
-                    data_type = payload["type"]
-                    symbol = payload["symbol"]
-                    timeframe = payload["timeframe"]
-                    data = payload["data"]
-                    
-                    if data_type == "status":
-                        self._status_map[f"{symbol}:{timeframe}"] = data.get("recovering", False)
-                    
-                    for cb in self.callbacks:
-                        # Call callbacks just like the local MarketDataService would
-                        await cb(data_type, symbol, timeframe, data)
-                except Exception as e:
-                    _log.error(f"Error processing market message: {e}")
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            _log.error(f"MarketDataClient listener error: {e}")
-        finally:
-            await pubsub.unsubscribe()
+                    async for message in pubsub.listen():
+                        if not self._running:
+                            break
+                        if message["type"] != "message":
+                            continue
+                        
+                        try:
+                            payload = json.loads(message["data"])
+                            data_type = payload["type"]
+                            symbol = payload["symbol"]
+                            timeframe = payload["timeframe"]
+                            data = payload["data"]
+                            
+                            if data_type == "status":
+                                self._status_map[f"{symbol}:{timeframe}"] = data.get("recovering", False)
+                            
+                            for cb in self.callbacks:
+                                await cb(data_type, symbol, timeframe, data)
+                        except Exception as e:
+                            _log.error(f"Error processing market message: {e}")
+                finally:
+                    await pubsub.unsubscribe()
+                    await pubsub.close()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                _log.error(f"MarketDataClient subscriber error: {e}. Retrying in 5s...")
+                await asyncio.sleep(5)

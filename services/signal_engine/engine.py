@@ -53,19 +53,23 @@ from utils.metrics import (
     signal_stage_total,
 )
 
-# Торговые сигналы только на этих TF (1m — трейлинг; 5m — данные/индикаторы; 1d — bias для фильтра).
-TRADING_SIGNAL_TIMEFRAMES = frozenset({"15m", "1h", "4h"})
+# Таймфреймы для разведки (Setup) и исполнения (Entry).
+SETUP_TIMEFRAMES = frozenset({"1h", "4h"})
+ENTRY_TIMEFRAMES = frozenset({"15m"})
+TRADING_SIGNAL_TIMEFRAMES = SETUP_TIMEFRAMES | ENTRY_TIMEFRAMES
 
-# Higher-TF сетапы (4h+1h) vs исполнение (15m+1h); Funding Squeeze — на всех трёх.
 _STRATEGY_TIMEFRAME_MATRIX = {
-    StrategyDonchian: frozenset({"4h", "1h"}),
-    StrategyWRD: frozenset({"4h", "1h"}),
-    StrategyVolContraction: frozenset({"4h", "1h"}),
-    StrategyMATrend: frozenset({"4h", "1h"}),
-    StrategyPullback: frozenset({"15m", "1h"}),
-    StrategyWilliamsR: frozenset({"15m", "1h"}),
-    StrategyWideRangeReversal: frozenset({"15m", "1h"}),
-    StrategyFundingSqueeze: frozenset({"15m", "1h", "4h"}),
+    # Сетап-стратегии (только старшие ТФ)
+    StrategyDonchian: SETUP_TIMEFRAMES,
+    StrategyWRD: SETUP_TIMEFRAMES,
+    StrategyVolContraction: SETUP_TIMEFRAMES,
+    StrategyMATrend: SETUP_TIMEFRAMES,
+    # Стратегии исполнения (в основном 15m)
+    StrategyPullback: ENTRY_TIMEFRAMES | {"1h"},
+    StrategyWilliamsR: ENTRY_TIMEFRAMES,
+    StrategyWideRangeReversal: ENTRY_TIMEFRAMES,
+    # Аномалии (везде)
+    StrategyFundingSqueeze: TRADING_SIGNAL_TIMEFRAMES,
 }
 
 logger = get_signal_logger()
@@ -96,6 +100,7 @@ class TradingOrchestrator:
             adx_flat_max=float(getattr(settings, "regime_adx_range_max", 18.0)),
         )
 
+        self.pending_setups = {}  # Cache in memory (will migrate to Redis later if needed)
         self.dynamic_strategy_scorer = DynamicStrategyScorer()
         self.scorer = SignalScorer(dynamic_scorer=self.dynamic_strategy_scorer)
         self.scoring_learner = ScoringLearner(weights_file=settings.scoring_weights_file)
@@ -157,6 +162,23 @@ class TradingOrchestrator:
         "WRD Reversal":      {"trend": ["RANGE", "NEUTRAL"], "volatility": ["*"], "funding": ["*"]},
         "Funding Squeeze":   {"trend": ["*"], "volatility": ["HIGH", "NORMAL"], "funding": ["EXTREME_LONG", "EXTREME_SHORT"]},
     }
+
+    @staticmethod
+    def _strategy_name(strategy: Any) -> str:
+        if hasattr(strategy, "strategy_name"):
+            return str(strategy.strategy_name)
+        name = type(strategy).__name__
+        mapping = {
+            "StrategyDonchian": "Donchian",
+            "StrategyMATrend": "MA Trend",
+            "StrategyPullback": "Pullback",
+            "StrategyVolContraction": "Vol Contraction",
+            "StrategyWRD": "WRD",
+            "StrategyWilliamsR": "Williams R",
+            "StrategyWideRangeReversal": "WRD Reversal",
+            "StrategyFundingSqueeze": "Funding Squeeze",
+        }
+        return mapping.get(name, name)
 
     @staticmethod
     def _classify_market_regime(adx: float, trend_min: float, range_max: float) -> str:
@@ -328,10 +350,11 @@ class TradingOrchestrator:
                 continue
             compatible_values = {current_val}
             if dim == "trend":
-                if current_val == "FLAT":
-                    compatible_values.update({"RANGE", "NEUTRAL"})
-                elif current_val in {"RANGE", "NEUTRAL"}:
-                    compatible_values.add("FLAT")
+                if current_val in {"FLAT", "RANGE"}:
+                    compatible_values.update({"RANGE", "NEUTRAL", "FLAT"})
+                elif current_val == "NEUTRAL":
+                    compatible_values.update({"NEUTRAL", "RANGE", "FLAT", "TREND"})
+            
             if compatible_values.isdisjoint(set(allowed)):
                 return False
         return True
@@ -473,6 +496,9 @@ class TradingOrchestrator:
 
     async def on_market_data(self, data_type: str, symbol: str, timeframe: str, data: Any):
         if data_type == "ohlcv":
+            # Pulse log to verify data flow
+            if symbol.startswith("BTC"):
+                logger.info(f"📈 [PULSE] Receiving OHLCV for {symbol}:{timeframe}")
             await self._process_ohlcv(symbol, timeframe, data)
         elif data_type == "orderbook":
             self.orderbooks[symbol] = data
@@ -583,7 +609,7 @@ class TradingOrchestrator:
                     _ttf = self.execution.active_trades[symbol].get("timeframe", "1h")
                     trade_tf = self.market_history.get(symbol, {}).get(_ttf)
                 
-                cvd_val = self.cvd_tracker.get_normalized_delta(symbol) if self.cvd_tracker else 0.0
+                cvd_val = self.cvd_tracker.get_cvd_normalized(symbol) if self.cvd_tracker else 0.0
                 asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx, df_tf=trade_tf, cvd_val=cvd_val))
 
         if len(df) < 60:
@@ -749,7 +775,7 @@ class TradingOrchestrator:
                     _filter_flags["f_cooldown"] = True
 
                     # Daily drawdown halt
-                    if self.risk_manager.is_daily_halted():
+                    if await self.risk_manager.is_daily_halted():
                         logger.warning(f"[{symbol}] Daily drawdown limit reached, all entries halted")
                         _filter_flags["f_daily_halt"] = False
                         await self._persist_decision_log(sdl, _filter_flags, "FILTERED:daily_halt")
@@ -763,6 +789,42 @@ class TradingOrchestrator:
                         await self._persist_decision_log(sdl, _filter_flags, "FILTERED:duplicate_pos")
                         continue
                     _filter_flags["f_duplicate_pos"] = True
+
+                    # --- HUNTING MODE LOGIC (H1+ -> M15) ---
+                    is_setup = timeframe in SETUP_TIMEFRAMES
+                    is_entry = timeframe in ENTRY_TIMEFRAMES
+                    strat_name = signal.get("strategy", "")
+
+                    if is_setup:
+                        # Запоминаем сетап для этой монеты и направления
+                        setup_key = f"{symbol}_{signal.get('signal', '')}"
+                        self.pending_setups[setup_key] = {
+                            "timestamp": time.time(),
+                            "price": signal.get("entry_price"),
+                            "strategy": strat_name
+                        }
+                        logger.info(f"🔍 [SETUP] {strat_name} triggered on {timeframe} for {symbol}. Watching M15 for entry...")
+                        # Сетапы не торгуются напрямую, а ждут подтверждения на М15
+                        # Исключение: если стратегия позволяет вход сразу (опционально)
+                        continue 
+
+                    if is_entry:
+                        # Проверяем, есть ли активный сетап со старшего ТФ
+                        # (WilliamsR и Pullback на М15 требуют подтверждения от 1H/4H тренда)
+                        setup_found = False
+                        for side in ["LONG", "SHORT"]:
+                            key = f"{symbol}_{side}"
+                            st = self.pending_setups.get(key)
+                            if st and (time.time() - st["timestamp"]) < 14400: # 4 часа актуальности
+                                if side == str(signal.get("signal", "")).upper():
+                                    setup_found = True
+                                    break
+                        
+                        # Если это стратегия исполнения, но сетапа нет — пропускаем
+                        execution_only = {StrategyWilliamsR, StrategyPullback, StrategyWideRangeReversal}
+                        if not setup_found and any(isinstance(self.strategies[i], tuple(execution_only)) for i in range(len(self.strategies)) if TradingOrchestrator._strategy_name(self.strategies[i]) == strat_name):
+                             logger.debug(f"⏳ [HUNT] {strat_name} on {symbol} M15 ignored: No active H1/H4 setup.")
+                             continue
 
                     # Direction filter
                     allowed_side = str(getattr(settings, "allowed_position_side", "BOTH") or "BOTH").upper()
@@ -1251,7 +1313,7 @@ class TradingOrchestrator:
 
     async def _heartbeat_loop(self):
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(14400) # Раз в 4 часа (было 3600)
             uptime_hours = (time.time() - self.start_time) / 3600
             msg = (
                 f"💓 **ПУЛЬС БОТА**\n\n"

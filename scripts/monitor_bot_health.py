@@ -197,11 +197,6 @@ async def exchange_connect():
         ex.set_sandbox_mode(bool(settings.testnet))
     except Exception:
         pass
-    if settings.testnet:
-        working_ws_url = "wss://testnet.binancefuture.com/ws-fapi/v1"
-        if hasattr(ex, "urls") and ex.urls:
-            ex.urls.setdefault("test", {}).setdefault("ws", {})["future"] = working_ws_url
-            ex.urls.setdefault("api", {}).setdefault("ws", {})["future"] = working_ws_url
     try:
         await ex.load_markets()
     except Exception as e:
@@ -419,8 +414,8 @@ async def main_async(duration_sec: int, interval_sec: int) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Мониторинг бота: Telegram, БД, биржа, логи")
-    p.add_argument("--duration", type=int, default=600, help="Длительность в секундах (по умолчанию 600 = 10 мин)")
-    p.add_argument("--interval", type=int, default=60, help="Интервал между чеками в секундах")
+    p.add_argument("--duration", type=int, default=86400, help="Длительность в секундах (по умолчанию 86400 = 24 ч)")
+    p.add_argument("--interval", type=int, default=14400, help="Интервал между чеками в секундах (по умолчанию 14400 = 4 ч)")
     args = p.parse_args()
     return asyncio.run(main_async(args.duration, args.interval))
 

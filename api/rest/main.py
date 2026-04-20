@@ -116,13 +116,6 @@ async def lifespan(app: FastAPI):
     })
     exchange_client.set_sandbox_mode(settings.testnet)
     
-    # ПРИНУДИТЕЛЬНО МЕНЯЕМ URL КОНЕКТА (т.к. старый fstream.binancefuture.com тормозит/не работает)
-    if settings.testnet:
-        working_ws_url = "wss://testnet.binancefuture.com/ws-fapi/v1"
-        exchange_client.urls['test']['ws']['future'] = working_ws_url
-        exchange_client.urls['api']['ws']['future'] = working_ws_url
-        app_logger.info(f"🚀 WebSocket URL переопределен на: {working_ws_url}")
-    
     app_logger.info(f"API URLs: {exchange_client.urls}")
     try:
         await exchange_client.load_markets()

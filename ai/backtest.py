@@ -230,9 +230,14 @@ class BacktestEngine:
 
                 self.signals_generated += 1
 
-                # ADX filter for trend strategies
+                # ADX filter for trend strategies (Sync with settings)
                 trend_strats = ["MA Trend", "Donchian", "Pullback"]
-                if signal['strategy'] in trend_strats and adx < 20:
+                if signal['strategy'] in trend_strats and adx < settings.regime_adx_trend_min:
+                    self.signals_filtered += 1
+                    continue
+                
+                range_strats = ["Williams R", "WRD Reversal"]
+                if signal['strategy'] in range_strats and adx > settings.regime_adx_range_max:
                     self.signals_filtered += 1
                     continue
 

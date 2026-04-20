@@ -37,41 +37,48 @@ class MetaStrategy:
 
     def detect_market_regime(self, df: pd.DataFrame) -> str:
         if df.empty:
-            return "FLAT"
+            return "NEUTRAL"
 
         last = df.iloc[-1]
         adx = self._safe_float(last.get("adx"))
         close = self._safe_float(last.get("close"))
         ema50 = self._safe_float(last.get("ema50"), close)
         ema200 = self._safe_float(last.get("ema200"), ema50)
-        atr = self._safe_float(last.get("atr"))
 
-        if adx >= self.adx_trend_min and close > 0 and ema50 > 0 and ema200 > 0:
+        # 1. Clear TREND (Strict alignment)
+        if adx >= self.adx_trend_min:
             aligned_up = close >= ema50 >= ema200
             aligned_down = close <= ema50 <= ema200
             if aligned_up or aligned_down:
                 return "TREND"
 
-        # Flat when ADX is explicitly low or when volatility compression is visible.
+        # 2. CLEAR RANGE (Very low ADX)
         if adx <= self.adx_flat_max:
-            return "FLAT"
-        if close > 0 and atr > 0 and (atr / close) < 0.0035:
-            return "FLAT"
-        return "FLAT"
+            return "RANGE"
+
+        # 3. NEUTRAL (Everything else)
+        return "NEUTRAL"
 
     def select_strategies(self, df: pd.DataFrame, strategies: Iterable[Any]) -> MetaSelection:
         regime = self.detect_market_regime(df)
         strategies = list(strategies)
 
         if regime == "TREND":
+            # In trend, we focus on trend followers
             selected = [s for s in strategies if self._strategy_name(s) in self.TREND_STRATEGIES]
-        else:
+        elif regime == "RANGE":
+            # In clear range, we focus on mean reversion
             selected = [s for s in strategies if self._strategy_name(s) in self.FLAT_STRATEGIES]
+        else:
+            # In NEUTRAL/Messy market, we allow a MIX of robust strategies from both groups
+            robust_mix = {"Williams R", "Pullback", "Donchian", "MA Trend"}
+            selected = [s for s in strategies if self._strategy_name(s) in robust_mix]
 
-        # Fail-safe: if mapping misses a strategy, keep the original list instead of silencing signals.
         if not selected:
             selected = strategies
 
+        # Map internal 'RANGE' back to 'FLAT' for external compatibility if needed, 
+        # but let's keep 'NEUTRAL' and 'TREND' as is.
         return MetaSelection(regime=regime, strategies=selected)
 
     @staticmethod

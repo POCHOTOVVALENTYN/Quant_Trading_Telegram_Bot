@@ -111,7 +111,7 @@ class RiskManager:
                 f"-> risk_mult={self._streak_risk_mult:.2f}"
             )
 
-        if self._daily_start_balance > 0:
+        if self._daily_start_balance > 0.01:
             dd_pct = abs(min(0.0, self._daily_pnl_usd)) / self._daily_start_balance
             if dd_pct >= self.max_daily_drawdown_pct:
                 self._daily_halted = True
@@ -119,6 +119,10 @@ class RiskManager:
                     f"DAILY DRAWDOWN HALT: PnL={self._daily_pnl_usd:.2f} USDT "
                     f"({dd_pct*100:.1f}% >= {self.max_daily_drawdown_pct*100:.0f}%)"
                 )
+        else:
+            # Fallback: if balance not set, use current pnl against a nominal threshold if needed
+            # but usually we just wait for the first balance update
+            pass
                 
         await self._save_to_redis()
 
@@ -140,7 +144,7 @@ class RiskManager:
 
     async def _ensure_daily_reset(self, account_balance: float) -> None:
         now = time.time()
-        if now - self._daily_reset_ts > 86400:
+        if now - self._daily_reset_ts > 86400 or self._daily_reset_ts == 0:
             self._daily_pnl_usd = 0.0
             self._daily_halted = False
             self._daily_reset_ts = now

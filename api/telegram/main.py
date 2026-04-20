@@ -35,6 +35,14 @@ BTN_STRATEGIES = "📚 Стратегии"
 BTN_FAQ = "❓ FAQ"
 BTN_HOME = "🏠 Главное меню"
 
+# --- НОВЫЕ КНОПКИ НАВИГАЦИИ ---
+BTN_BACK_SETTINGS = "◀️ Назад в настройки"
+BTN_BACK_FAQ = "◀️ Назад в FAQ"
+BTN_SETTING_LEVERAGE = "⚡️ Плечо"
+BTN_SETTING_MARGIN = "💰 Маржа"
+BTN_SETTING_PYRAMIDING = "🪜 Пирамидинг"
+BTN_SETTING_MAX_TRADES = "🛡 Макс. сделок"
+
 from utils.logger import app_logger as logger
 
 # _log = logging.getLogger(__name__) # Use logger instead
@@ -245,9 +253,9 @@ async def _render_settings_message(message_target, edit: bool = False):
     text = _build_settings_menu_text(runtime)
     keyboard = _build_settings_menu_keyboard(runtime, presets)
     if edit:
-        await message_target.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
+        return await message_target.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
     else:
-        await message_target.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
+        return await message_target.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
 
 
 def _build_main_menu_markup() -> ReplyKeyboardMarkup:
@@ -260,6 +268,25 @@ def _build_main_menu_markup() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def _build_back_home_markup() -> ReplyKeyboardMarkup:
+    """Упрощенная клавиатура: только кнопка 'Домой'."""
+    return ReplyKeyboardMarkup([[KeyboardButton(BTN_HOME)]], resize_keyboard=True)
+
+def _build_settings_nav_markup() -> ReplyKeyboardMarkup:
+    """Навигация по разделам настроек."""
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(BTN_SETTING_LEVERAGE), KeyboardButton(BTN_SETTING_MARGIN)],
+        [KeyboardButton(BTN_SETTING_PYRAMIDING), KeyboardButton(BTN_SETTING_MAX_TRADES)],
+        [KeyboardButton(BTN_HOME)]
+    ], resize_keyboard=True)
+
+def _build_back_settings_markup() -> ReplyKeyboardMarkup:
+    """Клавиатура для входа внутрь одного параметра."""
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(BTN_BACK_SETTINGS)],
+        [KeyboardButton(BTN_HOME)]
+    ], resize_keyboard=True)
+
 
 async def _load_runtime_settings_for_menu() -> dict:
     timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
@@ -268,11 +295,12 @@ async def _load_runtime_settings_for_menu() -> dict:
 
 
 async def _render_main_menu(message_target):
-    await message_target.reply_text(
-        "🤖 **Algo Quant Bot**\n\nВыберите раздел для управления ботом:",
-        reply_markup=_build_main_menu_markup(),
-        parse_mode='Markdown',
-    )
+    text = "🤖 **Algo Quant Bot**\n\nСистема готова. Выберите раздел для управления 👇"
+    kb = _build_main_menu_markup()
+    if hasattr(message_target, 'reply_text'):
+        await message_target.reply_text(text, reply_markup=kb, parse_mode='Markdown')
+    else:
+        await message_target.message.reply_text(text, reply_markup=kb, parse_mode='Markdown')
 
 
 def _build_faq_menu_keyboard() -> InlineKeyboardMarkup:
@@ -283,7 +311,8 @@ def _build_faq_menu_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🤖 Сигналы и AI", callback_data="faq_ai")],
         [InlineKeyboardButton("🚫 Почему нет входа", callback_data="faq_no_entry"),
          InlineKeyboardButton("🏁 Причины закрытия", callback_data="faq_close_reasons")],
-        [InlineKeyboardButton("🔄 Синхронизация", callback_data="faq_sync")],
+        [InlineKeyboardButton("🧩 Стратегии бота", callback_data="faq_strategies"),
+         InlineKeyboardButton("🔄 Синхронизация", callback_data="faq_sync")],
     ])
 
 
@@ -291,71 +320,82 @@ def _faq_text_by_section(section: str) -> str:
     if section == "controls":
         return (
             "🎛 **FAQ: УПРАВЛЕНИЕ**\n\n"
-            "• `🔄 Вкл/Выкл` — включает/выключает автоторговлю сразу.\n"
-            "• `💼 Активные позиции` — список позиций + действия (обновить/сократить/закрыть).\n"
-            "• `📜 История сделок` — последние закрытые сделки с причиной и PnL.\n"
-            "• `📈 Статистика` — агрегаты по закрытым сделкам и сброс статистики.\n"
-            "• `📉 Сигналы` — свежие сигналы из БД со статусом.\n"
-            "• `📚 Стратегии` — краткая методология бота."
+            "• Вкл/Выкл - включает и выключает автоторговлю.\n"
+            "• Активные позиции - список сделок и управление ими.\n"
+            "• История сделок - последние закрытые сделки и PnL.\n"
+            "• Статистика - итоги торговли и сброс лимитов.\n"
+            "• Сигналы - список сигналов из базы данных.\n"
+            "• Стратегии - описание алгоритмов бота."
         )
     if section == "settings":
         return (
             "⚙️ **FAQ: НАСТРОЙКИ**\n\n"
-            "• `⚡ Плечо` — runtime-плечо без рестарта.\n"
-            "• `💰 Маржа` — доля капитала на 1 сделку (процент).\n"
-            "• `📂 Позиции` — лимит одновременных сделок.\n"
-            "• `🎯 TP/SL` — TP runtime, SL рассчитывается риск-движком.\n"
-            "• `↕️ Направление` — LONG / SHORT / BOTH.\n"
-            "• `💵 Объём` — фикс USDT на сделку (0 = авто-расчёт).\n"
-            "• `💎 Пирамидинг` — доп. входы по правилам.\n"
-            "• `⏱ Expiry` — защита от устаревших сигналов."
+            "• Плечо - множитель силы позиции.\n"
+            "• Маржа - процент капитала на одну сделку.\n"
+            "• Позиции - лимит одновременных сделок.\n"
+            "• TP/SL - настройки фиксации прибыли и стопа.\n"
+            "• Направление - LONG / SHORT / BOTH.\n"
+            "• Объём - фиксированная сумма в USDT.\n"
+            "• Пирамидинг - добавление к позициям.\n"
+            "• Expiry - срок жизни сигнала."
         )
     if section == "risk":
         return (
             "🛡 **FAQ: РИСК-ЛОГИКА**\n\n"
-            "• Стоп-лосс: ATR-расчёт + минимальная дистанция.\n"
-            "• Трейлинг: стоп двигается только в сторону снижения риска.\n"
-            "• Безубыток: перенос стопа при 1R + подтверждение (ADX/пробой).\n"
-            "• Daily halt: блок входов при превышении дневного лимита просадки.\n"
-            "• Корреляционный фильтр: ограничивает одинаковые направления внутри кластеров.\n"
-            "• Листинг-фильтр: отсекает слишком новые инструменты."
+            "• Стоп-лосс - динамический расчет на основе ATR.\n"
+            "• Трейлинг - подтягивание стопа за ценой.\n"
+            "• Безубыток - перенос стопа при достижении цели.\n"
+            "• Daily halt - дневной лимит просадки (5%).\n"
+            "• Корреляция - ограничение на похожие монеты."
         )
     if section == "ai":
         return (
             "🤖 **FAQ: СИГНАЛЫ И AI**\n\n"
-            "• Сигнал проходит технический скоринг и AI-фильтр.\n"
-            "• Минимальные пороги: score и win probability.\n"
-            "• Внешний AI работает каскадом по доступным провайдерам.\n"
-            "• Если провайдер недоступен/в лимите — используется следующий.\n"
-            "• Решения AI логируются для последующей аналитики/обучения."
+            "• Технический скоринг по 8 стратегиям.\n"
+            "• AI-фильтрация вероятности успеха.\n"
+            "• Проверка через каскад внешних LLM.\n"
+            "• Логирование всех решений в DecisionLogs."
         )
     if section == "no_entry":
         return (
             "🚫 **FAQ: ПОЧЕМУ НЕТ ВХОДА**\n\n"
-            "• достигнут лимит позиций,\n"
-            "• автоторговля выключена,\n"
-            "• сигнал устарел,\n"
-            "• score/win_prob ниже порога,\n"
-            "• фильтр листинга/корреляции/funding не пройден,\n"
-            "• активирован дневной стоп по просадке,\n"
-            "• биржа отклонила ордер (правила/лимиты инструмента)."
+            "• Достигнут лимит позиций.\n"
+            "• Автоторговля выключена.\n"
+            "• Сигнал устарел (Expiry).\n"
+            "• Низкий AI Score или вероятность.\n"
+            "• Фильтр листинга или корреляции.\n"
+            "• Дневной стоп-лосс (Daily Halt)."
         )
     if section == "close_reasons":
         return (
             "🏁 **FAQ: ПРИЧИНЫ ЗАКРЫТИЯ**\n\n"
-            "• `🔄 Биржа (TP/SL)` — сработал защитный ордер на бирже.\n"
-            "• `🖐 Ручное` — закрытие через Telegram-кнопку.\n"
-            "• `⏱ Тайм-аут` — выход по time-exit.\n"
-            "• `⚙️ Авто` — закрытие внутренней логикой бота."
+            "• Биржа (TP/SL) - сработал ордер на бирже.\n"
+            "• Ручное - закрыто вами через бота.\n"
+            "• Тайм-аут - выход по времени (Time Exit).\n"
+            "• Авто - закрытие логикой стратегии."
         )
     if section == "sync":
         return (
             "🔄 **FAQ: СИНХРОНИЗАЦИЯ**\n\n"
-            "• Есть регулярный reconcile: биржа ↔ БД ↔ память.\n"
-            "• `/api/v1/trades` перед выдачей делает принудительную синхронизацию.\n"
-            "• Локальный кеш `active_trades` мягко очищается по live-позициям.\n"
-            "• Если позиция закрыта внешне, она должна исчезнуть из списка активных.\n"
-            "• При сетевых сбоях возможны краткие задержки обновления, затем данные выравниваются."
+            "• Регулярная проверка Биржа - БД - Память.\n"
+            "• Принудительное выравнивание кеша.\n"
+            "• Авто-удаление закрытых позиций из списка."
+        )
+    if section == "strategies":
+        return (
+            "🧩 **СТРАТЕГИИ БОТА**\n\n"
+            "🚀 **Трендовые:**\n"
+            "• Donchian - Пробой максимумов/минимумов.\n"
+            "• MA Trend - Скользящие средние.\n"
+            "• Pullback - Вход на откате.\n"
+            "• WRD - Williams Range Drive.\n\n"
+            "📉 **Контртрендовые:**\n"
+            "• Williams R - Перекупленность/Перепроданность.\n"
+            "• WRD Reversal - Логика разворота.\n"
+            "• Vol Contraction - Сжатие волатильности.\n"
+            "• Funding Squeeze - Анализ ставок фандинга.\n\n"
+            "🛡 **Smart Routing:**\n"
+            "Фильтр по рыночному режиму (Trend / Range)."
         )
     return "❓ Раздел FAQ не найден."
 
@@ -378,9 +418,11 @@ async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📝 Детали: `{(ex_data.get('message') or 'n/a')[:140]}`\n\n"
                 "Для смены ключей используйте `.env` и перезапуск контейнеров."
             )
-            await update.message.reply_text(msg, parse_mode='Markdown')
+            m = await update.message.reply_text(msg, parse_mode='Markdown')
+            _track_message(context, m)
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка проверки API: {e}")
+        m_err = await update.message.reply_text(f"❌ Ошибка проверки API: {e}")
+        _track_message(context, m_err)
 
 @admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -515,7 +557,7 @@ def _build_positions_list_view(trades: dict, page: int = 1, page_size: int = 5) 
     return "\n".join(list_lines), InlineKeyboardMarkup(keyboard_rows)
 
 
-def _build_position_details_view(symbol: str, info: dict) -> str:
+def _format_trade_info(symbol: str, info: dict) -> str:
     is_lg = info.get('signal_type') == "LONG"
     side_emoji = "🟢 LONG" if is_lg else "🔴 SHORT"
     curr_p = info.get('current_price')
@@ -553,7 +595,6 @@ def _build_position_details_view(symbol: str, info: dict) -> str:
         f"⏱ В позиции: `{opened_ago}`"
     )
 
-
 @admin_only
 async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -562,7 +603,8 @@ async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TY
             trades = data.get("trades", {})
 
             if not trades:
-                await update.message.reply_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                m = await update.message.reply_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                _track_message(context, m)
                 return
 
             total_pnl_usd = 0.0
@@ -584,10 +626,12 @@ async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TY
                 f"📊 Средний PnL: `{avg_pnl_pct:+.2f}%`\n"
                 f"🧮 Рассчитано по позициям: `{counted}/{len(trades)}`"
             )
-            await update.message.reply_text(summary_msg, parse_mode='Markdown')
+            m_sum = await update.message.reply_text(summary_msg, parse_mode='Markdown')
+            _track_message(context, m_sum)
 
             list_text, list_kb = _build_positions_list_view(trades, page=1)
-            await update.message.reply_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+            m_list = await update.message.reply_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+            _track_message(context, m_list)
 
     except httpx.TimeoutException:
         logging.error("Таймаут при запросе активных позиций к движку")
@@ -657,7 +701,8 @@ async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             items = data.get("items", [])
             if not items:
-                await update.message.reply_text("📜 История сделок пуста.")
+                m_empty = await update.message.reply_text("📜 История сделок пуста.")
+                _track_message(context, m_empty)
                 return
 
             lines = [f"📜 **ИСТОРИЯ СДЕЛОК ({len(items)}):**\n"]
@@ -692,50 +737,116 @@ async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if len(full_text) > 4000:
                 for i in range(0, len(full_text), 4000):
                     chunk = full_text[i:i + 4000]
-                    await update.message.reply_text(chunk, parse_mode='Markdown')
+                    m = await update.message.reply_text(chunk, parse_mode='Markdown')
+                    _track_message(context, m)
             else:
-                await update.message.reply_text(full_text, parse_mode='Markdown')
+                m = await update.message.reply_text(full_text, parse_mode='Markdown')
+                _track_message(context, m)
 
     except Exception as e:
         logging.error(f"Ошибка истории сделок: {e!r}")
-        await update.message.reply_text(f"❌ Не удалось получить историю сделок.\n`{_escape_md(str(e)[:120])}`", parse_mode='Markdown')
+async def _cleanup_category_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет сообщения предыдущей выбранной категории из чата."""
+    msg_ids = context.user_data.get('category_msg_ids', [])
+    chat_id = update.effective_chat.id
+    for mid in msg_ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    context.user_data['category_msg_ids'] = []
+
+def _track_message(context: ContextTypes.DEFAULT_TYPE, msg):
+    """Добавляет ID сообщения в список для последующей очистки."""
+    if 'category_msg_ids' not in context.user_data:
+        context.user_data['category_msg_ids'] = []
+    if msg:
+        context.user_data['category_msg_ids'].append(msg.message_id)
 
 @admin_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text
+    raw_text = update.message.text or ""
+    text = raw_text.strip()
+    
+    # --- CLEANUP: Удаляем сообщение пользователя, чтобы не засорять чат ---
+    try:
+        await update.message.delete()
+    except Exception:
+        pass 
+
+    # --- CLEANUP: Перед каждым действием чистим старую категорию ---
+    await _cleanup_category_messages(update, context)
+
     logger.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
-    if text == BTN_ACTIVE:
+    
+    if text.endswith("Активные позиции"):
+        # Позиции обычно компактны, но тоже будем чистить
+        msg = await update.message.reply_text("⏳ Загружаем позиции...", reply_markup=_build_back_home_markup())
+        _track_message(context, msg)
         await show_active_positions(update, context)
-    elif text == BTN_TOGGLE:
+    elif text.endswith("Вкл/Выкл"):
         try:
             async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
                 res = response.json()
                 st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
-                await update.message.reply_text(f"🔄 Автоторговля: {st}")
+                m = await update.message.reply_text(f"🔄 Автоторговля: {st}", reply_markup=_build_back_home_markup())
+                _track_message(context, m)
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка переключения: {e}")
-    elif text in {"⚙ Настройки", BTN_AUTOTRADE_SETTINGS}:
+            m_err = await update.message.reply_text(f"❌ Ошибка переключения: {e}", reply_markup=_build_back_home_markup())
+            _track_message(context, m_err)
+    elif text.endswith("Настройки автоторговли") or text == BTN_BACK_SETTINGS:
         try:
-            await _render_settings_message(update.message, edit=False)
+            m = await _render_settings_message(update.message, edit=False)
+            # Обновляем клавиатуру навигации по настройкам
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚙️ Используйте меню ниже для выбора параметра:",
+                reply_markup=_build_settings_nav_markup()
+            )
+            _track_message(context, m)
         except Exception as e:
             logging.error(f"Ошибка настроек: {e}")
-            await update.message.reply_text("❌ Ошибка при получении настроек.")
-    elif text == BTN_API_SETTINGS:
+            m_err = await update.message.reply_text("❌ Ошибка при получении настроек.")
+            _track_message(context, m_err)
+    elif text == BTN_SETTING_LEVERAGE:
+        # Эмуляция нажатия на inline-кнопку "Плечо"
+        update.callback_query = type('obj', (object,), {'data': 'menu_leverage', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("⚡️ Настройка кредитного плеча:", reply_markup=_build_back_settings_markup())
+    elif text == BTN_SETTING_MARGIN:
+        update.callback_query = type('obj', (object,), {'data': 'menu_margin', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("💰 Настройка маржи:", reply_markup=_build_back_settings_markup())
+    elif text == BTN_SETTING_PYRAMIDING:
+        update.callback_query = type('obj', (object,), {'data': 'menu_pyramid', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("🪜 Настройка пирамидинга:", reply_markup=_build_back_settings_markup())
+    elif text == BTN_SETTING_MAX_TRADES:
+        update.callback_query = type('obj', (object,), {'data': 'menu_maxtrades', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("🛡 Настройка лимита сделок:", reply_markup=_build_back_settings_markup())
+
+    elif text.endswith("Настройки API"):
         await show_api_settings(update, context)
-    elif text == BTN_SIGNALS:
+    elif text.endswith("Сигналы"):
         try:
             async with get_http_client() as client:
                 resp = await client.get(f"{ENGINE_URL}/api/v1/signals?limit=5", timeout=5.0)
                 resp.raise_for_status()
+                # Посылаем клавиатуру Home сразу
+                m_intro = await update.message.reply_text("⏳ Загружаем сигналы...", reply_markup=_build_back_home_markup())
+                _track_message(context, m_intro)
                 signals = resp.json()
 
             if not signals:
-                await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет.")
+                m = await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет.")
+                _track_message(context, m)
                 return
 
-            await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({len(signals)}):**", parse_mode='Markdown')
+            m_head = await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({len(signals)}):**", parse_mode='Markdown')
+            _track_message(context, m_head)
 
             status_map = {
                 "PENDING": "⌛️ В ОЖИДАНИИ",
@@ -745,76 +856,155 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "EXPIRED": "⏱ ИСТЕК"
             }
 
-            def fmt_p(val):
-                if val is None: return "N/A"
-                v = float(val)
-                return f"{v:.4f}" if v < 1.0 else f"{v:.2f}"
+            def fmt_p(val, placeholder="Не определен"):
+                if val is None or val == 0 or val == "0" or val == "0.0":
+                    return f"_{placeholder}_"
+                try:
+                    v = float(val)
+                    if v == 0: return f"_{placeholder}_"
+                    return f"{v:.4f}" if v < 1.0 else f"{v:.2f}"
+                except:
+                    return f"_{placeholder}_"
+
+            status_desc_map = {
+                "FILTERED:expiry": "⏱ ИСТЕК (устарел)",
+                "FILTERED:regime-router": "🚫 Не тот режим рынка",
+                "FILTERED:score": "📉 Низкое качество AI",
+                "FILTERED:dailyhalt": "🛑 Дневной стоп-лимит",
+                "FILTERED:below-min-r-after-fees": "💰 Низкая доходность",
+                "FILTERED:ai-prob": "🤖 AI не подтвердил вход",
+                "FILTERED:volatility": "🌪 Аномальная волатильность",
+                "FILTERED:correlation": "🔗 Избыток монет группы"
+            }
 
             for s in signals:
                 sig_side = str(s.get("signal_type", "")).upper()
                 signal_type_ru = "🟢 LONG" if sig_side == "LONG" else "🔴 SHORT"
-                status_raw = s.get("status", "UNKNOWN")
-                status_ru = status_map.get(status_raw, f"❓ {status_raw}")
+                
+                status_raw = str(s.get("status", "UNKNOWN"))
+                status_ru = status_map.get(status_raw)
+                if not status_ru:
+                    status_ru = status_desc_map.get(status_raw, f"❓ {status_raw.replace('_', '-').replace('FILTERED:', '')}")
                 
                 win_p = s.get("win_prob", 0.0) or 0.0
                 conf = s.get("confidence", 0.0) or 0.0
-                ts = str(s.get("timestamp", "N/A"))[:19].replace("T", " ")
+                ts = str(s.get("timestamp", "Неизвестно"))[:19].replace("T", " ")
+
+                safe_strategy = str(s.get('strategy', 'Неизвестна')).replace("_", "-").replace("*", "")
+                
+                win_p_text = f"{int(win_p * 100)}%" if win_p > 0 else "_в обработке..._"
+                score_text = f"{conf:.2f}" if conf > 0 else "_в расчете_"
+                risk_text = str(s.get('risk', '1.0')).replace('_', '-') if s.get('risk') else "стандарт"
 
                 msg = (
-                    f"🚀 **СИГНАЛ: {s.get('strategy', 'Unknown')}**\n\n"
+                    f"🚀 **СИГНАЛ: {safe_strategy}**\n\n"
                     f"🔸 **Символ:** {s.get('symbol', 'N/A')}\n"
                     f"🔸 **Направление:** {signal_type_ru}\n\n"
-                    f"💰 **Цена входа:** {fmt_p(s.get('entry_price'))}\n"
-                    f"🛡 **Stop Loss:** {fmt_p(s.get('stop_loss', 0))}\n"
-                    f"🎯 **Take Profit:** {fmt_p(s.get('take_profit', 0))}\n\n"
+                    f"💰 **Цена входа:** {fmt_p(s.get('entry_price'), 'Рыночная')}\n"
+                    f"🛡 **Stop Loss:** {fmt_p(s.get('stop_loss'), 'Динамический')}\n"
+                    f"🎯 **Take Profit:** {fmt_p(s.get('take_profit'), 'Цель не задана')}\n\n"
                     f"🕒 **Время (UTC):** {ts}\n\n"
                     f"🤖 **AI ВЕРДИКТ:**\n"
-                    f"📈 **Вероятность успеха:** {int(win_p * 100)}%\n"
-                    f"💰 **Ож. доходность:** {s.get('expected_return', '0.0')}%\n"
-                    f"⚠️ **Уровень риска:** {s.get('risk', '1.0')}\n"
-                    f"📊 **AI Score:** {conf:.2f}\n\n"
+                    f"📈 **Вероятность успеха:** {win_p_text}\n"
+                    f"💰 **Ож. доходность:** {fmt_p(s.get('expected_return'), '0.0')}%\n"
+                    f"⚠️ **Уровень риска:** {risk_text}\n"
+                    f"📊 **AI Score:** {score_text}\n\n"
                     f"ℹ️ **Статус:** {status_ru}\n"
-                    f"📁 **Источник:** {s.get('source', 'unknown')}\n"
+                    f"📁 **Источник:** decision-logs\n"
                     f"───────────────────"
                 )
-                await update.message.reply_text(msg, parse_mode='Markdown')
+                m_sig = await update.message.reply_text(msg, parse_mode='Markdown')
+                _track_message(context, m_sig)
         except Exception as e:
             logging.error(f"Ошибка получения сигналов из REST API: {e}")
-            await update.message.reply_text("❌ Ошибка при обращении к торговому движку.")
-    elif text == BTN_FAQ:
-        await update.message.reply_text(
-            "❓ **FAQ БОТА**\n\nВыберите раздел:",
+            m_err = await update.message.reply_text("❌ Ошибка при обращении к торговому движку.")
+            _track_message(context, m_err)
+    elif text.endswith("Стратегии"):
+        faq_text = _faq_text_by_section("strategies")
+        m = await update.message.reply_text(faq_text, parse_mode='Markdown')
+        _track_message(context, m)
+    elif text.endswith("FAQ") or text == BTN_BACK_FAQ:
+        # Предлагаем клавиатуру категорий FAQ
+        kb_reply = ReplyKeyboardMarkup([
+            [KeyboardButton("🧩 Функции"), KeyboardButton("⚙️ Настройки")],
+            [KeyboardButton("🛡 Риски"), KeyboardButton("🤖 AI")],
+            [KeyboardButton(BTN_HOME)]
+        ], resize_keyboard=True)
+        
+        m = await update.message.reply_text(
+            "❓ **FAQ БОТА**\n\nВыберите интересующий раздел на кнопках ниже:",
             parse_mode='Markdown',
-            reply_markup=_build_faq_menu_keyboard()
+            reply_markup=kb_reply
         )
-    elif text == BTN_STATS:
+        _track_message(context, m)
+    elif text in {"🧩 Функции", "⚙️ Настройки", "🛡 Риски", "🤖 AI"}:
+        # Маппинг текстовых кнопок на существующие ключи FAQ
+        mapping = {
+            "🧩 Функции": "controls", 
+            "⚙️ Настройки": "settings", 
+            "🛡 Риски": "risk", 
+            "🤖 AI": "ai"
+        }
+        key = mapping.get(text)
+        faq_text = _faq_text_by_section(key)
+        m = await update.message.reply_text(
+            faq_text, 
+            parse_mode='Markdown', 
+            reply_markup=ReplyKeyboardMarkup([
+                [KeyboardButton(BTN_BACK_FAQ)], 
+                [KeyboardButton(BTN_HOME)]
+            ], resize_keyboard=True)
+        )
+        _track_message(context, m)
+    elif text.endswith("Статистика"):
         try:
             async with get_http_client() as client:
-                response = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
-                data = response.json()
-                daily = data.get("daily", {})
+                # Получаем и общую статистику, и текущий статус рисков (Halt)
+                stats_resp = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
+                status_resp = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=5.0)
                 
+                stats_data = stats_resp.json()
+                status_data = status_resp.json()
+                
+                daily = stats_data.get("daily", {})
+                halted = status_data.get("status") == "halted" or "halting" in str(status_data.get("status", ""))
+                
+                # Формируем расширенное сообщение
                 msg = (
                     "📊 **СТАТИСТИКА ТОРГОВЛИ**\n\n"
                     "📅 **За последние 24 часа:**\n"
-                    f"• Закрыто сделок: {daily.get('trades_count', 0)}\n"
-                    f"• Прибыль/Убыток: {'🟢' if daily.get('pnl_usd', 0) >= 0 else '🔴'} "
-                    f"{daily.get('pnl_usd', 0):+.2f} USDT ({daily.get('avg_pct', 0):+.2f}%)\n\n"
-                    "📅 *Статистика за 7 и 30 дней будет доступна после накопления данных.*"
+                    f"• Сделок: `{daily.get('trades_count', 0)}`\n"
+                    f"• PnL: {'🟢' if daily.get('pnl_usd', 0) >= 0 else '🔴'} "
+                    f"`{daily.get('pnl_usd', 0):+.2f} USDT` (`{daily.get('avg_pct', 0):+.2f}%`)\n\n"
+                    f"🛡 **Риск-статус:**\n"
+                    f"• Состояние: {'⛔️ HALTED (Лимит превышен)' if halted else '✅ OK'}\n"
+                    f"• Просадка: `{status_data.get('drawdown', '0.00%')}`\n\n"
+                    "ℹ️ _Нажмите кнопку ниже, чтобы сбросить дневные лимиты и статистику._"
                 )
                 
-                keyboard = [[InlineKeyboardButton("♻️ Сбросить статистику", callback_data="reset_stats")]]
-                await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                keyboard = [
+                    [InlineKeyboardButton("♻️ Сбросить всё", callback_data="reset_stats_all")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="pos_back_list")]
+                ]
+                m = await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                _track_message(context, m)
+                # Под основной клавиатурой только Домой
+                await update.message.reply_text("🔙 Вернуться?", reply_markup=_build_back_home_markup())
         except Exception as e:
             logging.error(f"Ошибка статистики: {e}")
-            await update.message.reply_text("❌ Ошибка при получении статистики.")
+            m_err = await update.message.reply_text("❌ Ошибка при получении статистики.")
+            _track_message(context, m_err)
 
-    elif text in {"📜 История", BTN_HISTORY}:
+    elif text.endswith("История сделок") or text.endswith("История"):
+        # Сама функция show_trade_history должна уметь во внутреннюю очистку или трекинг
         await show_trade_history(update, context)
-    elif text == BTN_HOME:
+        await update.message.reply_text("🔙 Вернуться?", reply_markup=_build_back_home_markup())
+    elif text.endswith("Главное меню") or text == "/start":
         await _render_main_menu(update.message)
     else:
-        await update.message.reply_text("Команда не распознана. Нажмите кнопку из меню 👇", reply_markup=_build_main_menu_markup())
+        logger.warning(f"❌ НЕРАСПОЗНАННЫЙ ТЕКСТ: '{text}'")
+        m_fallback = await update.message.reply_text("Команда не распознана. Нажмите кнопку из меню 👇", reply_markup=_build_main_menu_markup())
+        _track_message(context, m_fallback)
 @admin_only
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1348,7 +1538,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("faq_"):
         await _answer_once()
         faq_key = query.data.replace("faq_", "")
-        if faq_key not in {"controls", "settings", "risk", "ai", "no_entry", "close_reasons", "sync"}:
+        if faq_key not in {"controls", "settings", "risk", "ai", "no_entry", "close_reasons", "sync", "strategies"}:
             await query.edit_message_text(
                 "❓ **FAQ БОТА**\n\nВыберите раздел:",
                 parse_mode='Markdown',
@@ -1365,24 +1555,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _answer_once()
         logging.warning(f"Unmatched callback_data: {query.data!r} from user {user_id}")
 
-# ======= ANTI-SPAM & RATE LIMITING (Этап 18) =======
-# Хранилище: {user_id: [timestamp1, timestamp2, ...]}
+# ======= ANTI-SPAM & RATE LIMITING =======
 user_message_times = defaultdict(list)
-RATE_LIMIT_MESSAGES = 10      # Максимум 10 сообщений
-RATE_LIMIT_WINDOW = 5.0      # за 5 секунд
+user_blocked_until = {}
+RATE_LIMIT_MESSAGES = 5      
+RATE_LIMIT_WINDOW = 3.0      
+BLOCK_DURATION = 10.0        
 
 async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Проверяет, не спамит ли пользователь.
-    В python-telegram-bot v20+ это можно сделать через TypeHandler(Update, ...).
-    """
-    # Если апдейт не содержит сообщения от пользователя, пропускаем
-    if not update.effective_user or not update.effective_message:
+    if not update.effective_user:
         return
         
     user_id = update.effective_user.id
     current_time = time.time()
     
+    # Проверка блокировки
+    if user_id in user_blocked_until:
+        if current_time < user_blocked_until[user_id]:
+            raise ApplicationHandlerStop()
+        else:
+            del user_blocked_until[user_id]
+
     # Очищаем старые метки времени
     user_message_times[user_id] = [
         ts for ts in user_message_times[user_id] 
@@ -1390,9 +1583,11 @@ async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     
     if len(user_message_times[user_id]) >= RATE_LIMIT_MESSAGES:
-        logging.warning(f"Пользователь {user_id} заблокирован за спам.")
-        await update.effective_message.reply_text("⛔️ Слишком много запросов. Подождите пару секунд.")
-        # Прерываем обработку (raise DropUpdate в реальном приложении)
+        user_blocked_until[user_id] = current_time + BLOCK_DURATION
+        try:
+            if update.effective_message:
+                await update.effective_message.reply_text(f"⛔️ **АНТИСПАМ**: Вы нажимаете слишком быстро. Блокировка на {int(BLOCK_DURATION)}с.")
+        except: pass
         raise ApplicationHandlerStop()
         
     user_message_times[user_id].append(current_time)
