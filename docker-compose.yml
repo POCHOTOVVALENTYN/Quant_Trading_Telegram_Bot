@@ -1,6 +1,12 @@
+# Shared build: set DOCKER_PYTHON_IMAGE in .env if Docker Hub TLS fails (mirror / pre-pulled tag).
+x-app-build: &app-build
+  context: .
+  args:
+    BASE_IMAGE: ${DOCKER_PYTHON_IMAGE:-python:3.11-slim}
+
 services:
   bot:
-    build: .
+    build: *app-build
     container_name: quant_telegram_bot
     restart: unless-stopped
     env_file:
@@ -14,7 +20,7 @@ services:
     command: python -m api.telegram.main
 
   trading-engine:
-    build: .
+    build: *app-build
     container_name: quant_trading_engine
     restart: unless-stopped
     ports:
@@ -66,7 +72,7 @@ services:
           memory: 4G
 
   ml-worker:
-    build: .
+    build: *app-build
     container_name: quant_ml_worker
     restart: unless-stopped
     env_file:
@@ -83,7 +89,7 @@ services:
           memory: 1G
 
   market-data:
-    build: .
+    build: *app-build
     container_name: quant_market_data
     restart: unless-stopped
     env_file:

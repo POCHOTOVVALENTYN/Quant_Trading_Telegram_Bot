@@ -39,6 +39,7 @@ class StrategyOptimizer:
         "StrategyWideRangeReversal": {},
         "StrategyWilliamsR": {"overbought": -20.0, "oversold": -80.0, "long_rsi_max": 45.0, "short_rsi_min": 55.0},
         "StrategyFundingSqueeze": {"funding_threshold": 0.015, "short_rsi_reentry": 70.0, "long_rsi_reentry": 30.0},
+        "StrategyRuleOf7": {"bars": 7},
     }
 
     def __init__(

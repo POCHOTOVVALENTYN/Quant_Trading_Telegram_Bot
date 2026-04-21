@@ -74,6 +74,7 @@ class BacktestEngine:
         taker_fee_pct: Optional[float] = None,
         entry_slippage_pct: float = 0.0003,
         exit_slippage_pct: float = 0.0005,
+        strategies: Optional[List[Any]] = None,
     ):
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -88,17 +89,20 @@ class BacktestEngine:
         self.entry_slippage_pct = float(entry_slippage_pct)
         self.exit_slippage_pct = float(exit_slippage_pct)
 
-        self.strategies = [
-            StrategyDonchian(period=20),
-            StrategyWRD(atr_multiplier=1.6),
-            StrategyVolContraction(lookback=300, contraction_ratio=0.6),
-            StrategyMATrend(fast_ma=20, slow_ma=50, global_ma=200),
-            StrategyPullback(ma_period=20, global_period=200),
-            StrategyWilliamsR(),
-            StrategyWideRangeReversal(),
-            StrategyFundingSqueeze(),
-            StrategyRuleOf7(),
-        ]
+        if strategies is not None:
+            self.strategies = strategies
+        else:
+            self.strategies = [
+                StrategyDonchian(period=20),
+                StrategyWRD(atr_multiplier=1.6),
+                StrategyVolContraction(lookback=300, contraction_ratio=0.6),
+                StrategyMATrend(fast_ma=20, slow_ma=50, global_ma=200),
+                StrategyPullback(ma_period=20, global_period=200),
+                StrategyWilliamsR(),
+                StrategyWideRangeReversal(),
+                StrategyFundingSqueeze(),
+                StrategyRuleOf7(),
+            ]
         self.scorer = SignalScorer()
         self.ai_model = AIModel()
         self.risk = RiskManager()
@@ -174,40 +178,7 @@ class BacktestEngine:
         closed["pnl_pct"] = pnl.pnl_pct
         return closed
 
-    async def _resolve_intrabar_conflict(self, symbol: str, start_ts: int, end_ts: int, 
-                                         sl: float, tp: float, direction: str) -> str:
-        """
-        Fetches 1m candles to determine if SL or TP was hit first inside a larger bar.
-        Returns 'SL' or 'TP'.
-        """
-        try:
-            # We use the existing fetch_candles helper for 1m data
-            # To save time/API, we only fetch for the specific range
-            df_1m = await fetch_candles(symbol, "1m", days=1, since_ts=start_ts)
-            # Filter to our specific range
-            df_range = df_1m[(df_1m['timestamp'] >= start_ts) & (df_1m['timestamp'] <= end_ts)]
-            
-            is_long = direction == "LONG"
-            for _, m_bar in df_range.iterrows():
-                m_low, m_high = float(m_bar['low']), float(m_bar['high'])
-                
-                # Check for SL hit
-                sl_hit = (is_long and m_low <= sl) or (not is_long and m_high >= sl)
-                # Check for TP hit 
-                tp_hit = (is_long and m_high >= tp) or (not is_long and m_low <= tp)
-
-                if sl_hit and tp_hit:
-                    # If even on 1m we hit both (rare), assume SL for safety
-                    return "SL"
-                if sl_hit: return "SL"
-                if tp_hit: return "TP"
-            
-            return "SL" # Fallback
-        except Exception as e:
-            # If API fails, default to conservative SL
-            return "SL"
-
-    async def run(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> Dict[str, Any]:
+    def run(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> Dict[str, Any]:
         """Run backtest on OHLCV DataFrame with pre-calculated indicators."""
         if len(df) < 200:
             return {"error": "Need at least 200 bars"}
@@ -284,30 +255,6 @@ class BacktestEngine:
                     self.balance += closed["pnl"]
                     self.trades.append(closed)
                     open_trade = None
-                continue
-
-                # 1m Intrabar resolution for Ambiguous bars (hit SL and any TP)
-                any_tp_hit = len(tp_indices) > len(open_trade.get("tp_indices_hit_at_start", []))
-                if stop_hit and any_tp_hit:
-                    # Resolve conflict: Did SL happen before the first NEW TP of this bar?
-                    start_ts = int(bar['timestamp'])
-                    end_ts = int(df.iloc[i+1]['timestamp'] - 1) if i+1 < len(df) else start_ts + 3600000
-                    # For simplicity, if conflict exists, we prioritize 1m truth.
-                    # We skip the complex 1m loop for now and just assume the logic above 
-                    # is already better than 'always SL first'. 
-                    # But for Stage 3 perfection:
-                    first_new_tp = open_trade["tp_levels"][min(tp_indices) if tp_indices else 0]
-                    reason = await self._resolve_intrabar_conflict(symbol, start_ts, end_ts, sl, first_new_tp, open_trade["direction"])
-                    if reason == "SL":
-                        # Hit SL first: discard TPs from this bar
-                        exit_price = self._exit_fill_price(bar, open_trade["direction"], sl, "SL")
-                        closed = self._close_trade(open_trade, exit_price, "SL")
-                        self.balance += closed["pnl"]
-                        self.trades.append(closed)
-                        open_trade = None
-                        continue
-
-            if open_trade:
                 continue
 
             # Evaluate strategies on closed bars (up to i, excluding i)
@@ -393,7 +340,7 @@ class BacktestEngine:
                     "score": top['score'],
                     "win_prob": top['win_prob'],
                     "bar_idx": i,
-                    "entry_fee_usd": PnLCalculator.estimate_fee(entry, size, self.taker_fee_pct),
+                    "entry_fee_usd": PnLCalculator.estimate_fee(price=entry, qty=size, fee_rate=self.taker_fee_pct),
                 }
 
         return self._compile_results()
@@ -551,7 +498,7 @@ async def main():
     print(f"Downloaded {len(df)} candles")
 
     engine = BacktestEngine(initial_balance=args.balance)
-    results = await engine.run(df, symbol=args.symbol)
+    results = engine.run(df, symbol=args.symbol)
 
     print("\n" + "=" * 60)
     print("BACKTEST RESULTS")
@@ -600,7 +547,7 @@ async def main():
         print(f"  IS Period: {len(df_is)} candles | OOS Period: {len(df_oos)} candles")
         
         engine_oos = BacktestEngine(initial_balance=args.balance)
-        oos_results = engine_oos.run(df_oos)
+        oos_results = engine_oos.run(df_oos, symbol=args.symbol)
         
         print(f"  OOS Return: {oos_results.get('return_pct', 0):.2f}% (vs {results.get('return_pct', 0):.2f}% total)")
         if oos_results.get('return_pct', 0) > 0 and results.get('return_pct', 0) > 0:

@@ -40,6 +40,7 @@ class StrategyMutator:
         "atr_multiplier": (1.0, 3.0, "float"),
         "contraction_ratio": (0.3, 0.9, "float"),
         "lookback": (50, 400, "int"),
+        "bars": (3, 21, "int"),
         "sl_multiplier": (1.0, 4.0, "float"),
         "tp_multiplier": (1.2, 6.0, "float"),
     }
@@ -80,6 +81,9 @@ class StrategyMutator:
         mutated = {}
         for key, value in supported.items():
             mutated[key] = self._mutate_value(key, value)
+        if strategy_cls.__name__ == "StrategyMATrend":
+            if int(mutated.get("slow_ma", 0)) <= int(mutated.get("fast_ma", 0)):
+                mutated["slow_ma"] = int(mutated.get("fast_ma", 20)) + 10
         return mutated
 
     def _mutate_risk_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,6 +117,7 @@ class StrategyMutator:
             "StrategyWideRangeReversal": "WRD Reversal",
             "StrategyWilliamsR": "Williams R",
             "StrategyFundingSqueeze": "Funding Squeeze",
+            "StrategyRuleOf7": "Rule of 7",
         }
         return mapping.get(strategy_cls.__name__, strategy_cls.__name__)
 

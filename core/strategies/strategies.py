@@ -27,7 +27,12 @@ class StrategyRuleOf7(BaseStrategy):
         last = df.iloc[-1]
         close = self._safe_float(last.get("close"))
         atr = self._safe_float(last.get("atr"))
-        
+        if not self._volatility_filter(last):
+            return None
+        vol_v = self._safe_float(last.get("volume"))
+        vol_ma = self._safe_float(last.get("vol_ma20"), vol_v)
+        vol_ok = vol_ma <= 0 or vol_v >= vol_ma * 0.85
+
         # Lookback at the 7 bars BEFORE the current one
         window = df.iloc[-(self.bars + 1):-1]
         highest_7 = window["high"].max()
@@ -35,17 +40,31 @@ class StrategyRuleOf7(BaseStrategy):
 
         # Signal logic: Close breaks the 7-bar high/low after a period of trend
         # For LONG: needs to be in a general D1/H4 uptrend (handled by filters)
-        if close > highest_7 and self._trend_filter(last, "LONG"):
+        if close > highest_7 and vol_ok and self._trend_filter(last, "LONG"):
             # Strength is measured by how clean the breakout is relative to ATR
             strength = (close - highest_7) / (atr + 1e-9)
             if 0.1 < strength < 2.0: # Filter out crazy wicks or tiny nudges
                 return self._signal("Rule of 7", "LONG", close, 0.75)
 
-        if close < lowest_7 and self._trend_filter(last, "SHORT"):
+        if close < lowest_7 and vol_ok and self._trend_filter(last, "SHORT"):
             strength = (lowest_7 - close) / (atr + 1e-9)
             if 0.1 < strength < 2.0:
                 return self._signal("Rule of 7", "SHORT", close, 0.75)
 
+        return None
+
+    def exit_signal(self, df: pd.DataFrame, side: str) -> Optional[Dict[str, Any]]:
+        """Failed breakout: price back inside the prior N-bar range (closed bars)."""
+        if len(df) < max(10, self.bars // 2) + 1:
+            return None
+        last = df.iloc[-1]
+        lookback = df.iloc[-(max(10, self.bars // 2) + 1):-1]
+        close = self._safe_float(last.get("close"))
+        side_u = str(side or "").upper()
+        if side_u == "LONG" and close < self._safe_float(lookback["low"].min()):
+            return self._exit("rule_of_7_failed_breakout", close)
+        if side_u == "SHORT" and close > self._safe_float(lookback["high"].max()):
+            return self._exit("rule_of_7_failed_breakout", close)
         return None
 
     @staticmethod

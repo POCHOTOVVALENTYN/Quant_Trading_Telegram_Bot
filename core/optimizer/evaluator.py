@@ -25,6 +25,9 @@ class StrategyEvaluator:
         drawdown = float(backtest_result.get("max_drawdown_pct", 0.0) or 0.0)
         trades = int(backtest_result.get("total_trades", 0) or 0)
         sharpe = float(backtest_result.get("sharpe", 0.0) or 0.0)
+        profit_factor = float(backtest_result.get("profit_factor", 0.0) or 0.0)
+        if profit_factor == float("inf"):
+            profit_factor = 10.0
 
         metrics = {
             "profit": profit,
@@ -32,6 +35,7 @@ class StrategyEvaluator:
             "drawdown": drawdown,
             "trades": trades,
             "sharpe": sharpe,
+            "profit_factor": profit_factor,
         }
         score = self._score(metrics)
         return EvaluationResult(
@@ -50,4 +54,9 @@ class StrategyEvaluator:
         trades = float(metrics.get("trades", 0.0))
 
         trade_factor = min(1.0, trades / 10.0)
-        return round((profit * 0.01) + (winrate * 100.0) + (sharpe * 10.0) - (drawdown * 1.5) + trade_factor, 4)
+        pf = float(metrics.get("profit_factor", 0.0) or 0.0)
+        pf_term = min(pf, 10.0) * 0.5
+        return round(
+            (profit * 0.01) + (winrate * 100.0) + (sharpe * 10.0) - (drawdown * 1.5) + trade_factor + pf_term,
+            4,
+        )

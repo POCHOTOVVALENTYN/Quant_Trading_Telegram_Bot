@@ -35,12 +35,12 @@ def test_meta_strategy_detects_trend_regime():
     assert regime == "TREND"
 
 
-def test_meta_strategy_detects_flat_regime():
+def test_meta_strategy_detects_range_regime():
     meta = MetaStrategy(adx_trend_min=22.0, adx_flat_max=18.0)
 
     regime = meta.detect_market_regime(_df(adx=12.0, close=100.0, atr=0.2))
 
-    assert regime == "FLAT"
+    assert regime == "RANGE"
 
 
 def test_meta_strategy_selects_trend_bucket():
@@ -66,7 +66,7 @@ def test_meta_strategy_selects_trend_bucket():
     assert "StrategyWilliamsR" not in names
 
 
-def test_meta_strategy_selects_flat_bucket():
+def test_meta_strategy_selects_range_bucket():
     meta = MetaStrategy()
     strategies = [
         StrategyDonchian(),
@@ -82,7 +82,7 @@ def test_meta_strategy_selects_flat_bucket():
     selection = meta.select_strategies(_df(adx=10.0, close=100.0, atr=0.2), strategies)
     names = {type(s).__name__ for s in selection.strategies}
 
-    assert selection.regime == "FLAT"
+    assert selection.regime == "RANGE"
     assert "StrategyWilliamsR" in names
     assert "StrategyWideRangeReversal" in names
     assert "StrategyFundingSqueeze" in names

@@ -16,6 +16,8 @@ class PnLBreakdown:
 
 
 class PnLCalculator:
+    """Калькулятор прибыли и убытков с учетом комиссий и стороны позиции."""
+
     @staticmethod
     def calculate_realized_pnl(
         *,
@@ -47,6 +49,7 @@ class PnLCalculator:
                 pnl_pct=0.0,
             )
 
+        # Расчет Gross PnL
         if norm_side == "LONG":
             gross = (exit_f - entry_f) * qty_f
         elif norm_side == "SHORT":
@@ -55,9 +58,11 @@ class PnLCalculator:
             raise ValueError(f"Unsupported side: {side}")
 
         fees = entry_fee + exit_fee
-        pnl = gross - fees
-        entry_notional = abs(entry_f * qty_f)
-        pnl_pct = (pnl / entry_notional * 100.0) if entry_notional > 1e-12 else 0.0
+        net_pnl = gross - fees
+        
+        # PnL % считается от стоимости входа (номинала)
+        notional_entry = entry_f * qty_f
+        pnl_pct = (net_pnl / notional_entry * 100.0) if notional_entry > 1e-12 else 0.0
 
         return PnLBreakdown(
             side=norm_side,
@@ -68,12 +73,13 @@ class PnLCalculator:
             entry_fee_usd=entry_fee,
             exit_fee_usd=exit_fee,
             fees_usd=fees,
-            pnl_usd=pnl,
+            pnl_usd=net_pnl,
             pnl_pct=pnl_pct,
         )
 
     @staticmethod
     def estimate_fee(*, price: float, qty: float, fee_rate: float) -> float:
+        """Оценка комиссии на основе цены, объема и ставки (например, 0.0004 для 0.04%)."""
         price_f = float(price or 0.0)
         qty_f = float(qty or 0.0)
         rate_f = float(fee_rate or 0.0)
