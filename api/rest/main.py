@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
             'defaultType': 'future',
             'adjustForTimeDifference': True,
             'recvWindow': 10000, 
-            'fetchCurrencies': False, 'types': ['future'], # Disable SAPI-based currency loading
+            'fetchCurrencies': False, 'sandbox-future': True, 'types': ['future'], 'types': ['future'], # Disable SAPI-based currency loading
         },
         'timeout': 30000 # 30 секунд
     })
@@ -119,6 +119,8 @@ async def lifespan(app: FastAPI):
         app_logger.info("🔮 Используем Binance DEMO Trading (новые эндпоинты)")
         # Switch to demo URLs manually to bypass CCXT's NotSupported error
         exchange_client.urls['api'] = exchange_client.urls['demo']
+        # Add dummy SAPI for validation bypass
+        exchange_client.urls['api']['sapi'] = "https://demo-fapi.binance.com/fapi/v1"
     
     
     app_logger.info(f"API URLs: {exchange_client.urls}")

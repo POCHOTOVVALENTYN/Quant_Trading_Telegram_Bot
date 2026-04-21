@@ -47,7 +47,7 @@ class MarketDataService:
             self.exchange = ccxtpro.binance({
                 'enableRateLimit': True,
                 'timeout': int(settings.api_timeout_seconds * 1000), 
-                'options': {'defaultType': 'future', 'fetchCurrencies': False, 'types': ['future']}
+                'options': {'defaultType': 'future', 'fetchCurrencies': False, 'sandbox-future': True, 'types': ['future'], 'types': ['future']}
             })
             if settings.testnet:
                 # Manual switch to Demo URLs to avoid CCXT NotSupported error
