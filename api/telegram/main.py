@@ -1,14 +1,29 @@
 import logging
 import asyncio
+from typing import Optional, Union, Dict, Any, List
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, CallbackQueryHandler
 from telegram.error import BadRequest
 import time
 import httpx
-from collections import defaultdict
+from contextlib import asynccontextmanager
+
 from config.settings import settings
 
-ENGINE_URL = "http://trading-engine:8000" # URL внутри Docker сети
+# Global client for preventing TIME_WAIT exhaustion
+global_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0),
+    headers={"X-API-Key": settings.internal_api_key}
+)
+
+@asynccontextmanager
+async def get_http_client(*args, **kwargs):
+    # Ignore kwargs like timeout here, let global client handle it
+    yield global_client
+
+from collections import defaultdict
+
+ENGINE_URL = "http://localhost:8000" # URL для локального запуска
 
 BTN_AUTOTRADE_SETTINGS = "⚙️ Настройки автоторговли"
 BTN_API_SETTINGS = "⚙️ Настройки API"
@@ -21,10 +36,30 @@ BTN_STRATEGIES = "📚 Стратегии"
 BTN_FAQ = "❓ FAQ"
 BTN_HOME = "🏠 Главное меню"
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# --- НОВЫЕ КНОПКИ НАВИГАЦИИ ---
+BTN_BACK_SETTINGS = "◀️ Назад в настройки"
+BTN_BACK_FAQ = "◀️ Назад в FAQ"
+BTN_SETTING_LEVERAGE = "⚡️ Плечо"
+BTN_SETTING_MARGIN = "💰 Маржа"
+BTN_SETTING_PYRAMIDING = "🪜 Пирамидинг"
+BTN_SETTING_MAX_TRADES = "🛡 Макс. сделок"
+
+from utils.logger import app_logger as logger
+
+# _log = logging.getLogger(__name__) # Use logger instead
+
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id if update.effective_user else 0
+        allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
+        if user_id not in allowed_ids:
+            if update.callback_query:
+                await _safe_answer_callback(update.callback_query, "⛔️ Нет доступа", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("⛔️ Доступ запрещен. Вы не являетесь администратором.")
+            return
+        return await func(update, context)
+    return wrapper
 
 _action_cooldowns: dict[str, float] = {}
 _ACTION_COOLDOWN_BY_TYPE = {
@@ -64,7 +99,7 @@ async def _load_runtime_settings(client: httpx.AsyncClient) -> dict:
     }
 
 
-async def _safe_answer_callback(query, text: str | None = None, show_alert: bool = False):
+async def _safe_answer_callback(query, text: Optional[str] = None, show_alert: bool = False):
     """
     Безопасный answerCallbackQuery:
     - не роняет handler, если callback уже протух/некорректен.
@@ -81,7 +116,7 @@ async def _get_json_with_retry(
     client: httpx.AsyncClient,
     url: str,
     *,
-    params: dict | None = None,
+    params: Optional[dict] = None,
     timeout: float = 8.0,
     retries: int = 1,
 ) -> dict:
@@ -204,7 +239,7 @@ def _build_settings_menu_keyboard(runtime: dict, presets: list) -> InlineKeyboar
 
 async def _render_settings_message(message_target, edit: bool = False):
     timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with get_http_client() as client:
         presets = []
         try:
             presets_resp = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
@@ -219,9 +254,9 @@ async def _render_settings_message(message_target, edit: bool = False):
     text = _build_settings_menu_text(runtime)
     keyboard = _build_settings_menu_keyboard(runtime, presets)
     if edit:
-        await message_target.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
+        return await message_target.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
     else:
-        await message_target.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
+        return await message_target.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
 
 
 def _build_main_menu_markup() -> ReplyKeyboardMarkup:
@@ -230,23 +265,43 @@ def _build_main_menu_markup() -> ReplyKeyboardMarkup:
         [KeyboardButton(BTN_TOGGLE), KeyboardButton(BTN_ACTIVE)],
         [KeyboardButton(BTN_HISTORY), KeyboardButton(BTN_STATS)],
         [KeyboardButton(BTN_SIGNALS), KeyboardButton(BTN_STRATEGIES)],
-        [KeyboardButton(BTN_FAQ)],
+        [KeyboardButton(BTN_FAQ), KeyboardButton(BTN_HOME)],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def _build_back_home_markup() -> ReplyKeyboardMarkup:
+    """Упрощенная клавиатура: только кнопка 'Домой'."""
+    return ReplyKeyboardMarkup([[KeyboardButton(BTN_HOME)]], resize_keyboard=True)
+
+def _build_settings_nav_markup() -> ReplyKeyboardMarkup:
+    """Навигация по разделам настроек."""
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(BTN_SETTING_LEVERAGE), KeyboardButton(BTN_SETTING_MARGIN)],
+        [KeyboardButton(BTN_SETTING_PYRAMIDING), KeyboardButton(BTN_SETTING_MAX_TRADES)],
+        [KeyboardButton(BTN_HOME)]
+    ], resize_keyboard=True)
+
+def _build_back_settings_markup() -> ReplyKeyboardMarkup:
+    """Клавиатура для входа внутрь одного параметра."""
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(BTN_BACK_SETTINGS)],
+        [KeyboardButton(BTN_HOME)]
+    ], resize_keyboard=True)
 
 
 async def _load_runtime_settings_for_menu() -> dict:
     timeout = httpx.Timeout(connect=2.5, read=8.0, write=5.0, pool=3.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with get_http_client() as client:
         return await _load_runtime_settings(client)
 
 
 async def _render_main_menu(message_target):
-    await message_target.reply_text(
-        "🤖 **Algo Quant Bot**\n\nВыберите раздел для управления ботом:",
-        reply_markup=_build_main_menu_markup(),
-        parse_mode='Markdown',
-    )
+    text = "🤖 **Algo Quant Bot**\n\nСистема готова. Выберите раздел для управления 👇"
+    kb = _build_main_menu_markup()
+    if hasattr(message_target, 'reply_text'):
+        await message_target.reply_text(text, reply_markup=kb, parse_mode='Markdown')
+    else:
+        await message_target.message.reply_text(text, reply_markup=kb, parse_mode='Markdown')
 
 
 def _build_faq_menu_keyboard() -> InlineKeyboardMarkup:
@@ -257,7 +312,8 @@ def _build_faq_menu_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🤖 Сигналы и AI", callback_data="faq_ai")],
         [InlineKeyboardButton("🚫 Почему нет входа", callback_data="faq_no_entry"),
          InlineKeyboardButton("🏁 Причины закрытия", callback_data="faq_close_reasons")],
-        [InlineKeyboardButton("🔄 Синхронизация", callback_data="faq_sync")],
+        [InlineKeyboardButton("🧩 Стратегии бота", callback_data="faq_strategies"),
+         InlineKeyboardButton("🔄 Синхронизация", callback_data="faq_sync")],
     ])
 
 
@@ -265,78 +321,90 @@ def _faq_text_by_section(section: str) -> str:
     if section == "controls":
         return (
             "🎛 **FAQ: УПРАВЛЕНИЕ**\n\n"
-            "• `🔄 Вкл/Выкл` — включает/выключает автоторговлю сразу.\n"
-            "• `💼 Активные позиции` — список позиций + действия (обновить/сократить/закрыть).\n"
-            "• `📜 История сделок` — последние закрытые сделки с причиной и PnL.\n"
-            "• `📈 Статистика` — агрегаты по закрытым сделкам и сброс статистики.\n"
-            "• `📉 Сигналы` — свежие сигналы из БД со статусом.\n"
-            "• `📚 Стратегии` — краткая методология бота."
+            "• Вкл/Выкл - включает и выключает автоторговлю.\n"
+            "• Активные позиции - список сделок и управление ими.\n"
+            "• История сделок - последние закрытые сделки и PnL.\n"
+            "• Статистика - итоги торговли и сброс лимитов.\n"
+            "• Сигналы - список сигналов из базы данных.\n"
+            "• Стратегии - описание алгоритмов бота."
         )
     if section == "settings":
         return (
             "⚙️ **FAQ: НАСТРОЙКИ**\n\n"
-            "• `⚡ Плечо` — runtime-плечо без рестарта.\n"
-            "• `💰 Маржа` — доля капитала на 1 сделку (процент).\n"
-            "• `📂 Позиции` — лимит одновременных сделок.\n"
-            "• `🎯 TP/SL` — TP runtime, SL рассчитывается риск-движком.\n"
-            "• `↕️ Направление` — LONG / SHORT / BOTH.\n"
-            "• `💵 Объём` — фикс USDT на сделку (0 = авто-расчёт).\n"
-            "• `💎 Пирамидинг` — доп. входы по правилам.\n"
-            "• `⏱ Expiry` — защита от устаревших сигналов."
+            "• Плечо - множитель силы позиции.\n"
+            "• Маржа - процент капитала на одну сделку.\n"
+            "• Позиции - лимит одновременных сделок.\n"
+            "• TP/SL - настройки фиксации прибыли и стопа.\n"
+            "• Направление - LONG / SHORT / BOTH.\n"
+            "• Объём - фиксированная сумма в USDT.\n"
+            "• Пирамидинг - добавление к позициям.\n"
+            "• Expiry - срок жизни сигнала."
         )
     if section == "risk":
         return (
             "🛡 **FAQ: РИСК-ЛОГИКА**\n\n"
-            "• Стоп-лосс: ATR-расчёт + минимальная дистанция.\n"
-            "• Трейлинг: стоп двигается только в сторону снижения риска.\n"
-            "• Безубыток: перенос стопа при 1R + подтверждение (ADX/пробой).\n"
-            "• Daily halt: блок входов при превышении дневного лимита просадки.\n"
-            "• Корреляционный фильтр: ограничивает одинаковые направления внутри кластеров.\n"
-            "• Листинг-фильтр: отсекает слишком новые инструменты."
+            "• Стоп-лосс - динамический расчет на основе ATR.\n"
+            "• Трейлинг - подтягивание стопа за ценой.\n"
+            "• Безубыток - перенос стопа при достижении цели.\n"
+            "• Daily halt - дневной лимит просадки (5%).\n"
+            "• Корреляция - ограничение на похожие монеты."
         )
     if section == "ai":
         return (
             "🤖 **FAQ: СИГНАЛЫ И AI**\n\n"
-            "• Сигнал проходит технический скоринг и AI-фильтр.\n"
-            "• Минимальные пороги: score и win probability.\n"
-            "• Внешний AI работает каскадом по доступным провайдерам.\n"
-            "• Если провайдер недоступен/в лимите — используется следующий.\n"
-            "• Решения AI логируются для последующей аналитики/обучения."
+            "• Технический скоринг по 8 стратегиям.\n"
+            "• AI-фильтрация вероятности успеха.\n"
+            "• Проверка через каскад внешних LLM.\n"
+            "• Логирование всех решений в DecisionLogs."
         )
     if section == "no_entry":
         return (
             "🚫 **FAQ: ПОЧЕМУ НЕТ ВХОДА**\n\n"
-            "• достигнут лимит позиций,\n"
-            "• автоторговля выключена,\n"
-            "• сигнал устарел,\n"
-            "• score/win_prob ниже порога,\n"
-            "• фильтр листинга/корреляции/funding не пройден,\n"
-            "• активирован дневной стоп по просадке,\n"
-            "• биржа отклонила ордер (правила/лимиты инструмента)."
+            "• Достигнут лимит позиций.\n"
+            "• Автоторговля выключена.\n"
+            "• Сигнал устарел (Expiry).\n"
+            "• Низкий AI Score или вероятность.\n"
+            "• Фильтр листинга или корреляции.\n"
+            "• Дневной стоп-лосс (Daily Halt)."
         )
     if section == "close_reasons":
         return (
             "🏁 **FAQ: ПРИЧИНЫ ЗАКРЫТИЯ**\n\n"
-            "• `🔄 Биржа (TP/SL)` — сработал защитный ордер на бирже.\n"
-            "• `🖐 Ручное` — закрытие через Telegram-кнопку.\n"
-            "• `⏱ Тайм-аут` — выход по time-exit.\n"
-            "• `⚙️ Авто` — закрытие внутренней логикой бота."
+            "• Биржа (TP/SL) - сработал ордер на бирже.\n"
+            "• Ручное - закрыто вами через бота.\n"
+            "• Тайм-аут - выход по времени (Time Exit).\n"
+            "• Авто - закрытие логикой стратегии."
         )
     if section == "sync":
         return (
             "🔄 **FAQ: СИНХРОНИЗАЦИЯ**\n\n"
-            "• Есть регулярный reconcile: биржа ↔ БД ↔ память.\n"
-            "• `/api/v1/trades` перед выдачей делает принудительную синхронизацию.\n"
-            "• Локальный кеш `active_trades` мягко очищается по live-позициям.\n"
-            "• Если позиция закрыта внешне, она должна исчезнуть из списка активных.\n"
-            "• При сетевых сбоях возможны краткие задержки обновления, затем данные выравниваются."
+            "• Регулярная проверка Биржа - БД - Память.\n"
+            "• Принудительное выравнивание кеша.\n"
+            "• Авто-удаление закрытых позиций из списка."
+        )
+    if section == "strategies":
+        return (
+            "🧩 **СТРАТЕГИИ БОТА**\n\n"
+            "🚀 **Трендовые:**\n"
+            "• Donchian - Пробой максимумов/минимумов.\n"
+            "• MA Trend - Скользящие средние.\n"
+            "• Pullback - Вход на откате.\n"
+            "• WRD - Williams Range Drive.\n\n"
+            "📉 **Контртрендовые:**\n"
+            "• Williams R - Перекупленность/Перепроданность.\n"
+            "• WRD Reversal - Логика разворота.\n"
+            "• Vol Contraction - Сжатие волатильности.\n"
+            "• Funding Squeeze - Анализ ставок фандинга.\n\n"
+            "🛡 **Smart Routing:**\n"
+            "Фильтр по рыночному режиму (Trend / Range)."
         )
     return "❓ Раздел FAQ не найден."
 
 
+@admin_only
 async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             ex = await client.get(f"{ENGINE_URL}/api/v1/exchange/check", timeout=6.0)
             st = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=6.0)
             ex_data = ex.json() if ex.status_code == 200 else {"status": "error", "message": ex.text}
@@ -351,26 +419,23 @@ async def show_api_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📝 Детали: `{(ex_data.get('message') or 'n/a')[:140]}`\n\n"
                 "Для смены ключей используйте `.env` и перезапуск контейнеров."
             )
-            await update.message.reply_text(msg, parse_mode='Markdown')
+            m = await update.message.reply_text(msg, parse_mode='Markdown')
+            _track_message(context, m)
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка проверки API: {e}")
+        m_err = await update.message.reply_text(f"❌ Ошибка проверки API: {e}")
+        _track_message(context, m_err)
 
+@admin_only
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Этап 14-15: Главное меню
     """
-    user_id = update.effective_user.id
-    allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
-    
-    if user_id not in allowed_ids:
-        await update.message.reply_text("⛔️ Доступ запрещен. Вы не являетесь администратором.")
-        return
-
     await _render_main_menu(update.message)
 
+@admin_only
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             response = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=5.0)
             data = response.json()
             
@@ -388,6 +453,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"🔴 Ошибка связи с движком: {e}")
 
+@admin_only
 async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔑 **Настройка API-ключей**\n\n"
@@ -397,7 +463,28 @@ async def connect_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _risk_tag_for_trade(is_long: bool, entry: float, stop: float, current_price: float | None) -> str:
+@admin_only
+async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    command = update.message.text.split()[0] if update.message.text else ""
+    want_enabled = command == "/start_trading"
+    try:
+        async with get_http_client() as client:
+            resp = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=5.0)
+            status_data = resp.json()
+            is_running = status_data.get("status") == "running"
+            if want_enabled == is_running:
+                st = "уже включена" if is_running else "уже выключена"
+                await update.message.reply_text(f"ℹ️ Автоторговля {st}.")
+                return
+            resp = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
+            res = resp.json()
+            st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
+            await update.message.reply_text(f"🔄 Автоторговля: {st}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка переключения: {e}")
+
+
+def _risk_tag_for_trade(is_long: bool, entry: float, stop: float, current_price: Optional[float]) -> str:
     """Оценка близости цены к стопу для UX-индикатора."""
     try:
         if current_price is None:
@@ -432,11 +519,20 @@ def _sorted_positions_by_risk(trades: dict) -> list[tuple[int, str, dict, str]]:
     return enriched
 
 
-def _build_positions_list_view(trades: dict) -> tuple[str, InlineKeyboardMarkup]:
+def _build_positions_list_view(trades: dict, page: int = 1, page_size: int = 5) -> tuple[str, InlineKeyboardMarkup]:
     enriched = _sorted_positions_by_risk(trades)
-    list_lines = ["📌 **СПИСОК ПОЗИЦИЙ (приоритет по риску):**"]
+    total_positions = len(enriched)
+    total_pages = (total_positions + page_size - 1) // page_size
+    page = max(1, min(page, total_pages))
+    
+    start_idx = (page - 1) * page_size
+    end_idx = start_idx + page_size
+    paged_items = enriched[start_idx:end_idx]
+    
+    list_lines = [f"📌 **СПИСОК ПОЗИЦИЙ (Страница {page}/{total_pages}):**"]
     keyboard_rows = []
-    for _, symbol, info, risk_tag in enriched:
+    
+    for _, symbol, info, risk_tag in paged_items:
         side_emoji = "🟢 LONG" if info.get('signal_type') == "LONG" else "🔴 SHORT"
         pnl_usd = float(info.get('pnl_usd', 0.0) or 0.0)
         pnl_badge = "🟢" if pnl_usd >= 0 else "🔴"
@@ -446,10 +542,23 @@ def _build_positions_list_view(trades: dict) -> tuple[str, InlineKeyboardMarkup]
             InlineKeyboardButton(f"ℹ️ {symbol}", callback_data=f"pos_view_{sraw}"),
             InlineKeyboardButton("❌", callback_data=f"close_{sraw}"),
         ])
+    
+    # Navigation buttons
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"pos_page_{page-1}"))
+    if page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"pos_page_{page+1}"))
+    
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
+        
+    keyboard_rows.append([InlineKeyboardButton("🔄 Обновить", callback_data="pos_page_1")])
+    
     return "\n".join(list_lines), InlineKeyboardMarkup(keyboard_rows)
 
 
-def _build_position_details_view(symbol: str, info: dict) -> str:
+def _format_trade_info(symbol: str, info: dict) -> str:
     is_lg = info.get('signal_type') == "LONG"
     side_emoji = "🟢 LONG" if is_lg else "🔴 SHORT"
     curr_p = info.get('current_price')
@@ -487,19 +596,18 @@ def _build_position_details_view(symbol: str, info: dict) -> str:
         f"⏱ В позиции: `{opened_ago}`"
     )
 
-
+@admin_only
 async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
-            data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
-            logging.info(f"🕵️‍♂️ DEBUG: Получено данных от движка: {data}")
+        async with get_http_client() as client:
+            data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=15.0, retries=2)
             trades = data.get("trades", {})
 
             if not trades:
-                await update.message.reply_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                m = await update.message.reply_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                _track_message(context, m)
                 return
 
-            # Портфельная сводка до списка карточек.
             total_pnl_usd = 0.0
             total_pnl_pct = 0.0
             counted = 0
@@ -519,204 +627,417 @@ async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TY
                 f"📊 Средний PnL: `{avg_pnl_pct:+.2f}%`\n"
                 f"🧮 Рассчитано по позициям: `{counted}/{len(trades)}`"
             )
-            await update.message.reply_text(summary_msg, parse_mode='Markdown')
+            m_sum = await update.message.reply_text(summary_msg, parse_mode='Markdown')
+            _track_message(context, m_sum)
 
-            list_text, list_kb = _build_positions_list_view(trades)
-            await update.message.reply_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+            list_text, list_kb = _build_positions_list_view(trades, page=1)
+            m_list = await update.message.reply_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+            _track_message(context, m_list)
 
+    except httpx.TimeoutException:
+        logging.error("Таймаут при запросе активных позиций к движку")
+        await update.message.reply_text("⏱ Движок не ответил вовремя (таймаут). Попробуйте через 10 сек.")
+    except httpx.ConnectError:
+        logging.error("Нет подключения к движку торгов")
+        await update.message.reply_text("❌ Нет подключения к движку торгов. Убедитесь, что trading-engine запущен.")
     except Exception as e:
         logging.error(f"Ошибка получения позиций: {e!r}")
-        await update.message.reply_text("❌ Не удалось связаться с движком торгов.")
+        await update.message.reply_text(f"❌ Ошибка загрузки позиций:\n`{_escape_md(str(e)[:150])}`", parse_mode='Markdown')
 
 
+_HISTORY_REASON_MAP = {
+    "STOP": "🛑 стоп",
+    "STOP_LOSS": "🛑 стоп-лосс",
+    "TAKE": "🎯 тейк",
+    "TAKE_PROFIT": "🎯 тейк-профит",
+    "TRAILING_STOP": "📐 трейлинг",
+    "MANUAL": "🖐 ручное",
+    "TIME": "⏱ тайм-аут",
+    "EXTERNAL": "🔄 биржа (TP/SL)",
+    "AUTO": "⚙️ авто",
+    "RECONCILE_CLOSE": "🔃 реконсил",
+    "BREAKEVEN": "🔰 безубыток",
+    "DAILY_DRAWDOWN": "📉 дневная просадка",
+}
+
+
+def _escape_md(text: str) -> str:
+    """Escape Markdown v1 special chars in dynamic text to prevent BadRequest."""
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+def _format_history_pct(pnl_pct: float, pnl_usd: float, notional_usd: Optional[float] = None) -> tuple[str, bool]:
+    """
+    Format pnl_pct for human-readable history cards.
+    Extremely large percentages are usually caused by tiny position notionals,
+    so we cap display and mark it as small-notional.
+    """
+    pct = float(pnl_pct or 0.0)
+    abs_pct = abs(pct)
+    abs_usd = abs(float(pnl_usd or 0.0))
+    abs_notional = abs(float(notional_usd or 0.0))
+
+    # Prefer explicit notional when provided by backend.
+    # Fallback to pnl_usd heuristic for compatibility with older payloads.
+    small_notional = (abs_notional > 0 and abs_notional <= 25.0) or (abs_usd <= 200.0)
+    if abs_pct >= 300.0 and small_notional:
+        sign = "+" if pct >= 0 else "-"
+        return f"{sign}299.99%*", True
+
+    return f"{pct:+.2f}%", False
+
+
+@admin_only
 async def show_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        async with httpx.AsyncClient() as client:
+        async with get_http_client() as client:
             data = await _get_json_with_retry(
                 client,
                 f"{ENGINE_URL}/api/v1/history",
                 params={"limit": 20},
-                timeout=8.0,
-                retries=1,
+                timeout=10.0,
+                retries=2,
             )
             items = data.get("items", [])
             if not items:
-                await update.message.reply_text("📜 История сделок пуста.")
+                m_empty = await update.message.reply_text("📜 История сделок пуста.")
+                _track_message(context, m_empty)
                 return
 
-            await update.message.reply_text(f"📜 **ИСТОРИЯ СДЕЛОК ({len(items)}):**", parse_mode='Markdown')
+            lines = [f"📜 **ИСТОРИЯ СДЕЛОК ({len(items)}):**\n"]
+            has_small_notional_mark = False
             for it in items:
                 pnl_usd = float(it.get("pnl_usd", 0.0) or 0.0)
                 pnl_pct = float(it.get("pnl_pct", 0.0) or 0.0)
+                notional_usd = float(it.get("notional_usd", 0.0) or 0.0)
+                pnl_pct_text, pct_marked = _format_history_pct(pnl_pct, pnl_usd, notional_usd)
+                if pct_marked:
+                    has_small_notional_mark = True
                 emoji = "🟢" if pnl_usd >= 0 else "🔴"
                 ts = (it.get("closed_at") or "").replace("T", " ")[:19] if it.get("closed_at") else "N/A"
                 reason = str(it.get('reason', 'AUTO') or 'AUTO').upper()
-                reason_map = {
-                    "STOP": "🛑 стоп",
-                    "TAKE": "🎯 тейк",
-                    "MANUAL": "🖐 ручное",
-                    "TIME": "⏱ тайм-аут",
-                    "EXTERNAL": "🔄 внешнее",
-                    "AUTO": "⚙️ авто",
-                }
-                reason_ru = reason_map.get(reason, f"⚙️ {reason.lower()}")
-                msg = (
-                    f"🧾 **{it.get('symbol', 'N/A')}**\n"
-                    f"{emoji} Результат: `{pnl_usd:+.2f} USDT / {pnl_pct:+.2f}%`\n"
-                    f"🏁 Закрытие: {reason_ru}\n"
-                    f"🕒 Время: `{ts} UTC`"
+                reason_ru = _HISTORY_REASON_MAP.get(reason, f"⚙️ {_escape_md(reason.lower())}")
+                symbol = _escape_md(str(it.get('symbol', 'N/A')))
+                notional_text = f"{notional_usd:.2f}" if notional_usd > 0 else "N/A"
+                lines.append(
+                    f"🧾 **{symbol}**\n"
+                    f"{emoji} `{pnl_usd:+.2f} USDT / {pnl_pct_text}`\n"
+                    f"🧮 Notional: `{notional_text} USDT`\n"
+                    f"🏁 {reason_ru} · 🕒 `{ts}`\n───"
                 )
-                await update.message.reply_text(msg, parse_mode='Markdown')
+
+            if has_small_notional_mark:
+                lines.append(
+                    "\nℹ️ `*` Процент ограничен для very small-notional позиций "
+                    "(ориентируйтесь в первую очередь на `USDT PnL`)."
+                )
+
+            full_text = "\n".join(lines)
+            if len(full_text) > 4000:
+                for i in range(0, len(full_text), 4000):
+                    chunk = full_text[i:i + 4000]
+                    m = await update.message.reply_text(chunk, parse_mode='Markdown')
+                    _track_message(context, m)
+            else:
+                m = await update.message.reply_text(full_text, parse_mode='Markdown')
+                _track_message(context, m)
+
     except Exception as e:
         logging.error(f"Ошибка истории сделок: {e!r}")
-        await update.message.reply_text("❌ Не удалось получить историю сделок.")
+async def _cleanup_category_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет сообщения предыдущей выбранной категории из чата."""
+    msg_ids = context.user_data.get('category_msg_ids', [])
+    chat_id = update.effective_chat.id
+    for mid in msg_ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    context.user_data['category_msg_ids'] = []
 
+def _track_message(context: ContextTypes.DEFAULT_TYPE, msg):
+    """Добавляет ID сообщения в список для последующей очистки."""
+    if 'category_msg_ids' not in context.user_data:
+        context.user_data['category_msg_ids'] = []
+    if msg:
+        context.user_data['category_msg_ids'].append(msg.message_id)
+
+@admin_only
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    allowed_ids = [int(i.strip()) for i in settings.admin_user_ids.split(",") if i.strip()]
-    if user_id not in allowed_ids:
-        return
+    raw_text = update.message.text or ""
+    text = raw_text.strip()
+    
+    # --- CLEANUP: Удаляем сообщение пользователя, чтобы не засорять чат ---
+    try:
+        await update.message.delete()
+    except Exception:
+        pass 
 
-    text = update.message.text
-    logging.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
-    if text == BTN_ACTIVE:
+    # --- CLEANUP: Перед каждым действием чистим старую категорию ---
+    await _cleanup_category_messages(update, context)
+
+    logger.info(f"📩 ПОЛУЧЕНО СООБЩЕНИЕ: '{text}' от {user_id}")
+    
+    if text.endswith("Активные позиции"):
+        # Позиции обычно компактны, но тоже будем чистить
+        msg = await update.message.reply_text("⏳ Загружаем позиции...", reply_markup=_build_back_home_markup())
+        _track_message(context, msg)
         await show_active_positions(update, context)
-    elif text == BTN_TOGGLE:
+    elif text.endswith("Вкл/Выкл"):
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
                 res = response.json()
                 st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
-                await update.message.reply_text(f"🔄 Автоторговля: {st}")
+                m = await update.message.reply_text(f"🔄 Автоторговля: {st}", reply_markup=_build_back_home_markup())
+                _track_message(context, m)
         except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка переключения: {e}")
-    elif text in {"⚙ Настройки", BTN_AUTOTRADE_SETTINGS}:
+            m_err = await update.message.reply_text(f"❌ Ошибка переключения: {e}", reply_markup=_build_back_home_markup())
+            _track_message(context, m_err)
+    elif text.endswith("Настройки автоторговли") or text == BTN_BACK_SETTINGS:
         try:
-            await _render_settings_message(update.message, edit=False)
+            m = await _render_settings_message(update.message, edit=False)
+            # Обновляем клавиатуру навигации по настройкам
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚙️ Используйте меню ниже для выбора параметра:",
+                reply_markup=_build_settings_nav_markup()
+            )
+            _track_message(context, m)
         except Exception as e:
             logging.error(f"Ошибка настроек: {e}")
-            await update.message.reply_text("❌ Ошибка при получении настроек.")
-    elif text == BTN_API_SETTINGS:
+            m_err = await update.message.reply_text("❌ Ошибка при получении настроек.")
+            _track_message(context, m_err)
+    elif text == BTN_SETTING_LEVERAGE:
+        # Эмуляция нажатия на inline-кнопку "Плечо"
+        update.callback_query = type('obj', (object,), {'data': 'menu_leverage', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("⚡️ Настройка кредитного плеча:", reply_markup=_build_back_settings_markup())
+    elif text == BTN_SETTING_MARGIN:
+        update.callback_query = type('obj', (object,), {'data': 'menu_margin', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("💰 Настройка маржи:", reply_markup=_build_back_settings_markup())
+    elif text == BTN_SETTING_PYRAMIDING:
+        update.callback_query = type('obj', (object,), {'data': 'menu_pyramid', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("🪜 Настройка пирамидинга:", reply_markup=_build_back_settings_markup())
+    elif text == BTN_SETTING_MAX_TRADES:
+        update.callback_query = type('obj', (object,), {'data': 'menu_maxtrades', 'message': update.message})
+        await callback_handler(update, context)
+        await update.message.reply_text("🛡 Настройка лимита сделок:", reply_markup=_build_back_settings_markup())
+
+    elif text.endswith("Настройки API"):
         await show_api_settings(update, context)
-    elif text == BTN_SIGNALS:
-        from database.session import async_session
-        from database.models.all_models import Signal
-        from sqlalchemy import select
-        
+    elif text.endswith("Сигналы"):
         try:
-            from datetime import datetime, timedelta
-            async with async_session() as session:
-                # Показываем 5 свежих сигналов за последние 6 часов
-                six_hours_ago = datetime.utcnow() - timedelta(hours=6)
-                query = select(Signal).where(Signal.timestamp >= six_hours_ago).order_by(Signal.timestamp.desc()).limit(5)
-                result = await session.execute(query)
-                signals = result.scalars().all()
+            async with get_http_client() as client:
+                resp = await client.get(f"{ENGINE_URL}/api/v1/signals?limit=5", timeout=5.0)
+                resp.raise_for_status()
+                # Посылаем клавиатуру Home сразу
+                m_intro = await update.message.reply_text("⏳ Загружаем сигналы...", reply_markup=_build_back_home_markup())
+                _track_message(context, m_intro)
+                signals = resp.json()
+
+            if not signals:
+                m = await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет.")
+                _track_message(context, m)
+                return
+
+            m_head = await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({len(signals)}):**", parse_mode='Markdown')
+            _track_message(context, m_head)
+
+            status_map = {
+                "PENDING": "⌛️ В ОЖИДАНИИ",
+                "EXECUTED": "✅ В ПОЗИЦИИ",
+                "FAILED": "❌ ОШИБКА",
+                "REJECTED": "🛑 ОТКЛОНЕН",
+                "EXPIRED": "⏱ ИСТЕК"
+            }
+
+            def fmt_p(val, placeholder="Не определен"):
+                if val is None or val == 0 or val == "0" or val == "0.0":
+                    return f"_{placeholder}_"
+                try:
+                    v = float(val)
+                    if v == 0: return f"_{placeholder}_"
+                    return f"{v:.4f}" if v < 1.0 else f"{v:.2f}"
+                except:
+                    return f"_{placeholder}_"
+
+            status_desc_map = {
+                "FILTERED:expiry": "⏱ ИСТЕК (устарел)",
+                "FILTERED:regime-router": "🚫 Не тот режим рынка",
+                "FILTERED:score": "📉 Низкое качество AI",
+                "FILTERED:dailyhalt": "🛑 Дневной стоп-лимит",
+                "FILTERED:below-min-r-after-fees": "💰 Низкая доходность",
+                "FILTERED:ai-prob": "🤖 AI не подтвердил вход",
+                "FILTERED:volatility": "🌪 Аномальная волатильность",
+                "FILTERED:correlation": "🔗 Избыток монет группы"
+            }
+
+            for s in signals:
+                sig_side = str(s.get("signal_type", "")).upper()
+                signal_type_ru = "🟢 LONG" if sig_side == "LONG" else "🔴 SHORT"
                 
-                if not signals:
-                    await update.message.reply_text("📭 Актуальных сигналов за последние 6 часов нет. Бот мониторит рынок...")
-                    return
+                status_raw = str(s.get("status", "UNKNOWN"))
+                status_ru = status_map.get(status_raw)
+                if not status_ru:
+                    status_ru = status_desc_map.get(status_raw, f"❓ {status_raw.replace('_', '-').replace('FILTERED:', '')}")
+                
+                win_p = s.get("win_prob", 0.0) or 0.0
+                conf = s.get("confidence", 0.0) or 0.0
+                ts = str(s.get("timestamp", "Неизвестно"))[:19].replace("T", " ")
 
-                await update.message.reply_text(f"📉 **ПОСЛЕДНИЕ СИГНАЛЫ ({len(signals)}):**", parse_mode='Markdown')
+                safe_strategy = str(s.get('strategy', 'Неизвестна')).replace("_", "-").replace("*", "")
+                
+                win_p_text = f"{int(win_p * 100)}%" if win_p > 0 else "_в обработке..._"
+                score_text = f"{conf:.2f}" if conf > 0 else "_в расчете_"
+                risk_text = str(s.get('risk', '1.0')).replace('_', '-') if s.get('risk') else "стандарт"
 
-                status_map = {
-                    "PENDING": "⌛️ В ОЖИДАНИИ",
-                    "EXECUTED": "✅ В ПОЗИЦИИ",
-                    "FAILED": "❌ ОШИБКА",
-                    "REJECTED": "🛑 ОТКЛОНЕН",
-                    "EXPIRED": "⏱ ИСТЕК"
-                }
-
-                def fmt_p(val):
-                    if val is None: return "N/A"
-                    return f"{val:.4f}" if val < 1.0 else f"{val:.2f}"
-
-                for last_signal in signals:
-                    status_ru = status_map.get(last_signal.status, "🕒 ОБРАБОТКА")
-                    signal_type_ru = "🟢 LONG" if last_signal.signal_type == "LONG" else "🔴 SHORT"
-
-                    msg = (
-                        f"🚀 **СИГНАЛ: {last_signal.strategy}**\n\n"
-                        f"🔸 **Символ:** {last_signal.symbol}\n"
-                        f"🔸 **Направление:** {signal_type_ru}\n\n"
-                        f"💰 **Цена входа:** {fmt_p(last_signal.entry_price)}\n"
-                        f"🛡 **Stop Loss:** {fmt_p(last_signal.stop_loss)}\n"
-                        f"🎯 **Take Profit:** {fmt_p(last_signal.take_profit)}\n\n"
-                        f"🕒 **Время (UTC):** {last_signal.timestamp.strftime('%H:%M:%S')}\n\n"
-                        f"🤖 **AI ВЕРДИКТ:**\n"
-                        f"📈 **Вероятность успеха:** {int((last_signal.win_prob or 0.5) * 100)}%\n"
-                        f"💰 **Ож. доходность:** {last_signal.expected_return or '0.0'}%\n"
-                        f"⚠️ **Уровень риска:** {last_signal.risk or '1.0'}\n"
-                        f"📊 **AI Score:** {last_signal.confidence or 0.6:.2f}\n\n"
-                        f"ℹ️ **Статус:** {status_ru}\n"
-                        f"───────────────────"
-                    )
-                    await update.message.reply_text(msg, parse_mode='Markdown')
+                msg = (
+                    f"🚀 **СИГНАЛ: {safe_strategy}**\n\n"
+                    f"🔸 **Символ:** {s.get('symbol', 'N/A')}\n"
+                    f"🔸 **Направление:** {signal_type_ru}\n\n"
+                    f"💰 **Цена входа:** {fmt_p(s.get('entry_price'), 'Рыночная')}\n"
+                    f"🛡 **Stop Loss:** {fmt_p(s.get('stop_loss'), 'Динамический')}\n"
+                    f"🎯 **Take Profit:** {fmt_p(s.get('take_profit'), 'Цель не задана')}\n\n"
+                    f"🕒 **Время (UTC):** {ts}\n\n"
+                    f"🤖 **AI ВЕРДИКТ:**\n"
+                    f"📈 **Вероятность успеха:** {win_p_text}\n"
+                    f"💰 **Ож. доходность:** {fmt_p(s.get('expected_return'), '0.0')}%\n"
+                    f"⚠️ **Уровень риска:** {risk_text}\n"
+                    f"📊 **AI Score:** {score_text}\n\n"
+                    f"ℹ️ **Статус:** {status_ru}\n"
+                    f"📁 **Источник:** decision-logs\n"
+                    f"───────────────────"
+                )
+                m_sig = await update.message.reply_text(msg, parse_mode='Markdown')
+                _track_message(context, m_sig)
         except Exception as e:
-            logging.error(f"Ошибка получения сигналов из БД: {e}")
-            await update.message.reply_text("❌ Ошибка при обращении к базе данных.")
-    elif text == BTN_STRATEGIES:
-        strategy_text = (
-            "📖 **ТОРГОВАЯ СИСТЕМА (Швагер + AI)**\n\n"
-            "📈 **8 СТРАТЕГИЙ (4 группы):**\n"
-            "🔹 *Пробой:* Donchian (1.15x), WRD (1.05x), Vol Contraction (1.05x)\n"
-            "🔹 *Тренд:* MA Trend (1.10x), Pullback (1.10x)\n"
-            "🔹 *Разворот:* Williams R, WRD Reversal\n"
-            "🔹 *Крипто:* Funding Squeeze\n\n"
-            "🛡 **РИСК-МЕНЕДЖМЕНТ:**\n"
-            "• Стоп-лосс: ATR × 2.0 (мин. 0.5%)\n"
-            "• Трейлинг: ATR × 2.5 (мин. 0.3%)\n"
-            "• Безубыток: при 1R + ADX/Пробой\n"
-            "• Тайм-аут: 48 свечей без прогресса\n"
-            "• Макс. дневная просадка: 5%\n\n"
-            "🤖 **ИИ-ФИЛЬТРАЦИЯ:**\n"
-            "• Score > 0.55 (взвешенный по стратегии)\n"
-            "• AI Win Prob > 0.55\n"
-            "• Внешний AI: Groq → Grok → Gemini → OpenRouter\n"
-            "• Листинг > 100 дней\n"
-            "• ADX ≥ 20 (для трендовых)\n"
-            "• Корреляция: макс. 2 в группе"
-        )
-        await update.message.reply_text(strategy_text, parse_mode='Markdown')
-    elif text == BTN_FAQ:
-        await update.message.reply_text(
-            "❓ **FAQ БОТА**\n\nВыберите раздел:",
+            logging.error(f"Ошибка получения сигналов из REST API: {e}")
+            m_err = await update.message.reply_text("❌ Ошибка при обращении к торговому движку.")
+            _track_message(context, m_err)
+    elif text.endswith("Стратегии"):
+        faq_text = _faq_text_by_section("strategies")
+        m = await update.message.reply_text(faq_text, parse_mode='Markdown')
+        _track_message(context, m)
+    elif text.endswith("FAQ") or text == BTN_BACK_FAQ:
+        # Предлагаем клавиатуру категорий FAQ
+        kb_reply = ReplyKeyboardMarkup([
+            [KeyboardButton("🧩 Функции"), KeyboardButton("⚙️ Настройки")],
+            [KeyboardButton("🛡 Риски"), KeyboardButton("🤖 AI")],
+            [KeyboardButton(BTN_HOME)]
+        ], resize_keyboard=True)
+        
+        m = await update.message.reply_text(
+            "❓ **FAQ БОТА**\n\nВыберите интересующий раздел на кнопках ниже:",
             parse_mode='Markdown',
-            reply_markup=_build_faq_menu_keyboard()
+            reply_markup=kb_reply
         )
-    elif text == BTN_STATS:
+        _track_message(context, m)
+    elif text in {"🧩 Функции", "⚙️ Настройки", "🛡 Риски", "🤖 AI"}:
+        # Маппинг текстовых кнопок на существующие ключи FAQ
+        mapping = {
+            "🧩 Функции": "controls", 
+            "⚙️ Настройки": "settings", 
+            "🛡 Риски": "risk", 
+            "🤖 AI": "ai"
+        }
+        key = mapping.get(text)
+        faq_text = _faq_text_by_section(key)
+        m = await update.message.reply_text(
+            faq_text, 
+            parse_mode='Markdown', 
+            reply_markup=ReplyKeyboardMarkup([
+                [KeyboardButton(BTN_BACK_FAQ)], 
+                [KeyboardButton(BTN_HOME)]
+            ], resize_keyboard=True)
+        )
+        _track_message(context, m)
+    elif text.endswith("Статистика"):
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
-                data = response.json()
-                daily = data.get("daily", {})
+            async with get_http_client() as client:
+                # Получаем и общую статистику, и текущий статус рисков (Halt)
+                stats_resp = await client.get(f"{ENGINE_URL}/api/v1/stats", timeout=5.0)
+                status_resp = await client.get(f"{ENGINE_URL}/api/v1/status", timeout=5.0)
                 
+                stats_data = stats_resp.json()
+                status_data = status_resp.json()
+                
+                daily = stats_data.get("daily", {})
+                halted = status_data.get("status") == "halted" or "halting" in str(status_data.get("status", ""))
+                
+                # Формируем расширенное сообщение
                 msg = (
                     "📊 **СТАТИСТИКА ТОРГОВЛИ**\n\n"
                     "📅 **За последние 24 часа:**\n"
-                    f"• Закрыто сделок: {daily.get('trades_count', 0)}\n"
-                    f"• Прибыль/Убыток: {'🟢' if daily.get('pnl_usd', 0) >= 0 else '🔴'} "
-                    f"{daily.get('pnl_usd', 0):+.2f} USDT ({daily.get('avg_pct', 0):+.2f}%)\n\n"
-                    "📅 *Статистика за 7 и 30 дней будет доступна после накопления данных.*"
+                    f"• Сделок: `{daily.get('trades_count', 0)}`\n"
+                    f"• PnL: {'🟢' if daily.get('pnl_usd', 0) >= 0 else '🔴'} "
+                    f"`{daily.get('pnl_usd', 0):+.2f} USDT` (`{daily.get('avg_pct', 0):+.2f}%`)\n\n"
+                    f"🛡 **Риск-статус:**\n"
+                    f"• Состояние: {'⛔️ HALTED (Лимит превышен)' if halted else '✅ OK'}\n"
+                    f"• Просадка: `{status_data.get('drawdown', '0.00%')}`\n\n"
+                    "ℹ️ _Нажмите кнопку ниже, чтобы сбросить дневные лимиты и статистику._"
                 )
                 
-                keyboard = [[InlineKeyboardButton("♻️ Сбросить статистику", callback_data="reset_stats")]]
-                await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                keyboard = [
+                    [InlineKeyboardButton("♻️ Сбросить всё", callback_data="reset_stats_all")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="pos_back_list")]
+                ]
+                m = await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+                _track_message(context, m)
+                # Под основной клавиатурой только Домой
+                await update.message.reply_text("🔙 Вернуться?", reply_markup=_build_back_home_markup())
         except Exception as e:
             logging.error(f"Ошибка статистики: {e}")
-            await update.message.reply_text("❌ Ошибка при получении статистики.")
+            m_err = await update.message.reply_text("❌ Ошибка при получении статистики.")
+            _track_message(context, m_err)
 
-    elif text in {"📜 История", BTN_HISTORY}:
+    elif text.endswith("История сделок") or text.endswith("История"):
+        # Сама функция show_trade_history должна уметь во внутреннюю очистку или трекинг
         await show_trade_history(update, context)
-    elif text == BTN_HOME:
+        await update.message.reply_text("🔙 Вернуться?", reply_markup=_build_back_home_markup())
+    elif text.endswith("Главное меню") or text == "/start":
         await _render_main_menu(update.message)
     else:
-        await update.message.reply_text("Команда не распознана. Нажмите кнопку из меню 👇", reply_markup=_build_main_menu_markup())
+        logger.warning(f"❌ НЕРАСПОЗНАННЫЙ ТЕКСТ: '{text}'")
+        m_fallback = await update.message.reply_text("Команда не распознана. Нажмите кнопку из меню 👇", reply_markup=_build_main_menu_markup())
+        _track_message(context, m_fallback)
+@admin_only
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await _safe_answer_callback(query)
-    user_id = update.effective_user.id if update and update.effective_user else 0
+    user_id = update.effective_user.id if update.effective_user else 0
+    _answered = False
+
+    async def _answer_once(text: Optional[str] = None, show_alert: bool = False):
+        nonlocal _answered
+        if not _answered:
+            _answered = True
+            await _safe_answer_callback(query, text=text, show_alert=show_alert)
+
+    if query.data.startswith("pos_page_"):
+        await _answer_once()
+        try:
+            page = int(query.data.replace("pos_page_", ""))
+        except: page = 1
+        try:
+            async with get_http_client() as client:
+                data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
+                trades = data.get("trades", {})
+                if not trades:
+                    await query.edit_message_text("📂 **Активных позиций на данный момент нет.**", parse_mode='Markdown')
+                    return
+                list_text, list_kb = _build_positions_list_view(trades, page=page)
+                await query.edit_message_text(list_text, parse_mode='Markdown', reply_markup=list_kb)
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка пагинации: {e}")
+        return
 
     if query.data.startswith("pos_view_") or query.data.startswith("pos_nav_") or query.data == "pos_back_list":
+        await _answer_once()
         symbol_raw = ""
         if query.data.startswith("pos_view_"):
             symbol_raw = query.data.replace("pos_view_", "")
@@ -724,7 +1045,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             symbol_raw = query.data.replace("pos_nav_", "")
         symbol = symbol_raw.replace("_", "/") if symbol_raw else ""
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
                 trades = data.get("trades", {})
                 if not trades:
@@ -790,12 +1111,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 wait_txt = "чуть-чуть"
             else:
                 wait_txt = "2-3 сек"
-            await _safe_answer_callback(query, f"⏱ Слишком часто, подожди {wait_txt} · {lvl}", show_alert=False)
+            await _answer_once(f"⏱ Слишком часто, подожди {wait_txt} · {lvl}")
             return
 
         symbol = symbol_raw.replace("_", "/")
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 if action in {"reduce25", "reduce50"}:
                     fraction = 0.25 if action == "reduce25" else 0.50
                     r = await client.post(
@@ -805,10 +1126,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = r.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ Сокращение {int(fraction*100)}% отправлено")
+                        await _answer_once(f"✅ Сокращение {int(fraction*100)}% отправлено")
                     else:
-                        await _safe_answer_callback(
-                            query,
+                        await _answer_once(
                             f"❌ Сокращение не выполнено: {str(res.get('message', 'unknown error'))[:80]}",
                             show_alert=True
                         )
@@ -859,12 +1179,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol_raw = query.data.replace("close_", "")
         if _is_action_on_cooldown(user_id, "close", symbol_raw):
             lvl = _spam_level_badge(user_id, "close", symbol_raw)
-            await _safe_answer_callback(query, f"⏱ Закрытие уже отправлено, подожди 2-3 сек... · {lvl}", show_alert=False)
+            await _answer_once(f"⏱ Закрытие уже отправлено, подожди 2-3 сек... · {lvl}")
             return
+        await _answer_once()
         symbol = symbol_raw.replace("_", "/")
         
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/trades/close/{symbol_raw}", timeout=10.0)
                 res = response.json()
                 
@@ -876,6 +1197,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
 
     elif query.data == "menu_leverage":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         lev = runtime.get("leverage", settings.leverage)
         kb = InlineKeyboardMarkup([
@@ -889,6 +1211,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_margin":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         margin = runtime.get("per_trade_margin_pct", settings.per_trade_margin_pct)
         kb = InlineKeyboardMarkup([
@@ -903,6 +1226,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_positions":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         max_t = runtime.get("max_open_trades", settings.max_open_trades)
         kb = InlineKeyboardMarkup([
@@ -917,6 +1241,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_tp_sl":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         tp = runtime.get("tp_pct", settings.tp_pct)
         sl_l = settings.sl_long_pct
@@ -938,6 +1263,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_side":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         side = runtime.get('allowed_position_side', getattr(settings, 'allowed_position_side', 'BOTH'))
         _mark = lambda v: "✅ " if side.upper() == v else ""
@@ -953,6 +1279,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_volume":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         pos_usdt = runtime.get('position_size_usdt', getattr(settings, 'position_size_usdt', 0.0)) or 0.0
         kb = InlineKeyboardMarkup([
@@ -970,6 +1297,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_expiry":
+        await _answer_once()
         runtime = await _load_runtime_settings_for_menu()
         exp = runtime.get("signal_expiry_seconds", settings.signal_expiry_seconds)
         kb = InlineKeyboardMarkup([
@@ -985,8 +1313,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "menu_presets":
+        await _answer_once()
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 presets_resp = await client.get(f"{ENGINE_URL}/api/v1/presets", timeout=5.0)
                 presets_resp.raise_for_status()
                 presets = presets_resp.json() if isinstance(presets_resp.json(), list) else []
@@ -1003,52 +1332,54 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"❌ Не удалось загрузить пресеты: {e}")
 
     elif query.data == "menu_back_settings":
+        await _answer_once()
         await _render_settings_message(query, edit=True)
 
     elif query.data == "noop":
-        pass
+        await _answer_once()
 
     elif query.data == "rt_toggle_trading":
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/toggle", timeout=5.0)
                 res = response.json()
                 st = "✅ ВКЛ" if res.get("is_enabled") else "❌ ВЫКЛ"
-                await _safe_answer_callback(query, f"🔄 Торговля: {st}")
+                await _answer_once(f"🔄 Торговля: {st}")
                 await _render_settings_message(query, edit=True)
         except Exception as e:
-            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+            await _answer_once(f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data.startswith("apply_preset_"):
+        from urllib.parse import quote
         preset_name = query.data.replace("apply_preset_", "")
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(f"{ENGINE_URL}/api/v1/presets/apply/{preset_name}", timeout=5.0)
+            async with get_http_client() as client:
+                response = await client.post(f"{ENGINE_URL}/api/v1/presets/apply/{quote(preset_name, safe='')}", timeout=5.0)
                 res = response.json()
                 if res.get("status") == "success":
-                    await _safe_answer_callback(query, f"✅ Пресет {preset_name} активирован!")
+                    await _answer_once(f"✅ Пресет {preset_name} активирован!")
                     await _render_settings_message(query, edit=True)
                 else:
-                    await _safe_answer_callback(query, f"❌ Ошибка: {res.get('message')}", show_alert=True)
+                    await _answer_once(f"❌ Ошибка: {res.get('message')}", show_alert=True)
         except Exception as e:
-            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+            await _answer_once(f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data == "rt_toggle_pyramiding":
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/runtime-settings/pyramiding/toggle", timeout=5.0)
                 res = response.json()
                 if res.get("status") == "success":
-                    await _safe_answer_callback(query, "✅ Пирамидинг обновлён")
+                    await _answer_once("✅ Пирамидинг обновлён")
                     await _render_settings_message(query, edit=True)
                 else:
-                    await _safe_answer_callback(query, "❌ Ошибка обновления пирамидинга", show_alert=True)
+                    await _answer_once("❌ Ошибка обновления пирамидинга", show_alert=True)
         except Exception as e:
-            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+            await _answer_once(f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data in {"rt_margin_dec", "rt_margin_inc", "rt_open_trades_dec", "rt_open_trades_inc", "rt_pos_usdt_dec", "rt_pos_usdt_inc", "rt_pos_usdt_dec5", "rt_pos_usdt_inc5", "rt_tp_dec", "rt_tp_inc", "rt_expiry_dec", "rt_expiry_inc"}:
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 runtime = await _load_runtime_settings(client)
                 if query.data.startswith("rt_margin"):
                     cur = float(runtime.get("per_trade_margin_pct", settings.per_trade_margin_pct))
@@ -1060,10 +1391,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = response.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ Маржа: {res.get('per_trade_margin_pct', new_val)*100:.1f}%")
+                        await _answer_once(f"✅ Маржа: {res.get('per_trade_margin_pct', new_val)*100:.1f}%")
                         await _render_settings_message(query, edit=True)
                     else:
-                        await _safe_answer_callback(query, "❌ Не удалось обновить маржу", show_alert=True)
+                        await _answer_once("❌ Не удалось обновить маржу", show_alert=True)
                 elif query.data.startswith("rt_open_trades"):
                     cur = int(runtime.get("max_open_trades", settings.max_open_trades))
                     new_val = cur - 1 if query.data.endswith("dec") else cur + 1
@@ -1074,10 +1405,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = response.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ Макс. сделок: {res.get('max_open_trades', new_val)}")
+                        await _answer_once(f"✅ Макс. сделок: {res.get('max_open_trades', new_val)}")
                         await _render_settings_message(query, edit=True)
                     else:
-                        await _safe_answer_callback(query, "❌ Не удалось обновить лимит сделок", show_alert=True)
+                        await _answer_once("❌ Не удалось обновить лимит сделок", show_alert=True)
                 elif query.data.startswith("rt_pos_usdt"):
                     cur = float(runtime.get("position_size_usdt", getattr(settings, "position_size_usdt", 0.0)) or 0.0)
                     if query.data.endswith("dec5"):
@@ -1096,10 +1427,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = response.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ Объём: {res.get('position_size_usdt', new_val):.2f} USDT")
+                        await _answer_once(f"✅ Объём: {res.get('position_size_usdt', new_val):.2f} USDT")
                         await _render_settings_message(query, edit=True)
                     else:
-                        await _safe_answer_callback(query, "❌ Не удалось обновить объём", show_alert=True)
+                        await _answer_once("❌ Не удалось обновить объём", show_alert=True)
                 elif query.data.startswith("rt_tp"):
                     cur = float(runtime.get("tp_pct", settings.tp_pct) or settings.tp_pct)
                     step = 0.001
@@ -1111,10 +1442,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = response.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ TP: {res.get('tp_pct', new_val)*100:.2f}%")
+                        await _answer_once(f"✅ TP: {res.get('tp_pct', new_val)*100:.2f}%")
                         await _render_settings_message(query, edit=True)
                     else:
-                        await _safe_answer_callback(query, "❌ Не удалось обновить TP", show_alert=True)
+                        await _answer_once("❌ Не удалось обновить TP", show_alert=True)
                 else:
                     cur = int(runtime.get("signal_expiry_seconds", settings.signal_expiry_seconds))
                     new_val = cur - 10 if query.data.endswith("dec") else cur + 10
@@ -1125,19 +1456,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     res = response.json()
                     if res.get("status") == "success":
-                        await _safe_answer_callback(query, f"✅ Expiry: {res.get('signal_expiry_seconds', new_val)}с")
+                        await _answer_once(f"✅ Expiry: {res.get('signal_expiry_seconds', new_val)}с")
                         await _render_settings_message(query, edit=True)
                     else:
-                        await _safe_answer_callback(query, "❌ Не удалось обновить expiry", show_alert=True)
+                        await _answer_once("❌ Не удалось обновить expiry", show_alert=True)
         except Exception as e:
-            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+            await _answer_once(f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data in {"rt_side_long", "rt_side_short", "rt_side_both"}:
         value = query.data.replace("rt_side_", "").upper()
         if value == "BOTH":
             value = "BOTH"
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(
                     f"{ENGINE_URL}/api/v1/runtime-settings/allowed-side",
                     params={"value": value},
@@ -1145,17 +1476,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 res = response.json()
                 if res.get("status") == "success":
-                    await _safe_answer_callback(query, f"✅ Тип позиции: {res.get('allowed_position_side', value)}")
+                    await _answer_once(f"✅ Тип позиции: {res.get('allowed_position_side', value)}")
                     await _render_settings_message(query, edit=True)
                 else:
-                    await _safe_answer_callback(query, f"❌ {res.get('message', 'Не удалось обновить тип позиции')}", show_alert=True)
+                    await _answer_once(f"❌ {res.get('message', 'Не удалось обновить тип позиции')}", show_alert=True)
         except Exception as e:
-            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+            await _answer_once(f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data.startswith("rt_leverage_"):
         try:
             leverage_value = int(query.data.replace("rt_leverage_", ""))
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(
                     f"{ENGINE_URL}/api/v1/runtime-settings/leverage",
                     params={"value": leverage_value},
@@ -1163,14 +1494,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 res = response.json()
                 if res.get("status") == "success":
-                    await _safe_answer_callback(query, f"✅ Плечо: {res.get('leverage', leverage_value)}x")
+                    await _answer_once(f"✅ Плечо: {res.get('leverage', leverage_value)}x")
                     await _render_settings_message(query, edit=True)
                 else:
-                    await _safe_answer_callback(query, f"❌ {res.get('message', 'Не удалось обновить плечо')}", show_alert=True)
+                    await _answer_once(f"❌ {res.get('message', 'Не удалось обновить плечо')}", show_alert=True)
         except Exception as e:
-            await _safe_answer_callback(query, f"❌ Ошибка связи: {e}", show_alert=True)
+            await _answer_once(f"❌ Ошибка связи: {e}", show_alert=True)
 
     elif query.data == "reset_stats":
+        await _answer_once()
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🟡 Binance", callback_data="reset_stats_binance")],
             [InlineKeyboardButton("🌐 Все биржи", callback_data="reset_stats_all")],
@@ -1182,9 +1514,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     elif query.data in {"reset_stats_binance", "reset_stats_all"}:
+        await _answer_once()
         scope = "binance" if query.data.endswith("binance") else "all"
         try:
-            async with httpx.AsyncClient() as client:
+            async with get_http_client() as client:
                 response = await client.post(f"{ENGINE_URL}/api/v1/stats/reset", params={"scope": scope}, timeout=8.0)
                 res = response.json()
                 if res.get("status") == "success":
@@ -1194,16 +1527,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка связи с движком: {e}")
     elif query.data == "reset_stats_cancel":
+        await _answer_once()
         await query.edit_message_text("❎ Сброс статистики отменён.")
     elif query.data == "faq_back":
+        await _answer_once()
         await query.edit_message_text(
             "❓ **FAQ БОТА**\n\nВыберите раздел:",
             parse_mode='Markdown',
             reply_markup=_build_faq_menu_keyboard()
         )
     elif query.data.startswith("faq_"):
+        await _answer_once()
         faq_key = query.data.replace("faq_", "")
-        if faq_key not in {"controls", "settings", "risk", "ai", "no_entry", "close_reasons", "sync"}:
+        if faq_key not in {"controls", "settings", "risk", "ai", "no_entry", "close_reasons", "sync", "strategies"}:
             await query.edit_message_text(
                 "❓ **FAQ БОТА**\n\nВыберите раздел:",
                 parse_mode='Markdown',
@@ -1216,24 +1552,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await query.edit_message_text(faq_text, parse_mode='Markdown', reply_markup=kb)
 
-# ======= ANTI-SPAM & RATE LIMITING (Этап 18) =======
-# Хранилище: {user_id: [timestamp1, timestamp2, ...]}
+    else:
+        await _answer_once()
+        logging.warning(f"Unmatched callback_data: {query.data!r} from user {user_id}")
+
+# ======= ANTI-SPAM & RATE LIMITING =======
 user_message_times = defaultdict(list)
-RATE_LIMIT_MESSAGES = 10      # Максимум 10 сообщений
-RATE_LIMIT_WINDOW = 5.0      # за 5 секунд
+user_blocked_until = {}
+RATE_LIMIT_MESSAGES = 5      
+RATE_LIMIT_WINDOW = 3.0      
+BLOCK_DURATION = 10.0        
 
 async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Проверяет, не спамит ли пользователь.
-    В python-telegram-bot v20+ это можно сделать через TypeHandler(Update, ...).
-    """
-    # Если апдейт не содержит сообщения от пользователя, пропускаем
-    if not update.effective_user or not update.effective_message:
+    if not update.effective_user:
         return
         
     user_id = update.effective_user.id
     current_time = time.time()
     
+    # Проверка блокировки
+    if user_id in user_blocked_until:
+        if current_time < user_blocked_until[user_id]:
+            raise ApplicationHandlerStop()
+        else:
+            del user_blocked_until[user_id]
+
     # Очищаем старые метки времени
     user_message_times[user_id] = [
         ts for ts in user_message_times[user_id] 
@@ -1241,9 +1584,11 @@ async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     
     if len(user_message_times[user_id]) >= RATE_LIMIT_MESSAGES:
-        logging.warning(f"Пользователь {user_id} заблокирован за спам.")
-        await update.effective_message.reply_text("⛔️ Слишком много запросов. Подождите пару секунд.")
-        # Прерываем обработку (raise DropUpdate в реальном приложении)
+        user_blocked_until[user_id] = current_time + BLOCK_DURATION
+        try:
+            if update.effective_message:
+                await update.effective_message.reply_text(f"⛔️ **АНТИСПАМ**: Вы нажимаете слишком быстро. Блокировка на {int(BLOCK_DURATION)}с.")
+        except: pass
         raise ApplicationHandlerStop()
         
     user_message_times[user_id].append(current_time)
@@ -1252,7 +1597,7 @@ async def rate_limit_middleware(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Глобальный перехватчик ошибок Telegram handlers."""
-    logging.exception("Unhandled Telegram handler error", exc_info=context.error)
+    logger.exception("Unhandled Telegram handler error", exc=context.error)
     try:
         if isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text("⚠️ Внутренняя ошибка обработчика. Попробуйте ещё раз через пару секунд.")
@@ -1272,14 +1617,14 @@ def run_bot():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("connect_exchange", connect_exchange))
-    app.add_handler(CommandHandler("start_trading", status)) # mock
-    app.add_handler(CommandHandler("stop_trading", status)) # mock
+    app.add_handler(CommandHandler("start_trading", toggle_trading))
+    app.add_handler(CommandHandler("stop_trading", toggle_trading))
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(global_error_handler)
 
-    logging.info("Telegram Bot is polling...")
+    logger.info("Telegram Bot is polling...")
     app.run_polling()
 
 if __name__ == "__main__":

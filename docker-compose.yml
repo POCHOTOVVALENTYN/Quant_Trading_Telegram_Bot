@@ -1,8 +1,12 @@
-version: '3.8'
+# Shared build: set DOCKER_PYTHON_IMAGE in .env if Docker Hub TLS fails (mirror / pre-pulled tag).
+x-app-build: &app-build
+  context: .
+  args:
+    BASE_IMAGE: ${DOCKER_PYTHON_IMAGE:-python:3.11-slim}
 
 services:
   bot:
-    build: .
+    build: *app-build
     container_name: quant_telegram_bot
     restart: unless-stopped
     env_file:
@@ -16,16 +20,18 @@ services:
     command: python -m api.telegram.main
 
   trading-engine:
-    build: .
+    build: *app-build
     container_name: quant_trading_engine
     restart: unless-stopped
     ports:
       - "8000:8000"
+      - "8001:8001"
     env_file:
       - .env
     depends_on:
       - redis
       - postgres
+      - market-data
     volumes:
       - .:/app
     command: uvicorn api.rest.main:app --host 0.0.0.0 --port 8000
@@ -52,6 +58,83 @@ services:
     volumes:
       - redis_data:/data
 
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: quant_ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         memory: 4G
+
+  # ml-worker:
+  #   build: *app-build
+  #   container_name: quant_ml_worker
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   depends_on:
+  #     - redis
+  #     - postgres
+  #   volumes:
+  #     - .:/app
+  #   command: python -m services.ml_worker.worker
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 1G
+
+  market-data:
+    build: *app-build
+    container_name: quant_market_data
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+    command: python -m services.market_data.worker
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: quant_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+    depends_on:
+      - trading-engine
+
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: quant_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/overview.json
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
   redis_data:
+  ollama_data:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,50 @@
+{
+  "total_trades": 87,
+  "wins": 27,
+  "losses": 60,
+  "win_rate": 0.3103,
+  "total_pnl": 54.7,
+  "final_balance": 1054.7,
+  "return_pct": 5.47,
+  "max_drawdown_pct": 7.7,
+  "avg_win": 17.85,
+  "avg_loss": 7.12,
+  "profit_factor": 2.5067,
+  "sharpe": 0.0527,
+  "signals_generated": 617,
+  "signals_filtered": 484,
+  "per_strategy": {
+    "Donchian": {
+      "trades": 76,
+      "wins": 24,
+      "total_pnl": 43.41369340094198,
+      "win_rate": 0.3158,
+      "avg_pnl": 0.57,
+      "sharpe": 0.0482
+    },
+    "WRD": {
+      "trades": 8,
+      "wins": 3,
+      "total_pnl": 30.376125464389233,
+      "win_rate": 0.375,
+      "avg_pnl": 3.8,
+      "sharpe": 0.2821
+    },
+    "Pullback": {
+      "trades": 2,
+      "wins": 0,
+      "total_pnl": -13.875217737969315,
+      "win_rate": 0.0,
+      "avg_pnl": -6.94,
+      "sharpe": -7.4716
+    },
+    "MA Trend": {
+      "trades": 1,
+      "wins": 0,
+      "total_pnl": -5.214497844332973,
+      "win_rate": 0.0,
+      "avg_pnl": -5.21,
+      "sharpe": -5214497844.333
+    }
+  }
+}

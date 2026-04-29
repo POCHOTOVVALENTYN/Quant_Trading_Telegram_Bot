@@ -1,0 +1,9 @@
+{
+  "n_simulations": 1000,
+  "avg_final_balance": 1054.700103283029,
+  "median_final_balance": 1054.700103283029,
+  "std_final_balance": 3.419687984300385e-13,
+  "avg_max_drawdown_pct": 8.903552728748641,
+  "max_drawdown_95_percentile": 13.417076528167174,
+  "prob_of_negative_return": 0.0
+}

@@ -1,5 +1,9 @@
+import logging
 import pandas as pd
 from typing import Dict, Any, FrozenSet
+from collections import defaultdict
+
+_score_log = logging.getLogger("strategy_scoring")
 
 MEAN_REVERSION_STRATEGIES: FrozenSet[str] = frozenset({
     "Williams R",
@@ -18,6 +22,66 @@ STRATEGY_PRIORITY: Dict[str, float] = {
     "Funding Squeeze": 0.90,
 }
 
+# Dynamic strategy scoring (Phase 5B)
+MIN_TRADES_FOR_ADJUSTMENT = 15
+PRIORITY_FLOOR = 0.5
+PRIORITY_CEILING = 1.5
+ROLLING_WINDOW = 30
+
+
+class DynamicStrategyScorer:
+    """
+    Adjusts STRATEGY_PRIORITY based on rolling trade performance.
+    Tracks last N trades per strategy and scales the priority multiplier.
+    """
+
+    def __init__(self):
+        self._results: Dict[str, list] = defaultdict(list)  # strategy -> [pnl_usd, ...]
+
+    def record_trade(self, strategy: str, pnl_usd: float):
+        """Record a closed trade result for a strategy."""
+        results = self._results[strategy]
+        results.append(pnl_usd)
+        if len(results) > ROLLING_WINDOW:
+            self._results[strategy] = results[-ROLLING_WINDOW:]
+
+    def get_adjusted_priority(self, strategy: str) -> float:
+        """
+        Returns adjusted priority multiplier for a strategy.
+        Falls back to static STRATEGY_PRIORITY if insufficient data.
+        """
+        base = STRATEGY_PRIORITY.get(strategy, 1.0)
+        results = self._results.get(strategy, [])
+        if len(results) < MIN_TRADES_FOR_ADJUSTMENT:
+            return base
+
+        win_rate = sum(1 for r in results if r > 0) / len(results)
+        # Scale: 50% WR → 1.0x, 70% → 1.4x, 30% → 0.6x
+        adjustment = 0.5 + win_rate
+        adjusted = base * adjustment
+        clamped = max(PRIORITY_FLOOR, min(PRIORITY_CEILING, adjusted))
+
+        if abs(clamped - base) > 0.05:
+            _score_log.info(
+                f"Strategy {strategy}: priority {base:.2f} -> {clamped:.2f} "
+                f"(WR={win_rate:.1%}, n={len(results)})"
+            )
+        return clamped
+
+    def get_all_adjustments(self) -> Dict[str, dict]:
+        result = {}
+        for strategy in STRATEGY_PRIORITY:
+            results = self._results.get(strategy, [])
+            n = len(results)
+            wr = sum(1 for r in results if r > 0) / n if n > 0 else 0
+            result[strategy] = {
+                "base_priority": STRATEGY_PRIORITY.get(strategy, 1.0),
+                "adjusted_priority": self.get_adjusted_priority(strategy),
+                "trades": n,
+                "win_rate": round(wr, 3),
+            }
+        return result
+
 
 class SignalScorer:
     """
@@ -25,13 +89,14 @@ class SignalScorer:
     Factors: trend alignment, volatility, volume, momentum.
     Strategy priority multiplier adjusts final score.
     """
-    def __init__(self, weights: Dict[str, float] = None):
+    def __init__(self, weights: Dict[str, float] = None, dynamic_scorer: DynamicStrategyScorer = None):
         self.weights = weights or {
             "trend": 0.3,
             "volatility": 0.2,
             "volume": 0.2,
             "momentum": 0.3
         }
+        self.dynamic_scorer = dynamic_scorer
 
     def calculate_score(self, df: pd.DataFrame, signal: Dict[str, Any]) -> float:
         if df.empty or len(df) < 50:
@@ -90,5 +155,8 @@ class SignalScorer:
             mom_score * self.weights["momentum"]
         )
 
-        priority = STRATEGY_PRIORITY.get(strategy_name, 1.0)
+        if self.dynamic_scorer:
+            priority = self.dynamic_scorer.get_adjusted_priority(strategy_name)
+        else:
+            priority = STRATEGY_PRIORITY.get(strategy_name, 1.0)
         return round(min(1.0, raw_score * priority), 4)

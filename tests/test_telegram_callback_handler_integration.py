@@ -94,6 +94,8 @@ def _run_handler(
         tg._action_spam_score.clear()
         tg._action_spam_last_ts.clear()
 
+    monkeypatch.setattr(tg.settings, "admin_user_ids", "777")
+
     fake_query = _FakeQuery(data)
     update = SimpleNamespace(
         callback_query=fake_query,
@@ -144,7 +146,7 @@ def test_callback_handler_pos_reduce25_and_50_call_reduce_endpoint(monkeypatch):
         reduce_calls = [c for c in calls if c[0] == "POST" and "/api/v1/trades/reduce/" in c[1]]
         assert len(reduce_calls) == 1
         assert reduce_calls[0][2]["params"]["fraction"] == expected_fraction
-        assert any((a.get("text") or "").startswith("✅ Reduce") for a in q.answers)
+        assert any("Сокращение" in (a.get("text") or "") and "✅" in (a.get("text") or "") for a in q.answers)
         assert len(q.edits) == 1
 
 
@@ -170,7 +172,7 @@ def test_callback_handler_reduce_error_shows_alert_and_keeps_card(monkeypatch):
 
     reduce_calls = [c for c in calls if c[0] == "POST" and "/api/v1/trades/reduce/" in c[1]]
     assert len(reduce_calls) == 1
-    assert any("❌ Reduce не выполнен" in (a.get("text") or "") and a.get("show_alert") for a in q.answers)
+    assert any("Сокращение не выполнено" in (a.get("text") or "") and a.get("show_alert") for a in q.answers)
     assert len(q.edits) == 1
     assert "BTC/USDT" in q.edits[0]["text"]
 
@@ -201,7 +203,7 @@ def test_callback_handler_cooldown_block_contains_lvl(monkeypatch):
 
     calls_first = []
     q1 = _run_handler(monkeypatch, "pos_reduce25_BTC_USDT", calls_first, reset_cooldowns=False)
-    assert any((a.get("text") or "").startswith("✅ Reduce") for a in q1.answers)
+    assert any("Сокращение" in (a.get("text") or "") and "✅" in (a.get("text") or "") for a in q1.answers)
 
     calls_second = []
     q2 = _run_handler(monkeypatch, "pos_reduce25_BTC_USDT", calls_second, reset_cooldowns=False)

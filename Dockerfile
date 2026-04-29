@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# Base image: override with build-arg or DOCKER_PYTHON_IMAGE in docker-compose (see .env.example).
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
 
 WORKDIR /app
 

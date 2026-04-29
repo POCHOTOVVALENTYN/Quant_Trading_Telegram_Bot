@@ -1,13 +1,34 @@
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Optional
 from fastapi import FastAPI
+
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    # Default Deny: If not configured or default, block access to prevent accidental exposure
+    if not settings.internal_api_key or settings.internal_api_key == "changeme_for_prod":
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="API key not configured on server. Set INTERNAL_API_KEY in .env"
+        )
+    if api_key != settings.internal_api_key:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
+    return api_key
+
+# We will apply this dependency to all routes by replacing @app. with @app. (adding Depends)
+# But wait, we can just replace @app.get("/api/v1  with @app.get(", dependencies=[Depends(verify_api_key)]/api/v1, dependencies=[Depends(verify_api_key)]
+
 from fastapi.responses import HTMLResponse
 import ccxt.pro as ccxtpro
 
 from config.settings import settings
 from database.session import engine, Base
 from database.models import all_models  # Загружает модели в Base.metadata
-from services.market_data.market_streamer import MarketDataService
+from services.market_data.client import MarketDataClient
 from core.risk.risk_manager import RiskManager
 from core.execution.engine import ExecutionEngine
 from services.signal_engine.engine import TradingOrchestrator
@@ -24,6 +45,21 @@ async def lifespan(app: FastAPI):
     
     print("!!!!!!!! APP STARTING !!!!!!!!", flush=True) # DEBUG
     app_logger.info("🚀 [1/5] Инициализация базы данных...")
+    try:
+        from prometheus_client import start_http_server
+        # Пытаемся запустить на 9091, если занят — пробуем 9092 или игнорируем
+        try:
+            start_http_server(9091)
+            app_logger.info("✅ Prometheus metrics server running on port 9091.")
+        except Exception:
+            try:
+                start_http_server(9092)
+                app_logger.info("✅ Prometheus metrics server running on port 9092.")
+            except Exception:
+                app_logger.warning("⚠️ Prometheus server failed to start (port occupied), skipping.")
+    except Exception as e:
+        app_logger.error(f"❌ Failed to start Prometheus server: {e}")
+
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -74,26 +110,49 @@ async def lifespan(app: FastAPI):
         app_logger.info(f"FINAL API Key Selected: {api_key[:4]}...{api_key[-4:] if len(api_key)>4 else ''}")
     
     app_logger.info(f"Инициализация клиента Binance API (Testnet: {settings.testnet})...")
+    
+    options = {
+        'defaultType': 'future',
+        'adjustForTimeDifference': True,
+        'recvWindow': 10000,
+        'fetchCurrencies': False,
+    }
+    
+    # КРИТИЧНО: Для Binance Futures Demo Trading (бывший Testnet) 
+    # НЕЛЬЗЯ использовать флаг 'testnet': True или .set_sandbox_mode(True), 
+    # так как CCXT считает их устаревшими для фьючерсов.
+    # Вместо этого мы вручную подменяем URLs на демо-эндпоинты.
+    
     exchange_client = ccxtpro.binance({
         'apiKey': api_key,
         'secret': secret,
         'enableRateLimit': True,
-        'options': {
-            'defaultType': 'future',
-            'testnet': settings.testnet,
-            'adjustForTimeDifference': True,
-            'recvWindow': 10000, 
-        },
-        'timeout': 30000 # 30 секунд
+        'options': options,
+        'timeout': 30000 
     })
-    exchange_client.set_sandbox_mode(settings.testnet)
     
-    # ПРИНУДИТЕЛЬНО МЕНЯЕМ URL КОНЕКТА (т.к. старый fstream.binancefuture.com тормозит/не работает)
     if settings.testnet:
-        working_ws_url = "wss://testnet.binancefuture.com/ws-fapi/v1"
-        exchange_client.urls['test']['ws']['future'] = working_ws_url
-        exchange_client.urls['api']['ws']['future'] = working_ws_url
-        app_logger.info(f"🚀 WebSocket URL переопределен на: {working_ws_url}")
+        app_logger.info("🔮 Используем Binance Futures DEMO mode (Manual URL override)")
+        # Подменяем URLs на демо-сервера Binance
+        exchange_client.urls['api'] = {
+            'public': 'https://demo-api.binance.com/api/v3',
+            'private': 'https://demo-api.binance.com/api/v3',
+            'fapiPublic': 'https://demo-fapi.binance.com/fapi/v1',
+            'fapiPrivate': 'https://demo-fapi.binance.com/fapi/v1',
+            'fapiPrivateV2': 'https://demo-fapi.binance.com/fapi/v2',
+            'dapiPublic': 'https://demo-dapi.binance.com/dapi/v1',
+            'dapiPrivate': 'https://demo-dapi.binance.com/dapi/v1',
+        }
+        # Важно также подменить WS эндпоинты если используются
+        if 'ws' in exchange_client.urls:
+             exchange_client.urls['ws']['future'] = 'wss://fstream.binancefuture.com/ws'
+        
+        # K4: Отключаем загрузку валют (sapi), так как в Testnet/Demo нет SAPI эндпоинтов
+        exchange_client.has['fetchCurrencies'] = False
+        exchange_client.has['fetchTradingFees'] = False
+        exchange_client.has['fetchAccounts'] = False
+        exchange_client.has['fetchStandardConfig'] = False
+    
     
     app_logger.info(f"API URLs: {exchange_client.urls}")
     try:
@@ -101,14 +160,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app_logger.error(f"Не удалось загрузить markets: {e}")
     
-    # 1. Загрузка списка символов для мониторинга
-    # Возвращаем ПОЛНЫЙ список после оптимизации CPU
-    desired_symbols = [
+    # Startup validation: verify API key permissions and balance
+    startup_balance = 0.0
+    try:
+        balance_info = await exchange_client.fetch_balance()
+        startup_balance = float(balance_info.get("total", {}).get("USDT", 0) or 0)
+        app_logger.info(f"✅ API key valid. Futures balance: {startup_balance:.2f} USDT")
+
+        if startup_balance <= 0 and not settings.testnet:
+            app_logger.warning(
+                "⚠️ ZERO BALANCE on real account — bot will run but cannot open positions"
+            )
+    except Exception as e:
+        err_msg = str(e)
+        if "APIError" in err_msg or "AuthenticationError" in err_msg:
+            app_logger.error(f"❌ API KEY VALIDATION FAILED: {err_msg[:200]}")
+        else:
+            app_logger.warning(f"⚠️ Balance check failed (non-fatal): {err_msg[:200]}")
+
+    # Symbol list — reduced for micro accounts
+    desired_symbols_full = [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
         "DOGE/USDT", "ADA/USDT", "TRX/USDT", "LINK/USDT", "DOT/USDT",
-        "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT", 
+        "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT",
         "MATIC/USDT", "FIL/USDT", "ICP/USDT", "APT/USDT"
     ]
+    micro_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+    is_micro = settings.micro_account_mode and startup_balance < settings.micro_account_threshold
+    desired_symbols = micro_symbols if is_micro else desired_symbols_full
+    if is_micro:
+        app_logger.info(
+            f"💰 MICRO-ACCOUNT MODE: balance={startup_balance:.2f} < {settings.micro_account_threshold}, "
+            f"reduced to {len(desired_symbols)} liquid symbols"
+        )
     
     # K2: Фильтрация — оставляем только символы, реально доступные на бирже
     available_markets = set(exchange_client.markets.keys()) if exchange_client.markets else set()
@@ -146,8 +230,8 @@ async def lifespan(app: FastAPI):
     
     app_logger.info(f"🚀 [1/6] Запуск мониторинга {len(base_symbols)} монет на {len(tfs)} ТФ...")
     
-    # 2. Инициализация сервисов
-    market_data = MarketDataService(
+    # 2. Инициализация сервисов (Client-side)
+    market_data = MarketDataClient(
         symbols=base_symbols, 
         timeframes=tfs,
         exchange=exchange_client
@@ -186,6 +270,14 @@ async def lifespan(app: FastAPI):
                 # Вывод текущих метрик для отладки
                 bal, dd, count = await execution_engine.get_account_metrics()
                 app_logger.info(f"📊 [MONITOR] Balance={bal:.2f} USDT | Drawdown={dd*100:.2f}% | Positions={count}")
+                # Update Prometheus gauges
+                try:
+                    from utils.metrics import balance_gauge, drawdown_gauge, open_positions_gauge
+                    balance_gauge.set(bal)
+                    drawdown_gauge.set(dd * 100)
+                    open_positions_gauge.set(count)
+                except Exception:
+                    pass
             except Exception as e:
                 app_logger.error(f"Periodic reconcile error: {e}")
     reconcile_task = asyncio.create_task(_reconcile_loop())
@@ -225,7 +317,15 @@ app = FastAPI(title="Quant Trading System API", lifespan=lifespan)
 async def health_check():
     return {"status": "ok", "service": "trading-engine"}
 
-@app.get("/api/v1/status")
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    from utils.metrics import get_metrics_response
+    from fastapi.responses import Response
+    body, content_type = get_metrics_response()
+    return Response(content=body, media_type=content_type)
+
+@app.get("/api/v1/status", dependencies=[Depends(verify_api_key)])
 async def get_system_status():
     if not orchestrator or not exchange_client:
         return {"status": "initializing"}
@@ -242,7 +342,7 @@ async def get_system_status():
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
-@app.get("/api/v1/presets")
+@app.get("/api/v1/presets", dependencies=[Depends(verify_api_key)])
 async def get_presets():
     from database.session import async_session
     from database.models.all_models import SettingsPreset
@@ -272,7 +372,7 @@ async def get_presets():
             } for p in presets
         ]
 
-@app.post("/api/v1/presets/apply/{name}")
+@app.post("/api/v1/presets/apply/{name}", dependencies=[Depends(verify_api_key)])
 async def apply_preset(name: str):
     from database.session import async_session
     from database.models.all_models import SettingsPreset
@@ -307,13 +407,13 @@ async def apply_preset(name: str):
         await session.commit()
         return {"status": "success", "message": f"Preset {name} applied"}
 
-@app.post("/api/v1/toggle")
+@app.post("/api/v1/toggle", dependencies=[Depends(verify_api_key)])
 async def toggle_trading():
     settings.is_trading_enabled = not settings.is_trading_enabled
     return {"status": "success", "is_enabled": settings.is_trading_enabled}
 
 
-@app.get("/api/v1/runtime-settings")
+@app.get("/api/v1/runtime-settings", dependencies=[Depends(verify_api_key)])
 async def get_runtime_settings():
     return {
         "is_trading_enabled": settings.is_trading_enabled,
@@ -329,13 +429,13 @@ async def get_runtime_settings():
     }
 
 
-@app.post("/api/v1/runtime-settings/pyramiding/toggle")
+@app.post("/api/v1/runtime-settings/pyramiding/toggle", dependencies=[Depends(verify_api_key)])
 async def toggle_pyramiding_runtime():
     settings.pyramiding_enabled = not settings.pyramiding_enabled
     return {"status": "success", "pyramiding_enabled": settings.pyramiding_enabled}
 
 
-@app.post("/api/v1/runtime-settings/per-trade-margin")
+@app.post("/api/v1/runtime-settings/per-trade-margin", dependencies=[Depends(verify_api_key)])
 async def set_per_trade_margin_pct_runtime(value: float):
     # 1%-30% безопасный диапазон для runtime-настроек
     clamped = max(0.01, min(0.30, float(value)))
@@ -343,7 +443,7 @@ async def set_per_trade_margin_pct_runtime(value: float):
     return {"status": "success", "per_trade_margin_pct": settings.per_trade_margin_pct}
 
 
-@app.post("/api/v1/runtime-settings/position-size-usdt")
+@app.post("/api/v1/runtime-settings/position-size-usdt", dependencies=[Depends(verify_api_key)])
 async def set_position_size_usdt_runtime(value: float):
     # 0 = выключить фикс и вернуться к расчету по % маржи.
     clamped = max(0.0, min(100000.0, float(value)))
@@ -351,7 +451,7 @@ async def set_position_size_usdt_runtime(value: float):
     return {"status": "success", "position_size_usdt": settings.position_size_usdt}
 
 
-@app.post("/api/v1/runtime-settings/max-open-trades")
+@app.post("/api/v1/runtime-settings/max-open-trades", dependencies=[Depends(verify_api_key)])
 async def set_max_open_trades_runtime(value: int):
     clamped = max(1, min(20, int(value)))
     settings.max_open_trades = clamped
@@ -361,7 +461,7 @@ async def set_max_open_trades_runtime(value: int):
     return {"status": "success", "max_open_trades": settings.max_open_trades}
 
 
-@app.post("/api/v1/runtime-settings/tp-pct")
+@app.post("/api/v1/runtime-settings/tp-pct", dependencies=[Depends(verify_api_key)])
 async def set_tp_pct_runtime(value: float):
     # 0.1%..20%
     clamped = max(0.001, min(0.20, float(value)))
@@ -369,7 +469,7 @@ async def set_tp_pct_runtime(value: float):
     return {"status": "success", "tp_pct": settings.tp_pct}
 
 
-@app.post("/api/v1/runtime-settings/signal-expiry")
+@app.post("/api/v1/runtime-settings/signal-expiry", dependencies=[Depends(verify_api_key)])
 async def set_signal_expiry_runtime(value: int):
     # 60..600 сек
     clamped = max(60, min(600, int(value)))
@@ -377,7 +477,7 @@ async def set_signal_expiry_runtime(value: int):
     return {"status": "success", "signal_expiry_seconds": settings.signal_expiry_seconds}
 
 
-@app.post("/api/v1/runtime-settings/allowed-side")
+@app.post("/api/v1/runtime-settings/allowed-side", dependencies=[Depends(verify_api_key)])
 async def set_allowed_side_runtime(value: str):
     norm = str(value or "").upper()
     if norm not in {"LONG", "SHORT", "BOTH"}:
@@ -386,7 +486,7 @@ async def set_allowed_side_runtime(value: str):
     return {"status": "success", "allowed_position_side": settings.allowed_position_side}
 
 
-@app.post("/api/v1/runtime-settings/leverage")
+@app.post("/api/v1/runtime-settings/leverage", dependencies=[Depends(verify_api_key)])
 async def set_leverage_runtime(value: int):
     requested = int(value)
     if requested < 1 or requested > 125:
@@ -435,7 +535,7 @@ async def set_leverage_runtime(value: int):
     settings.leverage = requested
     return {"status": "success", "leverage": settings.leverage, "exchange_check": "ok"}
 
-@app.get("/api/v1/exchange/check")
+@app.get("/api/v1/exchange/check", dependencies=[Depends(verify_api_key)])
 async def check_exchange_connection():
     if not exchange_client:
         return {"status": "error", "message": "Exchange client not initialized"}
@@ -445,7 +545,7 @@ async def check_exchange_connection():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.get("/api/v1/stats")
+@app.get("/api/v1/stats", dependencies=[Depends(verify_api_key)])
 async def get_stats():
     from database.session import async_session
     from database.models.all_models import PnLRecord as PnLModel
@@ -473,23 +573,50 @@ async def get_stats():
         }
 
 
-@app.post("/api/v1/stats/reset")
+@app.post("/api/v1/stats/reset", dependencies=[Depends(verify_api_key)])
 async def reset_stats(scope: str = "all"):
     from database.session import async_session
-    from database.models.all_models import PnLRecord as PnLModel
+    from database.models.all_models import PnLRecord as PnLModel, Order as OrderModel
     from sqlalchemy import delete
 
-    # Сейчас поддерживаем только binance/all.
-    if scope.lower() not in {"all", "binance"}:
-        return {"status": "error", "message": "Unsupported scope. Use all or binance."}
+    s = scope.lower()
+    if s not in {"all", "binance", "pnl", "orders", "audit"}:
+        return {
+            "status": "error",
+            "message": "Unsupported scope: all, binance, pnl, orders, or audit (PnL+orders).",
+        }
+
+    clear_pnl = s in ("all", "binance", "pnl", "audit")
+    clear_orders = s in ("orders", "audit")
 
     async with async_session() as session:
-        await session.execute(delete(PnLModel))
+        if clear_pnl:
+            await session.execute(delete(PnLModel))
+        if clear_orders:
+            await session.execute(delete(OrderModel))
         await session.commit()
-    return {"status": "success", "scope": scope.lower()}
+
+    # Сброс RiskManager в Redis (Этап 19-21)
+    if orchestrator and orchestrator.execution and orchestrator.execution.risk_manager:
+        rm = orchestrator.execution.risk_manager
+        if rm.redis:
+            try:
+                keys_to_del = [
+                    "rm_daily_pnl", "rm_daily_bal", "rm_daily_ts", 
+                    "rm_daily_halt", "rm_cons_wins", "rm_cons_loss"
+                ]
+                await rm.redis.delete(*keys_to_del)
+                # Переинициализируем, чтобы сбросить баланс на текущий
+                _, bal, _ = await orchestrator.execution.get_account_metrics()
+                await rm.record_closed_pnl(0.0, bal) 
+                app_logger.info("♻️ RiskManager stats reset in Redis and memory.")
+            except Exception as e:
+                app_logger.error(f"❌ Failed to reset RiskManager Redis stats: {e}")
+
+    return {"status": "success", "scope": s}
 
 
-@app.get("/api/v1/history")
+@app.get("/api/v1/history", dependencies=[Depends(verify_api_key)])
 async def get_trade_history(limit: int = 20):
     from database.session import async_session
     from database.models.all_models import PnLRecord as PnLModel
@@ -503,88 +630,134 @@ async def get_trade_history(limit: int = 20):
 
     items = []
     for r in rows:
+        pnl_usd = float(r.pnl_usd or 0.0)
+        pnl_pct = float(r.pnl_pct or 0.0)
+        notional_usd = 0.0
+        try:
+            if abs(pnl_pct) > 1e-12:
+                notional_usd = abs(pnl_usd) / (abs(pnl_pct) / 100.0)
+        except Exception:
+            notional_usd = 0.0
         items.append({
             "id": r.id,
             "symbol": r.symbol,
-            "pnl_usd": float(r.pnl_usd or 0.0),
-            "pnl_pct": float(r.pnl_pct or 0.0),
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "notional_usd": float(notional_usd or 0.0),
+            "leverage": int(r.leverage or 1),
             "reason": r.reason or "AUTO",
             "closed_at": r.closed_at.isoformat() if r.closed_at else None,
         })
     return {"items": items, "count": len(items)}
 
-@app.get("/api/v1/trades")
+
+@app.get("/api/v1/orders", dependencies=[Depends(verify_api_key)])
+async def get_orders_audit(limit: int = 100, symbol: Optional[str] = None):
+    """Аудит ордеров из БД (вход, защита, закрытие)."""
+    from database.session import async_session
+    from database.models.all_models import Order as OrderModel
+    from sqlalchemy import select, desc
+    from datetime import datetime, timedelta
+
+    clamped = max(1, min(500, int(limit)))
+    async with async_session() as session:
+        if symbol:
+            stmt = (
+                select(OrderModel)
+                .where(OrderModel.symbol == symbol)
+                .order_by(desc(OrderModel.created_at))
+                .limit(clamped)
+            )
+        else:
+            stmt = select(OrderModel).order_by(desc(OrderModel.created_at)).limit(clamped)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    items = []
+    for o in rows:
+        items.append({
+            "id": o.id,
+            "position_id": o.position_id,
+            "exchange_order_id": o.exchange_order_id,
+            "client_order_id": o.client_order_id,
+            "symbol": o.symbol,
+            "order_type": o.order_type,
+            "side": o.side.value if o.side else None,
+            "price": float(o.price or 0.0),
+            "size": float(o.size or 0.0),
+            "status": o.status.value if o.status else None,
+            "created_at": o.created_at.isoformat() if o.created_at else None,
+            "updated_at": o.updated_at.isoformat() if o.updated_at else None,
+        })
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/v1/execution-audit", dependencies=[Depends(verify_api_key)])
+async def get_execution_audit(limit: int = 100, symbol: Optional[str] = None, event_type: Optional[str] = None):
+    """Execution audit trail for signal/order/position lifecycle."""
+    from database.session import async_session
+    from database.models.all_models import ExecutionAuditLog
+    from sqlalchemy import select, desc
+
+    clamped = max(1, min(500, int(limit)))
+    async with async_session() as session:
+        stmt = select(ExecutionAuditLog).order_by(desc(ExecutionAuditLog.created_at))
+        if symbol:
+            stmt = stmt.where(ExecutionAuditLog.symbol == symbol)
+        if event_type:
+            stmt = stmt.where(ExecutionAuditLog.event_type == event_type)
+        stmt = stmt.limit(clamped)
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    items = []
+    for row in rows:
+        items.append({
+            "id": row.id,
+            "user_id": row.user_id,
+            "signal_id": row.signal_id,
+            "position_id": row.position_id,
+            "order_id": row.order_id,
+            "symbol": row.symbol,
+            "strategy": row.strategy,
+            "event_type": row.event_type,
+            "severity": row.severity,
+            "message": row.message,
+            "payload": row.payload or {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        })
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/v1/trades", dependencies=[Depends(verify_api_key)])
 async def get_active_trades():
     if not orchestrator:
         return {"trades": {}}
 
-    # Принудительная синхронизация перед отдачей в UI:
-    # убирает "призрачные" позиции в Telegram/дашборде после внешних закрытий.
-    try:
-        await orchestrator.execution.reconcile_full()
-    except Exception as e:
-        app_logger.warning(f"⚠️ reconcile_full before /trades failed: {e}")
-
-    trades = orchestrator.execution.active_trades.copy()
+    trades = {k: dict(v) for k, v in orchestrator.execution.active_trades.items()}
     if not trades:
         return {"trades": {}}
-    
-    try:
-        # Пытаемся получить текущие цены
-        symbols = list(trades.keys())
-        # Используем fetch_ticker если fetch_tickers не вернул данные
-        tickers = {}
-        try:
-            app_logger.info(f"📊 [DEBUG] Запрос цен для: {symbols}")
-            # Используем ГЛОБАЛЬНЫЙ exchange_client
-            tickers = await exchange_client.fetch_tickers(symbols)
-            app_logger.info(f"📊 [DEBUG] Получено тикеров: {list(tickers.keys())}")
-        except Exception as te:
-            app_logger.warning(f"Ошибка fetch_tickers, пробуем по одному: {te}")
-            for s in symbols:
-                try:
-                    tickers[s] = await exchange_client.fetch_ticker(s)
-                except:
-                    continue
 
-        for symbol, info in trades.items():
-            # Пробуем найти тикер (учитываем, что CCXT может добавить :USDT для фьючерсов)
-            ticker = tickers.get(symbol) or tickers.get(symbol + ":USDT")
-            
-            if ticker and (ticker.get('last') or ticker.get('close')):
-                curr_price = ticker.get('last') or ticker.get('close')
-                info['current_price'] = curr_price
-                
-                # Расчет PnL
-                entry = info.get('entry', 0)
-                size = float(info.get('current_size') or 0)
-                is_long = str(info.get('signal_type', '')).upper() == "LONG"
-                
-                if entry > 0 and size > 0:
-                    if is_long:
-                        pnl_usd = (curr_price - entry) * size
-                        pnl_pct = ((curr_price / entry) - 1) * 100
-                    else:
-                        pnl_usd = (entry - curr_price) * size
-                        pnl_pct = ((entry / curr_price) - 1) * 100
-                        
-                    info['pnl_usd'] = pnl_usd
-                    info['pnl_pct'] = pnl_pct
-                else:
-                    info['pnl_usd'] = 0.0
-                    info['pnl_pct'] = 0.0
+    for symbol, info in trades.items():
+        curr_price = info.get('current_price')
+        entry = float(info.get('entry', 0) or 0)
+        size = float(info.get('current_size', 0) or 0)
+        is_long = str(info.get('signal_type', '')).upper() == "LONG"
+
+        if curr_price and entry > 0 and size > 0:
+            if is_long:
+                info['pnl_usd'] = (curr_price - entry) * size
+                info['pnl_pct'] = ((curr_price / entry) - 1) * 100
             else:
-                # Если цену так и не нашли
-                info['current_price'] = None
-                info['pnl_usd'] = 0.0
-                info['pnl_pct'] = 0.0
+                info['pnl_usd'] = (entry - curr_price) * size
+                info['pnl_pct'] = ((entry / curr_price) - 1) * 100
+        else:
+            info.setdefault('pnl_usd', 0.0)
+            info.setdefault('pnl_pct', 0.0)
 
-    except Exception as e:
-        app_logger.error(f"Глобальная ошибка при расчете PnL: {e}")
-        
     return {"trades": trades}
 
-@app.post("/api/v1/trades/close/{symbol}")
+@app.post("/api/v1/trades/close/{symbol}", dependencies=[Depends(verify_api_key)])
 async def close_trade(symbol: str):
     # CCXT использует BTC/USDT, но в URL удобнее передавать BTCUSDT или кодировать /
     # Попробуем найти символ. Если в URL передали BTC_USDT, заменим на BTC/USDT
@@ -599,7 +772,7 @@ async def close_trade(symbol: str):
         return {"status": "error", "message": "Trade not found", "symbol": normalized_symbol}
 
 
-@app.post("/api/v1/trades/reduce/{symbol}")
+@app.post("/api/v1/trades/reduce/{symbol}", dependencies=[Depends(verify_api_key)])
 async def reduce_trade(symbol: str, fraction: float):
     normalized_symbol = symbol.replace("_", "/")
     if not orchestrator:
@@ -611,7 +784,7 @@ async def reduce_trade(symbol: str, fraction: float):
     return {"status": "error", "message": "Unexpected reduce response", "symbol": normalized_symbol}
 
 
-@app.get("/api/v1/positions")
+@app.get("/api/v1/positions", dependencies=[Depends(verify_api_key)])
 async def get_positions():
     """Open positions in a flat list for the dashboard."""
     if not orchestrator:
@@ -632,32 +805,67 @@ async def get_positions():
     return result
 
 
-@app.get("/api/v1/signals")
+@app.get("/api/v1/signals", dependencies=[Depends(verify_api_key)])
 async def get_recent_signals(limit: int = 30):
-    """Recent signals from DB."""
+    """Recent signals from DB.
+
+    Primary source: accepted `signals`.
+    Fallback source (when accepted stream is quiet): `signal_decision_logs`.
+    """
     from database.session import async_session as _async_session
-    from database.models.all_models import Signal
-    from sqlalchemy import select
+    from database.models.all_models import Signal, SignalDecisionLog
+    from sqlalchemy import select, desc
+    from datetime import datetime, timedelta
 
     async with _async_session() as session:
         stmt = select(Signal).order_by(Signal.id.desc()).limit(min(limit, 100))
         rows = (await session.execute(stmt)).scalars().all()
-    return [
-        {
-            "id": r.id, "symbol": r.symbol,
-            "signal_type": r.signal_type.value if hasattr(r.signal_type, 'value') else str(r.signal_type),
-            "strategy": r.strategy, "confidence": r.confidence,
-            "win_prob": r.win_prob, "expected_return": r.expected_return,
-            "risk": r.risk, "status": r.status,
-            "entry_price": r.entry_price, "stop_loss": r.stop_loss,
-            "take_profit": r.take_profit,
-            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
-        }
-        for r in rows
-    ]
+        fresh_cutoff = datetime.utcnow() - timedelta(hours=6)
+        has_fresh_signal = any((r.timestamp and r.timestamp >= fresh_cutoff) for r in rows)
+        if rows and has_fresh_signal:
+            return [
+                {
+                    "id": r.id, "symbol": r.symbol,
+                    "signal_type": r.signal_type.value if hasattr(r.signal_type, 'value') else str(r.signal_type),
+                    "strategy": r.strategy, "confidence": r.confidence,
+                    "win_prob": r.win_prob, "expected_return": r.expected_return,
+                    "risk": r.risk, "status": r.status,
+                    "entry_price": r.entry_price, "stop_loss": r.stop_loss,
+                    "take_profit": r.take_profit,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                    "source": "signals",
+                }
+                for r in rows
+            ]
+
+        sdl_stmt = (
+            select(SignalDecisionLog)
+            .order_by(desc(SignalDecisionLog.created_at))
+            .limit(min(limit, 100))
+        )
+        sdl_rows = (await session.execute(sdl_stmt)).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "symbol": r.symbol,
+                "signal_type": r.direction,
+                "strategy": r.strategy,
+                "confidence": r.score,
+                "win_prob": r.win_prob,
+                "expected_return": None,
+                "risk": None,
+                "status": r.outcome or "UNKNOWN",
+                "entry_price": r.entry_price,
+                "stop_loss": None,
+                "take_profit": None,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "source": "decision_logs",
+            }
+            for r in sdl_rows
+        ]
 
 
-@app.get("/api/v1/ai/status")
+@app.get("/api/v1/ai/status", dependencies=[Depends(verify_api_key)])
 async def get_ai_status():
     if not orchestrator:
         return {"status": "not_ready"}
@@ -668,7 +876,7 @@ async def get_ai_status():
     }
 
 
-@app.get("/api/v1/ai/decisions")
+@app.get("/api/v1/ai/decisions", dependencies=[Depends(verify_api_key)])
 async def get_ai_decisions(limit: int = 50):
     """Recent AI decisions for analytics."""
     from database.session import async_session as _async_session
@@ -691,7 +899,7 @@ async def get_ai_decisions(limit: int = 50):
     return {"count": len(items), "items": items}
 
 
-@app.get("/api/v1/ai/decisions/summary")
+@app.get("/api/v1/ai/decisions/summary", dependencies=[Depends(verify_api_key)])
 async def get_ai_decisions_summary():
     """Aggregate AI decision statistics."""
     from database.session import async_session as _async_session
@@ -721,7 +929,109 @@ async def get_ai_decisions_summary():
     return summary
 
 
-@app.get("/api/v1/risk/daily")
+@app.get("/api/v1/decision-logs", dependencies=[Depends(verify_api_key)])
+async def get_decision_logs(limit: int = 100, symbol: Optional[str] = None, outcome: Optional[str] = None):
+    """Signal decision journal — every filter step for post-analysis."""
+    from database.session import async_session as _async_session
+    from database.models.all_models import SignalDecisionLog
+    from sqlalchemy import select, desc
+
+    clamped = max(1, min(500, int(limit)))
+    async with _async_session() as session:
+        q = select(SignalDecisionLog).order_by(desc(SignalDecisionLog.created_at))
+        if symbol:
+            q = q.where(SignalDecisionLog.symbol == symbol)
+        if outcome:
+            q = q.where(SignalDecisionLog.outcome.ilike(f"%{outcome}%"))
+        q = q.limit(clamped)
+        rows = (await session.execute(q)).scalars().all()
+
+    items = []
+    for r in rows:
+        items.append({
+            "id": r.id, "symbol": r.symbol, "timeframe": r.timeframe,
+            "strategy": r.strategy, "direction": r.direction,
+            "entry_price": r.entry_price,
+            "adx": r.adx, "atr": r.atr, "rsi": r.rsi,
+            "volume_ratio": r.volume_ratio, "funding_rate": r.funding_rate,
+            "regime": r.regime, "daily_bias": r.daily_bias,
+            "volatility_regime": r.volatility_regime,
+            "funding_regime": r.funding_regime, "session": r.session,
+            "score": r.score, "win_prob": r.win_prob,
+            "ai_recommendation": r.ai_recommendation,
+            "ai_confidence": r.ai_confidence,
+            "filters": {
+                "daily_filter": r.f_daily_filter, "regime_router": r.f_regime_router,
+                "adx_threshold": r.f_adx_threshold, "cooldown": r.f_cooldown,
+                "daily_halt": r.f_daily_halt, "duplicate_pos": r.f_duplicate_pos,
+                "side_filter": r.f_side_filter, "expiry": r.f_expiry,
+                "listing_age": r.f_listing_age, "max_positions": r.f_max_positions,
+                "correlation": r.f_correlation, "funding_rate": r.f_funding_rate,
+                "volatility": r.f_volatility, "score": r.f_score,
+                "ai_prob": r.f_ai_prob, "ext_ai": r.f_ext_ai,
+            },
+            "outcome": r.outcome,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/v1/ml/status", dependencies=[Depends(verify_api_key)])
+async def get_ml_status():
+    """ML signal classifier status."""
+    if not orchestrator or not orchestrator.ml_classifier:
+        return {"enabled": False, "status": "disabled"}
+    return {
+        "enabled": True,
+        "shadow_mode": settings.ml_validator_shadow_mode,
+        **orchestrator.ml_classifier.get_status(),
+    }
+
+
+@app.post("/api/v1/ml/train", dependencies=[Depends(verify_api_key)])
+async def trigger_ml_training():
+    """Manually trigger walk-forward ML training."""
+    from ai.ml.signal_classifier import train_walk_forward
+    classifier, stats = await train_walk_forward()
+    if classifier and orchestrator:
+        orchestrator.ml_classifier = classifier
+    return stats
+
+
+@app.get("/api/v1/strategy-scoring", dependencies=[Depends(verify_api_key)])
+async def get_strategy_scoring():
+    """Dynamic strategy scoring adjustments."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    return orchestrator.dynamic_strategy_scorer.get_all_adjustments()
+
+
+@app.get("/api/v1/cvd", dependencies=[Depends(verify_api_key)])
+async def get_cvd():
+    """Current CVD (Cumulative Volume Delta) per symbol."""
+    if not orchestrator:
+        return {}
+    return orchestrator.cvd_tracker.get_all_symbols()
+
+
+@app.get("/api/v1/news-filter", dependencies=[Depends(verify_api_key)])
+async def get_news_filter_status():
+    """NLP news filter status."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    return orchestrator.news_filter.get_status()
+
+
+@app.post("/api/v1/news-filter/check", dependencies=[Depends(verify_api_key)])
+async def trigger_news_check():
+    """Manually trigger news sentiment check."""
+    if not orchestrator:
+        return {"status": "not_ready"}
+    result = await orchestrator.news_filter.check_sentiment(orchestrator.external_ai)
+    return result
+
+
+@app.get("/api/v1/risk/daily", dependencies=[Depends(verify_api_key)])
 async def get_daily_risk():
     """Daily PnL and drawdown status."""
     if not orchestrator:
@@ -729,7 +1039,7 @@ async def get_daily_risk():
     return orchestrator.risk_manager.get_daily_stats()
 
 
-@app.get("/api/v1/learner/status")
+@app.get("/api/v1/learner/status", dependencies=[Depends(verify_api_key)])
 async def get_learner_status():
     """Scoring learner weights and training stats."""
     if not orchestrator:
@@ -944,5 +1254,4 @@ setInterval(tick, 1000);
 </script>
 </body>
 </html>"""
-
 
