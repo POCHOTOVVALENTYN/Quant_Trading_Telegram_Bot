@@ -18,6 +18,7 @@ class BinanceCallPolicy:
     max_delay: float = 8.0
     timeout_seconds: Optional[float] = None
     sync_time_on_1021: bool = True
+    use_testnet: bool = False
 
 
 class BinanceRateLimiter:
@@ -43,6 +44,8 @@ def classify_binance_error(err: Exception) -> str:
         return "network"
     if "temporarily unavailable" in text or "service unavailable" in text or "server error" in text or "502" in text or "503" in text or "504" in text:
         return "server"
+    if "insufficient balance" in text or "account has insufficient balance" in text:
+        return "insufficient_funds"
     return "fatal"
 
 

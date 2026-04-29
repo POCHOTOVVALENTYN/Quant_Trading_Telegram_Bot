@@ -41,6 +41,7 @@ class StrategyMutator:
         "contraction_ratio": (0.3, 0.9, "float"),
         "lookback": (50, 400, "int"),
         "bars": (3, 21, "int"),
+        "std_dev": (1.5, 3.5, "float"),
         "sl_multiplier": (1.0, 4.0, "float"),
         "tp_multiplier": (1.2, 6.0, "float"),
     }
@@ -118,6 +119,8 @@ class StrategyMutator:
             "StrategyWilliamsR": "Williams R",
             "StrategyFundingSqueeze": "Funding Squeeze",
             "StrategyRuleOf7": "Rule of 7",
+            "StrategyBollingerMR": "BB Mean Reversion",
+            "StrategyFakeout": "Fakeout",
         }
         return mapping.get(strategy_cls.__name__, strategy_cls.__name__)
 

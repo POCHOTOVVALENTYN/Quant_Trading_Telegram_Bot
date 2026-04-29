@@ -29,6 +29,8 @@ class MetaStrategy:
         "Williams R",
         "WRD Reversal",
         "Funding Squeeze",
+        "BB Mean Reversion",
+        "Fakeout",
     })
 
     def __init__(self, adx_trend_min: float = 22.0, adx_flat_max: float = 18.0):

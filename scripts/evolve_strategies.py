@@ -1,95 +1,97 @@
-"""
-Evolution mode CLI: 10 variants per strategy, train/OOS split, top-3 by Sharpe / DD / PF.
-
-Usage (from project root):
-    python3 scripts/evolve_strategies.py --symbol BTC/USDT --timeframe 1h --days 90
-"""
-from __future__ import annotations
-
-import argparse
 import asyncio
-import json
 import os
 import sys
-from typing import Any, Dict, List, Tuple, Type
+import json
+import pandas as pd
+from datetime import datetime, timedelta
 
+# Добавляем корень проекта в путь поиска модулей
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ai.backtest import fetch_candles
-from core.optimizer.evolution import EvolutionConfig, StrategyEvolutionRunner
-from core.optimizer.mutator import StrategyMutator
+from core.optimizer.optimizer import StrategyOptimizer, OptimizationConfig
 from core.strategies.strategies import (
-    StrategyDonchian,
-    StrategyFundingSqueeze,
-    StrategyMATrend,
-    StrategyPullback,
-    StrategyRuleOf7,
-    StrategyVolContraction,
-    StrategyWRD,
-    StrategyWideRangeReversal,
-    StrategyWilliamsR,
+    StrategyDonchian, StrategyWRD, StrategyMATrend, StrategyPullback,
+    StrategyVolContraction, StrategyWideRangeReversal, StrategyWilliamsR,
+    StrategyFundingSqueeze, StrategyRuleOf7,
+    StrategyBollingerMR, StrategyFakeout,
 )
 
+async def download_data(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
+    import ccxt.async_support as ccxt
+    exchange = ccxt.binance()
+    since = exchange.parse8601((datetime.now() - timedelta(days=days)).isoformat())
+    
+    print(f"📥 Загрузка данных для {symbol} ({timeframe}) за последние {days} дней...")
+    all_ohlcv = []
+    try:
+        while since < exchange.milliseconds():
+            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since)
+            if not ohlcv: break
+            since = ohlcv[-1][0] + 1
+            all_ohlcv.extend(ohlcv)
+            if len(ohlcv) < 500: break
+    finally:
+        await exchange.close()
+    
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
-def _specs() -> List[Tuple[Type, Dict[str, Any]]]:
-    return [
-        (StrategyDonchian, {"period": 20}),
-        (StrategyWRD, {"atr_multiplier": 1.6}),
-        (StrategyMATrend, {"fast_ma": 20, "slow_ma": 50, "global_ma": 200}),
-        (StrategyPullback, {"ma_period": 20, "global_period": 200}),
-        (StrategyVolContraction, {"lookback": 300, "contraction_ratio": 0.6}),
-        (StrategyWideRangeReversal, {}),
-        (StrategyWilliamsR, {}),
-        (StrategyFundingSqueeze, {}),
-        (StrategyRuleOf7, {"bars": 7}),
+async def main():
+    symbol = "BTC/USDT"
+    timeframe = "1h"
+    days = 90  # Для оптимизации берем больше данных
+    
+    raw_df = await download_data(symbol, timeframe, days)
+    if raw_df.empty:
+        print("❌ Не удалось загрузить данные.")
+        return
+
+    # Настраиваем оптимизатор: 20 вариаций на каждую стратегию
+    optimizer = StrategyOptimizer(config=OptimizationConfig(variant_count=20, top_n=1))
+    
+    strategy_classes = [
+        StrategyDonchian, StrategyWRD, StrategyMATrend, StrategyPullback,
+        StrategyVolContraction, StrategyWideRangeReversal, StrategyWilliamsR,
+        StrategyFundingSqueeze, StrategyRuleOf7,
+        StrategyBollingerMR, StrategyFakeout,
     ]
 
+    print("\n" + "="*60)
+    print(f"🤖 ЗАПУСК AI STRATEGY OPTIMIZER (Эволюция параметров)")
+    print("="*60 + "\n")
 
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="Strategy evolution (train/OOS, top-3 metrics)")
-    parser.add_argument("--symbol", default="BTC/USDT")
-    parser.add_argument("--timeframe", default="1h")
-    parser.add_argument("--days", type=int, default=90)
-    parser.add_argument("--variants", type=int, default=10)
-    parser.add_argument("--train-ratio", type=float, default=0.7, dest="train_ratio")
-    args = parser.parse_args()
-
-    print(f"Evolution: {args.symbol} {args.timeframe} | {args.days} days | {args.variants} variants/strategy")
-    df = await fetch_candles(args.symbol, args.timeframe, args.days)
-    print(f"Downloaded {len(df)} candles.")
-
-    cfg = EvolutionConfig(
-        variant_count=args.variants,
-        train_ratio=args.train_ratio,
+    # Запускаем цикл: мутация -> бэктест -> оценка -> отбор
+    best_results = optimizer.optimize(
+        df=raw_df,
+        strategy_classes=strategy_classes
     )
-    runner = StrategyEvolutionRunner(config=cfg)
-    all_results: Dict[str, Any] = {}
 
-    for strat_cls, base_params in _specs():
-        label = StrategyMutator._strategy_name(strat_cls)
-        print(f"\n--- Evolving {label} ---")
-        res = runner.evolve_strategy(
-            df=df,
-            strategy_cls=strat_cls,
-            base_strategy_params=base_params,
-        )
-        all_results[label] = res
-        if res.get("error"):
-            print(f"  skipped: {res.get('error')}")
-            continue
-        best = res.get("best_composite_oos") or {}
-        print(
-            f"  best OOS composite={best.get('composite_oos_score')} | "
-            f"replace baseline={res.get('replace_baseline_recommended')}"
-        )
-        print(f"  baseline OOS score={(res.get('baseline') or {}).get('composite_oos_score')}")
+    summary = []
+    for name, res in best_results.items():
+        summary.append({
+            "Стратегия": name,
+            "Score": res.score,
+            "Profit": f"{res.metrics['profit']:.2f}$",
+            "WinRate": f"{res.metrics['winrate']*100:.2f}%",
+            "DD": f"{res.metrics['drawdown']:.2f}%",
+            "Params": json.dumps(res.parameters['strategy_params'])
+        })
 
+    # Вывод результатов
+    summary_df = pd.DataFrame(summary)
+    print("\n" + "="*140)
+    print("🏆 ЛУЧШИЕ ПАРАМЕТРЫ ПОСЛЕ ЭВОЛЮЦИИ")
+    print("="*140)
+    print(summary_df.to_string(index=False))
+    print("="*140 + "\n")
+
+    # Сохранение лучших параметров в файл
+    output_path = "data/optimized_parameters.json"
     os.makedirs("data", exist_ok=True)
-    out_path = "data/evolution_results.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2)
-    print(f"\nSaved {out_path}")
-
+    with open(output_path, "w") as f:
+        json.dump({name: res.parameters for name, res in best_results.items()}, f, indent=4)
+    print(f"✅ Оптимизированные параметры сохранены в {output_path}")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -39,7 +39,11 @@ class Settings(BaseSettings):
     signal_expiry_seconds: int = 120  # Защита от старых сигналов (120с)
     min_listing_days: int = 100       # Фильтр новых монет (100 дней)
     max_funding_rate: float = 0.01    # 1% в час (очень высокий)
-    max_open_trades: int = 3          # Новый лимит: не более 3 позиций
+    # Risk & Limits
+    max_risk_per_trade_pct: float = 0.02
+    max_drawdown_pct: float = 0.20
+    max_open_trades: int = 5
+    
     per_trade_margin_pct: float = 0.02 # 2% маржи на каждую новую позицию
     position_size_usdt: float = 0.0   # Фиксированный объём позиции в USDT (0 = авто через % маржи)
     apply_new_entry_rules_after_flat: bool = False  # Включать новые правила только после полного закрытия текущих позиций
@@ -154,6 +158,13 @@ class Settings(BaseSettings):
     # Set True only if you need the legacy TimeExitSystem rules in parallel (not recommended).
     legacy_time_exit_system_enabled: bool = False
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8", 
+        extra="ignore",
+        # Это заставит Pydantic игнорировать кавычки в значениях из .env
+        env_prefix="",
+        case_sensitive=False
+    )
 
 settings = Settings()

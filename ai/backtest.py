@@ -27,10 +27,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.strategies.strategies import (
     StrategyDonchian, StrategyWRD, StrategyMATrend, StrategyPullback,
     StrategyVolContraction, StrategyWideRangeReversal, StrategyWilliamsR,
-    StrategyFundingSqueeze, StrategyRuleOf7,
+    StrategyFundingSqueeze, StrategyRuleOf7, StrategyBollingerMR, StrategyFakeout,
 )
 from core.indicators.indicators import (
     calculate_atr, calculate_rsi, calculate_ema, calculate_adx, calculate_williams_r,
+    calculate_bollinger_bands,
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
@@ -53,6 +54,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['adx'] = adx_df['adx']
 
     df['williams_r'] = calculate_williams_r(df, period=14)
+    
+    # Добавляем Bollinger Bands
+    upper, mid, lower = calculate_bollinger_bands(df['close'], period=20, std=2.0)
+    df['bb_upper'] = upper
+    df['bb_mid'] = mid
+    df['bb_lower'] = lower
+    
     df['vol_ma20'] = df['volume'].rolling(20).mean()
     df['roc10'] = df['close'].pct_change(10)
     df['funding_rate'] = 0.0
@@ -93,16 +101,18 @@ class BacktestEngine:
             self.strategies = strategies
         else:
             self.strategies = [
-                StrategyDonchian(period=20),
-                StrategyWRD(atr_multiplier=1.6),
-                StrategyVolContraction(lookback=300, contraction_ratio=0.6),
-                StrategyMATrend(fast_ma=20, slow_ma=50, global_ma=200),
-                StrategyPullback(ma_period=20, global_period=200),
-                StrategyWilliamsR(),
-                StrategyWideRangeReversal(),
-                StrategyFundingSqueeze(),
-                StrategyRuleOf7(),
-            ]
+            StrategyDonchian(period=20),
+            StrategyWRD(atr_multiplier=1.6),
+            StrategyVolContraction(lookback=300, contraction_ratio=0.6),
+            StrategyMATrend(fast_ma=20, slow_ma=50, global_ma=200),
+            StrategyPullback(ma_period=20, global_period=200),
+            StrategyWilliamsR(),
+            StrategyWideRangeReversal(),
+            StrategyFundingSqueeze(),
+            StrategyRuleOf7(),
+            StrategyBollingerMR(),
+            StrategyFakeout(),
+        ]
         self.scorer = SignalScorer()
         self.ai_model = AIModel()
         self.risk = RiskManager()

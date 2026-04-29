@@ -9,6 +9,8 @@ from core.strategies.mean_reversion import (
 )
 from core.strategies.momentum import StrategyWRD
 from core.strategies.trend_following import StrategyMATrend, StrategyPullback
+from core.strategies.mean_reversion_bb import StrategyBollingerMR
+from core.strategies.contrarian import StrategyFakeout
 
 
 class StrategyRuleOf7(BaseStrategy):

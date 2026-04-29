@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import json
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import List
@@ -13,6 +14,7 @@ from core.strategies.strategies import (
     StrategyDonchian, StrategyWRD, StrategyMATrend, StrategyPullback,
     StrategyVolContraction, StrategyWideRangeReversal, StrategyWilliamsR,
     StrategyFundingSqueeze, StrategyRuleOf7,
+    StrategyBollingerMR, StrategyFakeout,
 )
 
 async def download_data(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
@@ -43,21 +45,51 @@ async def download_data(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
     return df
 
 async def main():
-    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+    symbols = [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", 
+        "ADA/USDT", "DOT/USDT", "LINK/USDT", "NEAR/USDT", 
+        "DOGE/USDT", "XRP/USDT", "LTC/USDT", "AVAX/USDT"
+    ]
     timeframes = ["15m", "1h", "4h"]
     days = 60
     
-    strategies_to_test = [
-        StrategyDonchian(period=20),
-        StrategyWRD(atr_multiplier=1.6),
-        StrategyVolContraction(lookback=300, contraction_ratio=0.6),
-        StrategyMATrend(fast_ma=20, slow_ma=50, global_ma=200),
-        StrategyPullback(ma_period=20, global_period=200),
-        StrategyWilliamsR(),
-        StrategyWideRangeReversal(),
-        StrategyFundingSqueeze(),
-        StrategyRuleOf7(),
-    ]
+    # Загружаем оптимизированные параметры, если они есть
+    params_path = "data/optimized_parameters.json"
+    optimized_params = {}
+    if os.path.exists(params_path):
+        with open(params_path, "r") as f:
+            optimized_params = json.load(f)
+        print(f"✨ Загружены оптимизированные параметры из {params_path}")
+
+    strategies_to_test = []
+    
+    # Инициализируем стратегии с оптимизированными параметрами
+    strat_map = {
+        "Donchian": StrategyDonchian,
+        "WRD": StrategyWRD,
+        "Vol Contraction": StrategyVolContraction,
+        "MA Trend": StrategyMATrend,
+        "Pullback": StrategyPullback,
+        "Williams R": StrategyWilliamsR,
+        "WRD Reversal": StrategyWideRangeReversal,
+        "Funding Squeeze": StrategyFundingSqueeze,
+        "Rule of 7": StrategyRuleOf7,
+        "BB Mean Reversion": StrategyBollingerMR,
+        "Fakeout": StrategyFakeout,
+    }
+
+    for name, cls in strat_map.items():
+        if name in optimized_params:
+            p = optimized_params[name]
+            strategies_to_test.append(cls(**p.get("strategy_params", {})))
+        else:
+            # Дефолтные параметры если нет оптимизированных
+            if name == "Donchian": strategies_to_test.append(cls(period=20))
+            elif name == "WRD": strategies_to_test.append(cls(atr_multiplier=1.6))
+            elif name == "Vol Contraction": strategies_to_test.append(cls(lookback=300, contraction_ratio=0.6))
+            elif name == "MA Trend": strategies_to_test.append(cls(fast_ma=20, slow_ma=50, global_ma=200))
+            elif name == "Pullback": strategies_to_test.append(cls(ma_period=20, global_period=200))
+            else: strategies_to_test.append(cls())
 
     all_results = []
 
@@ -74,11 +106,17 @@ async def main():
 
             for strategy in strategies_to_test:
                 strat_name = type(strategy).__name__
+                # Получаем имя стратегии для поиска в оптимизированных параметрах
+                display_name = next((k for k, v in strat_map.items() if v == type(strategy)), strat_name)
+                
+                risk_p = optimized_params.get(display_name, {}).get("risk_params", {})
                 
                 engine = BacktestEngine(
                     initial_balance=10000.0,
                     leverage=10,
-                    strategies=[strategy]
+                    strategies=[strategy],
+                    sl_multiplier=float(risk_p.get("sl_multiplier", 2.0)),
+                    tp_multiplier=float(risk_p.get("tp_multiplier", 3.0))
                 )
                 
                 res = engine.run(raw_df.copy(), symbol=symbol)

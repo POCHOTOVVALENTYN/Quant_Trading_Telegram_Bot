@@ -12,6 +12,7 @@ from core.strategies.strategies import (
     StrategyDonchian, StrategyWRD, StrategyMATrend, StrategyPullback,
     StrategyVolContraction, StrategyWideRangeReversal, StrategyWilliamsR,
     StrategyFundingSqueeze, StrategyRuleOf7,
+    StrategyBollingerMR, StrategyFakeout,
 )
 
 async def download_data(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
@@ -58,6 +59,8 @@ async def main():
         StrategyWideRangeReversal(),
         StrategyFundingSqueeze(),
         StrategyRuleOf7(),
+        StrategyBollingerMR(),
+        StrategyFakeout(),
     ]
 
     results = []

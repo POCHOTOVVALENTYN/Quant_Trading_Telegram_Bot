@@ -27,6 +27,7 @@ from core.strategies.strategies import (
     StrategyPullback, StrategyVolContraction,
     StrategyWideRangeReversal, StrategyWilliamsR,
     StrategyFundingSqueeze, StrategyRuleOf7,
+    StrategyBollingerMR, StrategyFakeout,
     get_timeframe_seconds,
 )
 from core.strategies.meta_strategy import MetaStrategy
@@ -68,6 +69,8 @@ _STRATEGY_TIMEFRAME_MATRIX = {
     StrategyPullback: ENTRY_TIMEFRAMES | {"1h"},
     StrategyWilliamsR: ENTRY_TIMEFRAMES,
     StrategyWideRangeReversal: ENTRY_TIMEFRAMES,
+    StrategyBollingerMR: ENTRY_TIMEFRAMES | {"1h"},
+    StrategyFakeout: ENTRY_TIMEFRAMES | {"1h"},
     # Аномалии (везде)
     StrategyFundingSqueeze: TRADING_SIGNAL_TIMEFRAMES,
 }
@@ -80,11 +83,7 @@ class TradingOrchestrator:
         self.execution = execution_engine
         self.risk_manager = execution_engine.risk_manager
 
-        # Консолидированный ансамбль: 8 стратегий в 4 группах (по Швагеру)
-        # Breakout (3): Donchian, WRD, VolContraction
-        # Trend (2): MATrend, Pullback
-        # Mean Reversion (2): WilliamsR, WideRangeReversal
-        # Crypto-specific (1): FundingSqueeze
+        # Консолидированный ансамбль: 11 стратегий (по Швагеру + Новые)
         self.strategies = [
             StrategyDonchian(period=20),
             StrategyWRD(atr_multiplier=1.6),
@@ -94,7 +93,14 @@ class TradingOrchestrator:
             StrategyWilliamsR(),
             StrategyWideRangeReversal(),
             StrategyFundingSqueeze(),
+            StrategyRuleOf7(),
+            StrategyBollingerMR(),
+            StrategyFakeout(),
         ]
+        
+        # Загрузка оптимизированных параметров
+        self._apply_optimized_params()
+
         self.meta_strategy = MetaStrategy(
             adx_trend_min=float(getattr(settings, "regime_adx_trend_min", 22.0)),
             adx_flat_max=float(getattr(settings, "regime_adx_range_max", 18.0)),
@@ -142,6 +148,9 @@ class TradingOrchestrator:
         "Williams R":      2.0,
         "WRD Reversal":    2.5,
         "Funding Squeeze": 2.0,
+        "Rule of 7":       2.5,
+        "BB Mean Reversion": 2.0,
+        "Fakeout":         2.5,
     }
 
     _STRATEGY_SETUP_GROUP = {
@@ -149,6 +158,9 @@ class TradingOrchestrator:
         "MA Trend": "trend", "Pullback": "trend",
         "Williams R": "mean_reversion", "WRD Reversal": "mean_reversion",
         "Funding Squeeze": "mean_reversion",
+        "Rule of 7": "breakout",
+        "BB Mean Reversion": "mean_reversion",
+        "Fakeout": "mean_reversion",
     }
 
     # Default strategy-regime matrix (used when settings.strategy_regime_matrix is empty)
@@ -161,6 +173,9 @@ class TradingOrchestrator:
         "Williams R":        {"trend": ["RANGE", "NEUTRAL"], "volatility": ["LOW", "NORMAL"], "funding": ["*"]},
         "WRD Reversal":      {"trend": ["RANGE", "NEUTRAL"], "volatility": ["*"], "funding": ["*"]},
         "Funding Squeeze":   {"trend": ["*"], "volatility": ["HIGH", "NORMAL"], "funding": ["EXTREME_LONG", "EXTREME_SHORT"]},
+        "Rule of 7":         {"trend": ["TREND", "NEUTRAL"], "volatility": ["*"], "funding": ["*"]},
+        "BB Mean Reversion": {"trend": ["RANGE", "NEUTRAL"], "volatility": ["*"], "funding": ["*"]},
+        "Fakeout":           {"trend": ["RANGE", "NEUTRAL"], "volatility": ["*"], "funding": ["*"]},
     }
 
     @staticmethod
@@ -177,6 +192,9 @@ class TradingOrchestrator:
             "StrategyWilliamsR": "Williams R",
             "StrategyWideRangeReversal": "WRD Reversal",
             "StrategyFundingSqueeze": "Funding Squeeze",
+            "StrategyRuleOf7": "Rule of 7",
+            "StrategyBollingerMR": "BB Mean Reversion",
+            "StrategyFakeout": "Fakeout",
         }
         return mapping.get(name, name)
 
@@ -444,6 +462,51 @@ class TradingOrchestrator:
         if cascade and providers:
             adapter.enable()
         return adapter
+
+    def _apply_optimized_params(self):
+        """Применяет лучшие параметры из AI Optimizer."""
+        import json
+        import os
+        params_path = "data/optimized_parameters.json"
+        if not os.path.exists(params_path):
+            return
+
+        try:
+            with open(params_path, "r") as f:
+                optimized = json.load(f)
+            
+            strat_map = {
+                "Donchian": StrategyDonchian,
+                "WRD": StrategyWRD,
+                "Vol Contraction": StrategyVolContraction,
+                "MA Trend": StrategyMATrend,
+                "Pullback": StrategyPullback,
+                "Williams R": StrategyWilliamsR,
+                "WRD Reversal": StrategyWideRangeReversal,
+                "Funding Squeeze": StrategyFundingSqueeze,
+                "Rule of 7": StrategyRuleOf7,
+                "BB Mean Reversion": StrategyBollingerMR,
+                "Fakeout": StrategyFakeout,
+            }
+
+            new_strategies = []
+            for name, cls in strat_map.items():
+                if name in optimized:
+                    params = optimized[name].get("strategy_params", {})
+                    new_strategies.append(cls(**params))
+                else:
+                    # Fallback to default
+                    if name == "Donchian": new_strategies.append(cls(period=20))
+                    elif name == "WRD": new_strategies.append(cls(atr_multiplier=1.6))
+                    elif name == "Vol Contraction": new_strategies.append(cls(lookback=300, contraction_ratio=0.6))
+                    elif name == "MA Trend": new_strategies.append(cls(fast_ma=20, slow_ma=50, global_ma=200))
+                    elif name == "Pullback": new_strategies.append(cls(ma_period=20, global_period=200))
+                    else: new_strategies.append(cls())
+            
+            self.strategies = new_strategies
+            app_logger.info(f"✨ AI Optimizer: Загружено {len(optimized)} оптимизированных стратегий")
+        except Exception as e:
+            app_logger.error(f"❌ Ошибка загрузки оптимизированных параметров: {e}")
 
     async def start(self):
         if self.ml_classifier:

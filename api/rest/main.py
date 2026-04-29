@@ -47,8 +47,16 @@ async def lifespan(app: FastAPI):
     app_logger.info("🚀 [1/5] Инициализация базы данных...")
     try:
         from prometheus_client import start_http_server
-        start_http_server(9091)
-        app_logger.info("✅ Prometheus metrics server running on port 9091.")
+        # Пытаемся запустить на 9091, если занят — пробуем 9092 или игнорируем
+        try:
+            start_http_server(9091)
+            app_logger.info("✅ Prometheus metrics server running on port 9091.")
+        except Exception:
+            try:
+                start_http_server(9092)
+                app_logger.info("✅ Prometheus metrics server running on port 9092.")
+            except Exception:
+                app_logger.warning("⚠️ Prometheus server failed to start (port occupied), skipping.")
     except Exception as e:
         app_logger.error(f"❌ Failed to start Prometheus server: {e}")
 
@@ -102,25 +110,41 @@ async def lifespan(app: FastAPI):
         app_logger.info(f"FINAL API Key Selected: {api_key[:4]}...{api_key[-4:] if len(api_key)>4 else ''}")
     
     app_logger.info(f"Инициализация клиента Binance API (Testnet: {settings.testnet})...")
+    
+    options = {
+        'defaultType': 'future',
+        'adjustForTimeDifference': True,
+        'recvWindow': 10000,
+    }
+    
+    # КРИТИЧНО: Для Binance Futures Demo Trading (бывший Testnet) 
+    # НЕЛЬЗЯ использовать флаг 'testnet': True или .set_sandbox_mode(True), 
+    # так как CCXT считает их устаревшими для фьючерсов.
+    # Вместо этого мы вручную подменяем URLs на демо-эндпоинты.
+    
     exchange_client = ccxtpro.binance({
         'apiKey': api_key,
         'secret': secret,
         'enableRateLimit': True,
-        'options': {
-            'defaultType': 'future',
-            'adjustForTimeDifference': True,
-            'recvWindow': 10000, 
-            'fetchCurrencies': False, 'sandbox-future': True, 'types': ['future'], 'types': ['future'], # Disable SAPI-based currency loading
-        },
-        'timeout': 30000 # 30 секунд
+        'options': options,
+        'timeout': 30000 
     })
     
     if settings.testnet:
-        app_logger.info("🔮 Используем Binance DEMO Trading (новые эндпоинты)")
-        # Switch to demo URLs manually to bypass CCXT's NotSupported error
-        exchange_client.urls['api'] = exchange_client.urls['demo']
-        # Add dummy SAPI for validation bypass
-        exchange_client.urls['api']['sapi'] = "https://demo-fapi.binance.com/fapi/v1"
+        app_logger.info("🔮 Используем Binance Futures DEMO mode (Manual URL override)")
+        # Подменяем URLs на демо-сервера Binance
+        exchange_client.urls['api'] = {
+            'public': 'https://demo-api.binance.com/api/v3',
+            'private': 'https://demo-api.binance.com/api/v3',
+            'fapiPublic': 'https://demo-fapi.binance.com/fapi/v1',
+            'fapiPrivate': 'https://demo-fapi.binance.com/fapi/v1',
+            'fapiPrivateV2': 'https://demo-fapi.binance.com/fapi/v2',
+            'dapiPublic': 'https://demo-dapi.binance.com/dapi/v1',
+            'dapiPrivate': 'https://demo-dapi.binance.com/dapi/v1',
+        }
+        # Важно также подменить WS эндпоинты если используются
+        if 'ws' in exchange_client.urls:
+             exchange_client.urls['ws']['future'] = 'wss://fstream.binancefuture.com/ws'
     
     
     app_logger.info(f"API URLs: {exchange_client.urls}")

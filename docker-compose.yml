@@ -58,35 +58,35 @@ services:
     volumes:
       - redis_data:/data
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: quant_ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          memory: 4G
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: quant_ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         memory: 4G
 
-  ml-worker:
-    build: *app-build
-    container_name: quant_ml_worker
-    restart: unless-stopped
-    env_file:
-      - .env
-    depends_on:
-      - redis
-      - postgres
-    volumes:
-      - .:/app
-    command: python -m services.ml_worker.worker
-    deploy:
-      resources:
-        limits:
-          memory: 1G
+  # ml-worker:
+  #   build: *app-build
+  #   container_name: quant_ml_worker
+  #   restart: unless-stopped
+  #   env_file:
+  #     - .env
+  #   depends_on:
+  #     - redis
+  #     - postgres
+  #   volumes:
+  #     - .:/app
+  #   command: python -m services.ml_worker.worker
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 1G
 
   market-data:
     build: *app-build

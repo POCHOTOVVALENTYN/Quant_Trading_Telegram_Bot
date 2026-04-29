@@ -1,20 +1,111 @@
 {
-  "Donchian": {
-    "params": {
-      "period": 10
+    "Donchian": {
+        "strategy_params": {
+            "period": 26
+        },
+        "risk_params": {
+            "sl_multiplier": 1.8366,
+            "tp_multiplier": 2.3891
+        }
     },
-    "sharpe_train": 0.0677,
-    "sharpe_test": 0,
-    "total_trades": 13,
-    "final_pnl": 139.17
-  },
-  "WRD": {
-    "params": {
-      "atr_multiplier": 1.606
+    "WRD": {
+        "strategy_params": {
+            "atr_multiplier": 1.6076
+        },
+        "risk_params": {
+            "sl_multiplier": 1.5909,
+            "tp_multiplier": 2.3207
+        }
     },
-    "sharpe_train": 0.0649,
-    "sharpe_test": 0.805,
-    "total_trades": 13,
-    "final_pnl": 441.03
-  }
+    "MA Trend": {
+        "strategy_params": {
+            "fast_ma": 20,
+            "slow_ma": 50,
+            "global_ma": 200,
+            "long_rsi_max": 70.0,
+            "short_rsi_min": 30.0
+        },
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    },
+    "Pullback": {
+        "strategy_params": {
+            "ma_period": 19,
+            "global_period": 224
+        },
+        "risk_params": {
+            "sl_multiplier": 1.8,
+            "tp_multiplier": 2.7243
+        }
+    },
+    "Vol Contraction": {
+        "strategy_params": {
+            "lookback": 236,
+            "contraction_ratio": 0.5485
+        },
+        "risk_params": {
+            "sl_multiplier": 2.3644,
+            "tp_multiplier": 3.7003
+        }
+    },
+    "WRD Reversal": {
+        "strategy_params": {},
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    },
+    "Williams R": {
+        "strategy_params": {
+            "overbought": -20.0,
+            "oversold": -80.0,
+            "long_rsi_max": 45.0,
+            "short_rsi_min": 55.0
+        },
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    },
+    "Funding Squeeze": {
+        "strategy_params": {
+            "funding_threshold": 0.015,
+            "short_rsi_reentry": 70.0,
+            "long_rsi_reentry": 30.0
+        },
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    },
+    "Rule of 7": {
+        "strategy_params": {
+            "bars": 7
+        },
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    },
+    "BB Mean Reversion": {
+        "strategy_params": {
+            "period": 20,
+            "std_dev": 2.0
+        },
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    },
+    "Fakeout": {
+        "strategy_params": {
+            "period": 20
+        },
+        "risk_params": {
+            "sl_multiplier": 2.0,
+            "tp_multiplier": 3.0
+        }
+    }
 }

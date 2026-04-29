@@ -3,6 +3,12 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
+import os
+from dotenv import load_dotenv
+
+# Явная загрузка .env для Alembic
+load_dotenv(".env")
+
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -23,7 +29,16 @@ target_metadata = Base.metadata
 
 def _set_sqlalchemy_url():
     # Use app settings instead of placeholder in alembic.ini
-    config.set_main_option("sqlalchemy.url", settings.database_url)
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        url = settings.database_url
+    
+    # Убираем кавычки, если они есть
+    if url.startswith('"') and url.endswith('"'):
+        url = url[1:-1]
+        
+    print(f"DEBUG: Alembic using URL: {url}")
+    config.set_main_option("sqlalchemy.url", url)
 
 
 def run_migrations_offline() -> None:
@@ -42,7 +57,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection, 
+        target_metadata=target_metadata, 
+        compare_type=True,
+        render_as_batch=True  # КРИТИЧНО для SQLite (позволяет изменять таблицы)
+    )
 
     with context.begin_transaction():
         context.run_migrations()
@@ -50,6 +70,25 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_migrations_online() -> None:
     _set_sqlalchemy_url()
+    
+    # Для SQLite проверяем наличие файла и создаем базу через metadata если его нет
+    url = config.get_main_option("sqlalchemy.url")
+    if url.startswith("sqlite"):
+        db_path = url.replace("sqlite+aiosqlite:///", "")
+        if not os.path.exists(db_path):
+            print(f"📦 SQLite: Initializing new database at {db_path}...")
+            from sqlalchemy.ext.asyncio import create_async_engine
+            temp_engine = create_async_engine(url)
+            async with temp_engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            await temp_engine.dispose()
+            
+            # В SQLite при первой инициализации мы не можем использовать alembic stamp 
+            # изнутри асинхронного цикла из-за рекурсии. 
+            # Просто выходим — база уже создана со всеми актуальными таблицами.
+            print("✅ Database tables created directly from models.")
+            return
+
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
