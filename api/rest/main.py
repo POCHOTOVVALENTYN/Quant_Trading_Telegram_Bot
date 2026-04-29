@@ -115,6 +115,7 @@ async def lifespan(app: FastAPI):
         'defaultType': 'future',
         'adjustForTimeDifference': True,
         'recvWindow': 10000,
+        'fetchCurrencies': False,
     }
     
     # КРИТИЧНО: Для Binance Futures Demo Trading (бывший Testnet) 
@@ -145,6 +146,12 @@ async def lifespan(app: FastAPI):
         # Важно также подменить WS эндпоинты если используются
         if 'ws' in exchange_client.urls:
              exchange_client.urls['ws']['future'] = 'wss://fstream.binancefuture.com/ws'
+        
+        # K4: Отключаем загрузку валют (sapi), так как в Testnet/Demo нет SAPI эндпоинтов
+        exchange_client.has['fetchCurrencies'] = False
+        exchange_client.has['fetchTradingFees'] = False
+        exchange_client.has['fetchAccounts'] = False
+        exchange_client.has['fetchStandardConfig'] = False
     
     
     app_logger.info(f"API URLs: {exchange_client.urls}")
