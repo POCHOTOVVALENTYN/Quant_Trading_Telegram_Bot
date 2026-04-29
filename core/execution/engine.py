@@ -21,6 +21,7 @@ from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_b
 from core.audit.audit_trail import AuditTrail
 from core.risk.risk_manager import RiskManager, TimeExitSystem, PyramidingSystem
 from core.position.position_manager import PositionManager, PositionState
+from core.execution.trade_guard import TradeGuard
 from core.pnl.pnl_calculator import PnLCalculator
 try:
     from utils.metrics import (
@@ -54,7 +55,7 @@ class ExecutionEngine:
         
         self.risk_manager = risk_manager
         self.pyramiding = PyramidingSystem()
-        self.time_exit = TimeExitSystem()
+        self.trade_guard = TradeGuard()
 
         self._symbol_locks: Dict[str, asyncio.Lock] = {}
         
@@ -123,6 +124,26 @@ class ExecutionEngine:
         if symbol not in self._symbol_locks:
             self._symbol_locks[symbol] = asyncio.Lock()
         return self._symbol_locks[symbol]
+
+    async def get_active_trade(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Thread-safe retrieval of a trade from active_trades."""
+        async with self._trades_lock:
+            return self.active_trades.get(symbol)
+
+    async def update_active_trade(self, symbol: str, data: Dict[str, Any]):
+        """Thread-safe update of a trade in active_trades."""
+        async with self._trades_lock:
+            self.active_trades[symbol] = data
+
+    async def remove_active_trade(self, symbol: str):
+        """Thread-safe removal of a trade from active_trades."""
+        async with self._trades_lock:
+            self.active_trades.pop(symbol, None)
+
+    async def get_all_active_trades(self) -> Dict[str, Dict[str, Any]]:
+        """Thread-safe retrieval of all active trades (returns a copy)."""
+        async with self._trades_lock:
+            return dict(self.active_trades)
 
     def _record_entry_failure(self, reason: str) -> None:
         try:
@@ -910,21 +931,27 @@ class ExecutionEngine:
             reduce_side = "SELL" if side.upper() == "BUY" else "BUY"
             ref_price = await self._get_reference_price(symbol)
 
-            # Dedup перед постановкой новой защиты:
-            # удаляем конфликтующие closePosition/GTE ордера того же reduce-side,
-            # чтобы избежать -4130 (existing open stop/tp in direction).
+            # Dedup: only cancel existing orders of the same type we are placing
+            # to avoid -4130 and reduce API load.
             try:
                 raw_existing = await self._with_time_sync_retry(
                     lambda: self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': clean_sym}),
                     ctx=f"protective_dedup.openAlgoOrders({symbol})"
                 )
                 existing = raw_existing.get("algoOrders", []) if isinstance(raw_existing, dict) else (raw_existing if isinstance(raw_existing, list) else [])
+                
                 for eo in existing:
                     eo_type = str(eo.get("type", "")).upper()
                     algo_id = eo.get("algoId")
-                    if not algo_id:
-                        continue
-                    if ("STOP" in eo_type) or ("TAKE_PROFIT" in eo_type):
+                    if not algo_id: continue
+                    
+                    should_cancel = False
+                    if sl is not None and ("STOP" in eo_type):
+                        should_cancel = True
+                    if tp is not None and ("TAKE_PROFIT" in eo_type):
+                        should_cancel = True
+                        
+                    if should_cancel:
                         try:
                             await self._with_time_sync_retry(
                                 lambda: self.exchange.request(
@@ -1353,9 +1380,35 @@ class ExecutionEngine:
                         "strategy": prev_trade.get("strategy", "unknown"),
                         "timeframe": prev_trade.get("timeframe", "1h"),
                     }
+                    
+                    # Restore persistent state from DB metadata
+                    if dbp.metadata and isinstance(dbp.metadata, dict):
+                        meta = dbp.metadata
+                        new_active[symbol].update({
+                            "be_armed": meta.get("be_armed", False),
+                            "partial_done": meta.get("partial_done", False),
+                            "max_favorable_r": meta.get("max_favorable_r", 0.0),
+                            "max_adverse_r": meta.get("max_adverse_r", 0.0),
+                            "setup_group": meta.get("setup_group", "trend"),
+                            "breakout_level": meta.get("breakout_level"),
+                            "invalidation_level": meta.get("invalidation_level"),
+                        })
+                    else:
+                        # Fallback for legacy rows or missing metadata
+                        new_active[symbol].update({
+                            "be_armed": False,
+                            "partial_done": False,
+                            "max_favorable_r": 0.0,
+                            "max_adverse_r": 0.0,
+                        })
 
                 # Подмена словаря под локом теперь после формирования new_active
                 async with self._trades_lock:
+                    # Preserve anything that was added to active_trades during the awaits (e.g. PENDING from execute_signal)
+                    for sym, trade in self.active_trades.items():
+                        if sym not in new_active and trade.get("stage") == "PENDING_EXECUTION":
+                            new_active[sym] = trade
+                    
                     self.active_trades = new_active
                     logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
 
@@ -1413,8 +1466,6 @@ class ExecutionEngine:
                             await self._db_mark_order_canceled(str(oid))
                         except Exception:
                             logger.warning(f"⚠️ [ORPHAN] Could not cancel {oid} for {orphan_sym}: {e}")
-
-            self.active_trades = new_active
 
             # Cleanup stale PENDING/EXECUTING signals older than 10 minutes
             try:
@@ -1778,6 +1829,9 @@ class ExecutionEngine:
                     "last_mgmt_bar_ts": 0.0,
                 }
                 
+                # Persist initial metadata to survive restarts
+                await self._sync_trade_state_to_db(symbol)
+                
                 # Обновляем сигнал в БД как EXECUTED
                 async with async_session() as session:
                     await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED"))
@@ -1859,41 +1913,29 @@ class ExecutionEngine:
     async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None, cvd_val: float = 0.0):
         """Вызывается каждую минуту для трейлинга и trade management."""
         async with self._get_symbol_lock(symbol):
-            async with self._trades_lock: # Блокируем чтение
+            async with self._trades_lock:
                 if symbol not in self.active_trades: return
                 trade = self.active_trades[symbol]
-                trade['current_price'] = current_price
-                live_size, _ = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
-                if live_size <= 1e-8:
-                    await self._close_position(symbol, reason="EXTERNAL")
-                    return
-                if abs(live_size - float(trade.get("current_size", 0.0))) > 1e-8:
-                    trade["current_size"] = live_size
-                    async with async_session() as session:
-                        await session.execute(
-                            update(PositionModel)
-                            .where(PositionModel.id == trade["position_db_id"])
-                            .values(size=float(live_size))
-                        )
-                        await session.commit()
-                            
-            # Trade management cycle (invalidation, time stop, partial); стоп — ниже, unified pipeline
+                
+            # 2. Trade management cycle (invalidation, time stop, partial, BE arming)
             try:
                 await self.evaluate_position_management(symbol, current_price, atr, adx=adx, df_tf=df_tf, cvd_val=cvd_val)
             except Exception as e:
                 logger.debug(f"[TM] {symbol}: management cycle error: {e}")
+            
             if symbol not in self.active_trades:
                 return
             trade = self.active_trades[symbol]
 
-            # Единый расчёт и одно обновление защитного стопа за тик (ATR + confirmed + BE).
+            # 3. Stop-Loss calculation and update (ATR + BE)
             try:
-                desired_stop, stop_src = self._compute_unified_desired_stop(
-                    trade, current_price, atr, adx, df_tf
+                desired_stop = self.trade_guard.compute_desired_stop(
+                    trade, current_price, atr, adx
                 )
-                await self._apply_unified_protective_stop(
-                    symbol, trade, desired_stop, stop_src, current_price
-                )
+                if desired_stop:
+                    await self._apply_unified_protective_stop(
+                        symbol, trade, desired_stop, "TRADE_GUARD", current_price
+                    )
             except Exception as e:
                 logger.warning(f"[UNIFIED_STOP] {symbol}: {e}")
 
@@ -1986,120 +2028,7 @@ class ExecutionEngine:
 
     # ─── Trade Management (loss minimization) ───────────────────────────
 
-    def _tm_record(self, action: str) -> None:
-        try:
-            if trade_mgmt_events:
-                trade_mgmt_events.labels(action=action).inc()
-        except Exception:
-            pass
 
-    @staticmethod
-    def _better_stop_for_side(is_long: bool, a: float, b: float) -> float:
-        """Return the more protective stop: higher for LONG, lower for SHORT."""
-        if is_long:
-            return max(a, b)
-        return min(a, b)
-
-    def _compute_unified_desired_stop(
-        self,
-        trade: Dict[str, Any],
-        current_price: float,
-        atr: float,
-        adx: Optional[float],
-        df_tf: Any,
-    ) -> Tuple[float, str]:
-        """
-        Single computation for protective stop: ATR trailing (2.5x) + optional confirmed trail (2.0x)
-        + break-even when 1R and confirmation. No exchange calls.
-        """
-        side = str(trade.get("signal_type", "")).upper()
-        is_long = side == "LONG"
-        current_stop = float(trade.get("stop") or 0)
-        entry = float(trade.get("entry") or 0)
-        initial_stop = float(trade.get("initial_stop", trade.get("stop")) or 0)
-
-        if entry <= 0 or current_stop <= 0:
-            return current_stop, "unchanged"
-
-        atr_safe = float(atr or 0.0)
-        if atr_safe <= 0:
-            best = current_stop
-            src = "unchanged"
-        else:
-            best = self.risk_manager.calculate_trailing_stop(
-                current_stop, current_price, atr_safe, side, multiplier=2.5
-            )
-            src = "atr_trail"
-
-            current_r = self.risk_manager.current_r_multiple(entry, initial_stop, current_price, side)
-            if (
-                settings.confirmed_trailing_enabled
-                and trade.get("be_armed")
-                and current_r >= float(settings.confirmed_trailing_min_r)
-                and df_tf is not None
-                and not getattr(df_tf, "empty", True)
-                and len(df_tf) >= 2
-            ):
-                last_bar = df_tf.iloc[-2]
-                bar_ts = last_bar.get("timestamp", 0)
-                try:
-                    bar_ts = float(bar_ts.timestamp()) if hasattr(bar_ts, "timestamp") else float(bar_ts)
-                except Exception:
-                    bar_ts = 0
-                if bar_ts > float(trade.get("last_mgmt_bar_ts", 0)):
-                    bar_dict = {
-                        "open": float(last_bar.get("open", 0)),
-                        "close": float(last_bar.get("close", 0)),
-                        "high": float(last_bar.get("high", 0)),
-                        "low": float(last_bar.get("low", 0)),
-                    }
-                    if self.risk_manager.favorable_bar_confirmed(bar_dict, side):
-                        trail_conf = self.risk_manager.calculate_trailing_stop(
-                            current_stop, current_price, atr_safe, side, multiplier=2.0
-                        )
-                        best = self._better_stop_for_side(is_long, best, trail_conf)
-                        src = "confirmed_trail"
-                    trade["last_mgmt_bar_ts"] = bar_ts
-
-        if not trade.get("be_moved", False):
-            risk_distance = abs(entry - initial_stop)
-            atr_for_breakout = max(atr_safe, 0.0)
-            breakout_dist = max(atr_for_breakout * 0.5, entry * 0.0015 if entry > 0 else 0.0)
-            adx_ok = (adx is not None) and (float(adx) >= 20.0)
-            if entry > 0 and risk_distance > 0 and side in ("LONG", "SHORT"):
-                if side == "LONG":
-                    reached_1r = current_price >= (entry + risk_distance)
-                    breakout_ok = current_price >= (entry + breakout_dist)
-                else:
-                    reached_1r = current_price <= (entry - risk_distance)
-                    breakout_ok = current_price <= (entry - breakout_dist)
-                if reached_1r and (adx_ok or breakout_ok):
-                    be_stop = float(
-                        RiskManager.break_even_price(entry, side, float(getattr(settings, "be_buffer_pct", 0.0004) or 0.0004))
-                    )
-                    new_best = self._better_stop_for_side(is_long, best, be_stop)
-                    if abs(new_best - best) > 1e-12:
-                        best = new_best
-                        src = "break_even" if src == "unchanged" else f"{src}+be"
-                        trade["be_moved"] = True
-
-        # --- Professional EMA20 Trailing (Scaling Out Phase) ---
-        if trade.get("trailing_active") and df_tf is not None and not getattr(df_tf, "empty", True) and len(df_tf) >= 20:
-            try:
-                # Use pandas to calculate EMA20 accurately
-                ema_series = df_tf['close'].ewm(span=20, adjust=False).mean()
-                ema20 = float(ema_series.iloc[-1])
-                # We normalize it for check consistency
-                ema20_norm = float(Decimal(str(ema20)).quantize(Decimal('0.00000001'), rounding=ROUND_HALF_UP))
-                
-                new_best = self._better_stop_for_side(is_long, best, ema20_norm)
-                if abs(new_best - best) > 1e-12:
-                    best = new_best
-                    src = "ema20_trail"
-            except Exception as e:
-                logger.error(f"Error calculating EMA trailing: {e}")
-
-        return best, src
 
     async def _apply_unified_protective_stop(
         self,
@@ -2392,20 +2321,7 @@ class ExecutionEngine:
             logger.error(f"Error in TM partial reduce for {symbol}: {e}")
             return False
 
-    async def _move_to_breakeven(self, symbol: str, trade: dict):
-        """Moves STOP LOSS to entry price to eliminate risk."""
-        try:
-            entry = trade.get("entry")
-            if not entry: return
-            
-            be_price = entry
-            await self._update_stop_order_only(symbol, trade, be_price)
-            
-            logger.info(f"✅ [PROTECT] {symbol} moved to BREAK EVEN at {be_price}")
-            await send_telegram_msg(f"🛡 **BREAK EVEN**\n`{symbol}` стоп переставлен в безубыток ({be_price})")
-        except Exception as e:
-            logger.error(f"Error moving to BE for {symbol}: {e}")
-            return False
+
 
     async def evaluate_position_management(
         self,
@@ -2438,15 +2354,58 @@ class ExecutionEngine:
         trade["max_favorable_r"] = max(float(trade.get("max_favorable_r", 0)), current_r)
         trade["max_adverse_r"] = min(float(trade.get("max_adverse_r", 0)), current_r)
 
-        trade["max_adverse_r"] = min(float(trade.get("max_adverse_r", 0)), current_r)
+        # Evaluate using TradeGuard component
+        tm_res = self.trade_guard.evaluate_management(
+            trade, current_price, current_r, adx, df_tf, cvd_val
+        )
 
-        # 1. Setup invalidation exit
+        # Handle Actions
+        if tm_res["action"] == "CLOSE":
+            reason = tm_res.get("reason", "AUTO")
+            logger.info(f"🛑 [TM-EXIT] {symbol} {side}: reason={reason}, R={current_r:.2f}, closing")
+            
+            # Metrics
+            if trade_mgmt_r_at_exit: trade_mgmt_r_at_exit.observe(current_r)
+            if trade_mgmt_max_favorable_r: trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
+            
+            # Notifier
+            msg_map = {
+                "INVALIDATION": ("⚠️ **ИНВАЛИДАЦИЯ СЕТАПА**", "досрочно"),
+                "TIME_MGMT": ("⏰ **ТАЙМСТОП**", "по таймауту"),
+                "VOLSPIKE": ("🚀 **VOLSPIKE EXIT**", "профит зафиксирован")
+            }
+            title, suffix = msg_map.get(reason, ("🛑 **TM EXIT**", "закрыта"))
+            await send_telegram_msg(f"{title}\n\n🔹 Символ: `{symbol}`\n📊 R: `{current_r:.2f}`\n🔴 Позиция {suffix}")
+            
+            await self._close_position(symbol, reason=reason)
+            return
+
+        if tm_res["action"] == "PARTIAL":
+            # Partial reduction logic remains here because it interacts with the exchange
+            success = await self._tm_partial_reduce(symbol, trade, current_r)
+            if success:
+                trade["partial_done"] = True
+                await self._sync_trade_state_to_db(symbol)
+
+        # Sync persistent state if TradeGuard changed it
+        if tm_res.get("be_armed") != trade.get("be_armed"):
+            trade["be_armed"] = tm_res["be_armed"]
+            await self._sync_trade_state_to_db(symbol)
 
     async def _update_stop_order_only(self, symbol: str, trade: dict, new_price: float):
         """Cancels ONLY the current Stop-Loss and places a new one at new_price."""
         try:
             sl_id = trade.get("stop_order_id")
+            old_price = float(trade.get("stop", 0))
             clean_sym = symbol.replace("/", "").split(":")[0]
+            
+            new_price_norm = await self._normalize_price(symbol, new_price)
+            
+            # 0. Skip if change is negligible (< 0.02% of price)
+            if old_price > 0:
+                diff_pct = abs(new_price_norm - old_price) / old_price
+                if diff_pct < 0.0002:
+                    return
             
             # 1. Cancel old SL if exists
             if sl_id:
@@ -2465,7 +2424,6 @@ class ExecutionEngine:
             lot_size, _ = await self._get_live_position(symbol, preferred_side=side)
             if lot_size <= 0: return
 
-            new_price_norm = await self._normalize_price(symbol, new_price)
             new_sl_id, _ = await self._set_protective_orders(
                 symbol, side, lot_size, new_price_norm, tp=None, position_id=trade.get("position_db_id")
             )
@@ -2477,78 +2435,35 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Error in _update_stop_order_only for {symbol}: {e}")
 
-        # 1. Setup invalidation exit
-        if self._tm_should_invalidation_exit(trade, current_price, df_tf):
-            self._tm_record("invalidation_exit")
-            if trade_mgmt_r_at_exit:
-                trade_mgmt_r_at_exit.observe(current_r)
-            if trade_mgmt_max_favorable_r:
-                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
-            logger.info(
-                f"⚠️ [TM-INVALIDATION] {symbol} {side}: setup invalidated at {current_r:.2f}R, closing"
-            )
-            await send_telegram_msg(
-                f"⚠️ **ИНВАЛИДАЦИЯ СЕТАПА**\n\n"
-                f"🔹 Символ: `{symbol}`\n"
-                f"📊 R: `{current_r:.2f}` | Группа: `{trade.get('setup_group')}`\n"
-                f"🔴 Позиция закрыта досрочно"
-            )
-            await self._close_position(symbol, reason="INVALIDATION")
-            return
-
-        # 2. Time stop
-        if self._tm_should_time_stop(trade, current_price):
-            self._tm_record("time_stop")
-            if trade_mgmt_r_at_exit:
-                trade_mgmt_r_at_exit.observe(current_r)
-            if trade_mgmt_max_favorable_r:
-                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
-            logger.info(
-                f"⏰ [TM-TIMESTOP] {symbol} {side}: bars={trade.get('bars_since_entry', 0)}, "
-                f"R={current_r:.2f}, closing"
-            )
-            await send_telegram_msg(
-                f"⏰ **ТАЙМСТОП**\n\n"
-                f"🔹 Символ: `{symbol}`\n"
-                f"📊 Баров: `{trade.get('bars_since_entry', 0)}` | R: `{current_r:.2f}`\n"
-                f"🔴 Позиция закрыта по таймауту"
-            )
-            await self._close_position(symbol, reason="TIME_MGMT")
-            return
-
-        # 3. Break-even (arm flag, actual BE move happens in schedule_update_positions)
-        if self._tm_should_arm_break_even(trade, current_r, adx):
-            if not trade.get("be_armed"):
-                trade["be_armed"] = True
-                self._tm_record("be_move")
-                logger.info(f"🔰 [TM-BE-ARM] {symbol} {side}: armed BE at {current_r:.2f}R")
-
-        # 3.1 CVD-based BE (Advanced Phase 4)
-        # If CVD shows strong reversal (delta > 0.7 against us) and we are in profit, protect at BE
-        is_in_profit = (current_price > entry) if side == "LONG" else (current_price < entry)
-        if not trade.get("be_armed") and is_in_profit:
-            cvd_threshold = 0.7
-            should_cvd_be = (side == "LONG" and cvd_val < -cvd_threshold) or (side == "SHORT" and cvd_val > cvd_threshold)
-            if should_cvd_be:
-                trade["be_armed"] = True
-                self._tm_record("be_cvd")
-                logger.info(f"🔰 [TM-BE-CVD] {symbol} {side}: armed BE due to CVD reversal ({cvd_val:.2f})")
-
-        # 3.2 Volspike Exhaustion Exit (Advanced Phase 4)
-        if df_tf is not None and not df_tf.empty and current_r >= 1.0:
-            last_vol = float(df_tf.iloc[-1].get("volume", 0))
-            avg_vol = float(df_tf["volume"].tail(20).mean())
-            if avg_vol > 0 and last_vol > avg_vol * 5.0: # 5x volume spike
-                logger.info(f"🚀 [TM-VOLSPIKE] {symbol} {side}: volume exhaustion {last_vol/avg_vol:.1f}x avg, closing at {current_r:.2f}R")
-                await send_telegram_msg(f"🚀 **VOLSPIKE EXIT**\n`{symbol}`: Volume spike {last_vol/avg_vol:.1f}x -> profit locked")
-                await self._close_position(symbol, reason="VOLSPIKE")
-                return
-
-        # 4. Partial reduction
-        if not trade.get("partial_done") and current_r >= settings.partial_trigger_r:
-            await self._tm_partial_reduce(symbol, trade, current_r)
-
         # Confirmed trailing + ATR trail + BE: см. _compute_unified_desired_stop / schedule_update_positions
+        
+    async def _sync_trade_state_to_db(self, symbol: str):
+        """Persists trade metadata (BE, partials, R-multiples) to Database."""
+        if symbol not in self.active_trades: return
+        trade = self.active_trades[symbol]
+        pos_id = trade.get("position_db_id")
+        if not pos_id: return
+        
+        metadata = {
+            "be_armed": trade.get("be_armed", False),
+            "partial_done": trade.get("partial_done", False),
+            "max_favorable_r": float(trade.get("max_favorable_r", 0.0)),
+            "max_adverse_r": float(trade.get("max_adverse_r", 0.0)),
+            "setup_group": trade.get("setup_group"),
+            "breakout_level": trade.get("breakout_level"),
+            "invalidation_level": trade.get("invalidation_level"),
+        }
+        
+        try:
+            async with async_session() as session:
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.id == pos_id)
+                    .values(metadata=metadata)
+                )
+                await session.commit()
+        except Exception as e:
+            logger.error(f"Error syncing trade metadata for {symbol}: {e}")
 
     async def _close_position(self, symbol: str, reason: str = "AUTO"):
         if symbol not in self.active_trades: return

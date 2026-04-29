@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     default_exchange: str = "binance"
     testnet: bool = True
     is_trading_enabled: bool = True # Глобальный вкл/выкл
+    trading_engine_url: str = "http://localhost:8000" # URL для REST API движка
     api_timeout_seconds: float = 5.0 # Стандарт из статьи (контроль зависших запросов)
     
     # Market Data

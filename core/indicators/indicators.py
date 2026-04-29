@@ -79,8 +79,10 @@ def calculate_csi(df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
     
     # 4. Range Z-score (Нормализация волатильности)
     range_val = (df['high'] - df['low'])
-    # Берём Z-score для последних 100 свечей для стабильности (не всего df)
-    range_z = range_val.rolling(100).apply(lambda x: (x.iloc[-1] - x.mean()) / x.std() if x.std() > 0 else 0).fillna(0)
+    rolling_mean = range_val.rolling(100).mean()
+    rolling_std = range_val.rolling(100).std()
+    range_z = (range_val - rolling_mean) / rolling_std.replace(0, np.nan)
+    range_z = range_z.fillna(0)
     
     # 5. ATR (Упрощенный для CSI)
     tr = pd.DataFrame({

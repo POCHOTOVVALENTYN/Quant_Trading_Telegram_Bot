@@ -687,22 +687,24 @@ class TradingOrchestrator:
                 cvd_val = self.cvd_tracker.get_cvd_normalized(symbol) if self.cvd_tracker else 0.0
                 asyncio.create_task(self.execution.schedule_update_positions(symbol, current_price, atr, adx, df_tf=trade_tf, cvd_val=cvd_val))
 
-        if len(df) < 60:
-            return
+        # 2. Обработка сигналов (в фоновой задаче, чтобы не блокировать поток данных)
+        if timeframe in TRADING_SIGNAL_TIMEFRAMES:
+            if len(df) >= 60:
+                asyncio.create_task(self._evaluate_signals_task(symbol, timeframe, df.copy()))
+        else:
+            # Для не-сигнальных ТФ (например, 1m) считаем минимальные индикаторы (ATR) сразу,
+            # так как они нужны для трейлинга в реальном времени.
+            self.market_history[symbol][timeframe] = self._calculate_indicators(df, minimal=True)
 
+        return
+
+    async def _evaluate_signals_task(self, symbol: str, timeframe: str, df: pd.DataFrame):
         try:
-            await asyncio.sleep(0.05)
-            self.processed_candles += 1
-            
             # Оптимизация: Считаем все индикаторы только для сигнальных ТФ
-            is_signal_tf = timeframe in TRADING_SIGNAL_TIMEFRAMES
-            df = self._calculate_indicators(df, minimal=not is_signal_tf)
+            df = self._calculate_indicators(df, minimal=False)
             
             df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
             self.market_history[symbol][timeframe] = df
-
-            if not is_signal_tf:
-                return
 
             # Сигналы только по закрытым свечам
             if len(df) < 2:
@@ -710,11 +712,6 @@ class TradingOrchestrator:
             df_eval = df.iloc[:-1].copy()
             if len(df_eval) < 60:
                 return
-            # df_eval уже содержит индикаторы из df выше 
-            # (но только если мы не в 1m)
-            # Если мы в signal timeframe, df уже полностью посчитан.
-            # Если нет - мы уже вышли выше.
-            # Так что df_eval уже готов.
 
             eval_candle_ts = df_eval.iloc[-1]['timestamp']
             try:
@@ -1133,10 +1130,18 @@ class TradingOrchestrator:
                                 "trend": "UP" if df_eval.iloc[-1]['close'] > df_eval.iloc[-1].get('ema50', 0) else "DOWN"
                             }
                             _ai_start = time.time()
-                            ext_result = await self.external_ai.analyze_signal(
-                                {**signal, "score": score, "stop_loss": None, "take_profit": None},
-                                market_ctx
-                            )
+                            try:
+                                ext_result = await asyncio.wait_for(
+                                    self.external_ai.analyze_signal(
+                                        {**signal, "score": score, "stop_loss": None, "take_profit": None},
+                                        market_ctx
+                                    ),
+                                    timeout=15.0
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(f"⏳ [AI] Timeout for {symbol} ({timeframe}) after 15s, skipping AI filter")
+                                ext_result = {"recommendation": "PASS", "confidence": 0.0, "reasoning": "timeout"}
+                            
                             _ai_ms = int((time.time() - _ai_start) * 1000)
                             provider_name = ext_result.get("provider", "?")
                             rec = ext_result.get("recommendation", "PASS")
@@ -1390,6 +1395,13 @@ class TradingOrchestrator:
                 )
 
     def _calculate_indicators(self, df: pd.DataFrame, minimal: bool = False) -> pd.DataFrame:
+        # Оптимизация: если последняя свеча та же и индикаторы уже есть - пропускаем (для тиков)
+        if len(df) > 1 and 'atr' in df.columns:
+            # Если мы только обновили цену последней свечи, пересчет всего DF не обязателен, 
+            # но для точности индикаторов (особенно EWM) мы пока пересчитываем.
+            # В будущем здесь можно добавить инкрементальный расчет.
+            pass
+
         if minimal:
             df['atr'] = calculate_atr(df, period=14)
             adx_df = calculate_adx(df, period=14)

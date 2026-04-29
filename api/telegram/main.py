@@ -23,7 +23,7 @@ async def get_http_client(*args, **kwargs):
 
 from collections import defaultdict
 
-ENGINE_URL = "http://localhost:8000" # URL для локального запуска
+ENGINE_URL = settings.trading_engine_url # URL движка из настроек
 
 BTN_AUTOTRADE_SETTINGS = "⚙️ Настройки автоторговли"
 BTN_API_SETTINGS = "⚙️ Настройки API"

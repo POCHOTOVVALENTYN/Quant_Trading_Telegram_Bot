@@ -56,6 +56,7 @@ class Position(Base):
     opened_at = Column(DateTime, default=datetime.datetime.utcnow)
     closed_at = Column(DateTime, nullable=True)
     realized_pnl = Column(Float, default=0.0)
+    metadata = Column(JSON, nullable=True) # Доп. метаданные (BE armed, partials, max_r и т.д.)
 
 class PnLRecord(Base):
     __tablename__ = "pnl_records"
