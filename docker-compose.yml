@@ -9,6 +9,7 @@ services:
     build: *app-build
     container_name: quant_telegram_bot
     restart: unless-stopped
+    profiles: ["prod", "dev"]
     env_file:
       - .env
     depends_on:
@@ -23,6 +24,7 @@ services:
     build: *app-build
     container_name: quant_trading_engine
     restart: unless-stopped
+    profiles: ["prod", "dev"]
     ports:
       - "8000:8000"
       - "8001:8001"
@@ -92,6 +94,7 @@ services:
     build: *app-build
     container_name: quant_market_data
     restart: unless-stopped
+    profiles: ["prod", "dev"]
     env_file:
       - .env
     depends_on:
@@ -104,6 +107,7 @@ services:
     image: prom/prometheus:v2.51.0
     container_name: quant_prometheus
     restart: unless-stopped
+    profiles: ["prod", "dev"]
     ports:
       - "9090:9090"
     volumes:
@@ -119,6 +123,7 @@ services:
     image: grafana/grafana:10.4.1
     container_name: quant_grafana
     restart: unless-stopped
+    profiles: ["prod", "dev"]
     ports:
       - "3000:3000"
     environment:

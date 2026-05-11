@@ -5,6 +5,7 @@ from typing import List, Callable, Any, Dict
 import redis.asyncio as aioredis
 from config.settings import settings
 from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_binance_retry
+from utils.symbol_normalizer import SymbolNormalizer
 
 _log = logging.getLogger("market_data_client")
 
@@ -14,7 +15,8 @@ class MarketDataClient:
     Compatible with MarketDataService interface for callbacks.
     """
     def __init__(self, symbols: List[str], timeframes: List[str], exchange=None):
-        self.symbols = symbols
+        # Нормализуем список символов при инициализации
+        self.symbols = [SymbolNormalizer.normalize(s) for s in symbols]
         self.timeframes = timeframes
         self.callbacks: List[Callable] = []
         self.redis: aioredis.Redis = None

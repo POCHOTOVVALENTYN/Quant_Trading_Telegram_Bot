@@ -5,6 +5,7 @@ import traceback
 from typing import Dict, Any, List, Optional, Tuple
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from database.session import async_session
@@ -17,11 +18,13 @@ from database.models.all_models import (
 from config.settings import settings
 from utils.logger import get_execution_logger
 from utils.notifier import send_telegram_msg
-from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_binance_retry
+from utils.binance_api import BinanceCallPolicy, BinanceRateLimiter, call_with_binance_retry, BinanceUnknownStatusError
+from utils.symbol_normalizer import SymbolNormalizer
 from core.audit.audit_trail import AuditTrail
 from core.risk.risk_manager import RiskManager, TimeExitSystem, PyramidingSystem
 from core.position.position_manager import PositionManager, PositionState
 from core.pnl.pnl_calculator import PnLCalculator
+from core.execution.trade_guard import TradeGuard
 try:
     from utils.metrics import (
         trades_opened, trades_closed, pnl_per_trade, entry_failures,
@@ -62,10 +65,9 @@ class ExecutionEngine:
         self._user_position_stream_task: Optional[asyncio.Task] = None
         self._running = True
         
-        # K4: Кэш метрик аккаунта (TTL 30с)
+        # K4: Кэш метрик аккаунта (TTL из настроек)
         self._metrics_cache: Optional[Tuple[float, float, int]] = None
         self._metrics_cache_ts: float = 0
-        self._METRICS_CACHE_TTL: float = 30.0
         self._metrics_lock: asyncio.Lock = asyncio.Lock()
         self._metrics_fail_streak: int = 0
         self._metrics_backoff_until: float = 0.0
@@ -100,12 +102,22 @@ class ExecutionEngine:
         if not self.exchange.markets: await self.exchange.load_markets()
         market = self.exchange.market(symbol)
         
-        rules = {'step_size': '0.001', 'tick_size': '0.01'}
+        rules = {
+            'step_size': '0.001', 
+            'tick_size': '0.01', 
+            'min_notional': '5.0',
+            'max_algo': 100
+        }
         for f in market['info'].get('filters', []):
-            if f.get('filterType') == 'LOT_SIZE':
+            ft = f.get('filterType')
+            if ft == 'LOT_SIZE':
                 rules['step_size'] = f.get('stepSize', '0.001')
-            elif f.get('filterType') == 'PRICE_FILTER':
+            elif ft == 'PRICE_FILTER':
                 rules['tick_size'] = f.get('tickSize', '0.01')
+            elif ft == 'MIN_NOTIONAL':
+                rules['min_notional'] = f.get('notional', '5.0')
+            elif ft == 'MAX_NUM_ALGO_ORDERS':
+                rules['max_algo'] = int(f.get('limit', 100))
                 
         self._market_rules_cache[symbol] = rules
         return rules
@@ -132,12 +144,8 @@ class ExecutionEngine:
             pass
 
     def _norm_sym(self, s: str) -> str:
-        """Единый стандарт символа: BTC/USDT"""
-        if not s: return ""
-        clean = s.split(":")[0].replace("/", "").strip().upper()
-        if clean.endswith("USDT") and len(clean) > 4:
-            return f"{clean[:-4]}/USDT"
-        return clean
+        """Единый стандарт символа через SymbolNormalizer."""
+        return SymbolNormalizer.normalize(s)
 
     def _entry_side_to_order_side(self, side: str) -> str:
         """Нормализует направление входа к BUY/SELL."""
@@ -157,6 +165,15 @@ class ExecutionEngine:
                 limiter=self._binance_limiter,
                 policy=BinanceCallPolicy(max_attempts=4, base_delay=0.4, max_delay=3.0, timeout_seconds=30.0),
             )
+        except BinanceUnknownStatusError as e:
+            logger.error(f"⚠️ [BINANCE_API] UNKNOWN STATUS (503) during {ctx}: {e}")
+            logger.info("🔍 Инициирую экстренный reconcile для проверки исполнения...")
+            try:
+                # Пытаемся синхронизироваться, чтобы понять, открылась ли позиция
+                await self.reconcile_full()
+            except Exception as sync_err:
+                logger.error(f"❌ Ошибка экстренного reconcile: {sync_err}")
+            raise
         except Exception as e:
             logger.warning(f"⚠️ [BINANCE_API] {ctx}: {e}")
             raise
@@ -203,12 +220,25 @@ class ExecutionEngine:
         client_id: Optional[str] = None,
         position_id: Optional[int] = None,
     ) -> Optional[str]:
+        """Classify a protective order as SL or TP.
         """
-        Возвращает тип защиты:
-        - "SL" / "TP" при успешной классификации
-        - None, если классифицировать нельзя.
-        """
-        # Priority 1: Exact match by clientOrderId naming convention
+        # Existing logic unchanged – kept for context.
+        # Priority 1: Точное соответствие по префиксу clientOrderId (p{pos_id}_{type}_)
+        if client_id:
+            cid = str(client_id)
+            if "_" in cid:
+                parts = cid.split("_")
+                # Формат: p{pos_id}_sl_{ts} или p{pos_id}_tp_{ts}
+                if len(parts) >= 2 and parts[0].startswith("p"):
+                    try:
+                        cid_pid = int(parts[0][1:])
+                        if position_id and cid_pid == position_id:
+                            if parts[1] == "sl": return "SL"
+                            if parts[1] == "tp": return "TP"
+                    except ValueError:
+                        pass
+
+        # Priority 2: Старый формат (asl_{pos_id}, atp_{pos_id}) для обратной совместимости
         if client_id and position_id:
             cid = str(client_id)
             pid_str = f"_{position_id}"
@@ -221,19 +251,21 @@ class ExecutionEngine:
             return "TP"
         if "STOP" in t and "TAKE_PROFIT" not in t:
             return "SL"
-
+        
         if trigger_price <= 0 or entry_price <= 0:
             return None
-
-        # Fallback: type unknown (testnet algo orders). Match by proximity to DB values first.
+        
+        # Fallback: match by proximity to DB values first.
         if db_stop > 0 and db_tp > 0:
             dist_sl = abs(trigger_price - db_stop)
             dist_tp = abs(trigger_price - db_tp)
             return "SL" if dist_sl <= dist_tp else "TP"
-
+        
         if is_long:
             return "SL" if trigger_price < entry_price else "TP"
         return "SL" if trigger_price > entry_price else "TP"
+
+
 
     def _pick_better_level(
         self,
@@ -243,14 +275,17 @@ class ExecutionEngine:
         kind: str,
         is_long: bool
     ) -> float:
-        """Выбор наиболее релевантного уровня из нескольких ордеров одного типа."""
+        """Choose the most appropriate level (SL/TP) among candidates.
+        """
         if current is None:
             return candidate
         if kind == "SL":
-            # LONG: SL ближе к цене сверху среди уровней ниже entry; SHORT — наоборот.
+            # LONG: SL closer to price from above; SHORT – opposite.
             return max(current, candidate) if is_long else min(current, candidate)
-        # TP: LONG — ближайшая цель сверху; SHORT — ближайшая цель снизу.
+        # TP: LONG – nearest above; SHORT – nearest below.
         return min(current, candidate) if is_long else max(current, candidate)
+
+
 
     async def _get_live_position(self, symbol: str, preferred_side: Optional[str] = None) -> Tuple[float, Optional[str]]:
         """
@@ -311,14 +346,48 @@ class ExecutionEngine:
 
         if self._periodic_reconcile_task is None:
             self._periodic_reconcile_task = asyncio.create_task(self._periodic_reconcile_loop())
-            logger.info("🔄 [EXEC] Периодический reconcile (60с): OK")
+            logger.info(f"🔄 [EXEC] Периодический reconcile ({settings.reconcile_interval}с): OK")
+
+        self._watchdog_task = asyncio.create_task(self._ws_watchdog_loop())
+        logger.info("🛡️ [EXEC] WebSocket Watchdog: OK")
+
+    async def _ws_watchdog_loop(self):
+        """Проверка 'живучести' WS-потоков. Если нет событий > 15 мин — перезапуск."""
+        WATCHDOG_INTERVAL = 300 # 5 мин
+        STALE_THRESHOLD = 900   # 15 мин
+        
+        while self._running:
+            await asyncio.sleep(WATCHDOG_INTERVAL)
+            now = time.time()
+            
+            orders_stale = (now - self._last_ws_orders_event_ts) > STALE_THRESHOLD
+            pos_stale = (now - self._last_ws_positions_event_ts) > STALE_THRESHOLD
+            
+            if orders_stale or pos_stale:
+                reason = "ORDERS_STALE" if orders_stale else "POS_STALE"
+                logger.warning(f"🛡️ [WATCHDOG] WebSocket поток застыл ({reason}). Перезапуск...")
+                
+                # Перезапускаем таски
+                if self._user_order_stream_task: self._user_order_stream_task.cancel()
+                if self._user_position_stream_task: self._user_position_stream_task.cancel()
+                
+                self._user_order_stream_task = asyncio.create_task(self._watch_user_orders_loop())
+                self._user_position_stream_task = asyncio.create_task(self._watch_user_positions_loop())
+                
+                # Сбрасываем таймеры, чтобы не спамить перезапусками
+                self._last_ws_orders_event_ts = now
+                self._last_ws_positions_event_ts = now
+                
+                # Принудительный reconcile для синхронизации после простоя
+                try:
+                    await self.reconcile_full()
+                except Exception: pass
 
     async def _periodic_reconcile_loop(self):
         """
-        Гарантированный периодический reconcile каждые 60 секунд.
+        Гарантированный периодический reconcile каждые N секунд (из настроек).
         Не зависит от WS-событий — защита от зависших WS-петель.
         """
-        _INTERVAL = 60.0
         await asyncio.sleep(15.0)   # небольшой сдвиг от старта, чтобы не гонять сразу
         while self._running:
             try:
@@ -336,7 +405,7 @@ class ExecutionEngine:
                 await self.reconcile_full()
             except Exception as e:
                 logger.warning(f"⚠️ [PERIODIC_RECONCILE] ошибка: {e}")
-            await asyncio.sleep(_INTERVAL)
+            await asyncio.sleep(settings.reconcile_interval)
 
     async def stop(self):
         self._running = False
@@ -347,28 +416,34 @@ class ExecutionEngine:
     # --- WEBSOCKET LOOPS ---
 
     async def _watch_user_orders_loop(self):
+        backoff = 5
         while self._running:
             try:
                 orders = await self.exchange.watch_orders()
+                backoff = 5  # Сброс при успешном получении данных
+                self._last_ws_orders_event_ts = time.time()
                 self._last_ws_orders_event_ts = time.time()
                 for order in orders:
                     await self._handle_order_update(order)
             except Exception as e:
                 if self._running:
-                    logger.error(f"❌ [WS_ORDERS] Error: {e}")
+                    logger.error(f"❌ [WS_ORDERS] Error: {e}. Retry in {backoff}s")
                     now = time.time()
-                    if (now - self._last_ws_reconcile_ts) > 30:
+                    if (now - self._last_ws_reconcile_ts) > (settings.reconcile_interval / 2):
                         self._last_ws_reconcile_ts = now
                         try:
                             await self.reconcile_full()
                         except Exception as rec_err:
                             logger.error(f"❌ [WS_ORDERS] reconcile_full failed: {rec_err}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, settings.ws_backoff_max)
 
     async def _watch_user_positions_loop(self):
+        backoff = 5
         while self._running:
             try:
                 positions = await self.exchange.watch_positions()
+                backoff = 5  # Сброс при успешном получении данных
                 self._last_ws_positions_event_ts = time.time()
                 for pos in positions:
                     symbol = self._norm_sym(pos.get('symbol'))
@@ -378,15 +453,16 @@ class ExecutionEngine:
                         await self._close_position(symbol, reason="EXTERNAL")
             except Exception as e:
                 if self._running:
-                    logger.error(f"❌ [WS_POS] Error: {e}")
+                    logger.error(f"❌ [WS_POS] Error: {e}. Retry in {backoff}s")
                     now = time.time()
-                    if (now - self._last_ws_reconcile_ts) > 30:
+                    if (now - self._last_ws_reconcile_ts) > (settings.reconcile_interval / 2):
                         self._last_ws_reconcile_ts = now
                         try:
                             await self.reconcile_full()
                         except Exception as rec_err:
                             logger.error(f"❌ [WS_POS] reconcile_full failed: {rec_err}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, settings.ws_backoff_max)
 
     async def _handle_order_update(self, order: dict):
         try:
@@ -400,59 +476,67 @@ class ExecutionEngine:
             protective_fill_size = 0.0
 
             if status in ('canceled', 'cancelled', 'expired', 'rejected'):
+                cid_from_event = order.get('clientOrderId') or (info.get('clientOrderId') if isinstance(info, dict) else None)
                 async with async_session() as session:
-                    for oid in {x for x in (ex_id, algo_alt) if x and str(x).strip()}:
-                        r = await session.execute(
-                            select(OrderModel).where(OrderModel.exchange_order_id == str(oid))
+                    async with session.begin():
+                        # Собираем все возможные ID
+                        id_pool = {str(x).strip() for x in (ex_id, algo_alt, cid_from_event) if x and str(x).strip()}
+                        if not id_pool: return
+                        
+                        stmt = select(OrderModel).where(
+                            (OrderModel.exchange_order_id.in_(id_pool)) |
+                            (OrderModel.client_order_id.in_(id_pool))
                         )
-                        row = r.scalar_one_or_none()
-                        if row:
-                            row.status = OrderStatus.CANCELED
-                    await session.commit()
+                        res = await session.execute(stmt)
+                        for db_order in res.scalars():
+                            db_order.status = OrderStatus.CANCELED
                 return
 
             if status in ('closed', 'filled'):
+                self._last_ws_orders_event_ts = time.time()
                 is_protective_fill = False
+                cid_from_event = order.get('clientOrderId') or (info.get('clientOrderId') if isinstance(info, dict) else None)
+                
                 async with async_session() as session:
-                    stmt = select(OrderModel).where(OrderModel.exchange_order_id == ex_id)
-                    res = await session.execute(stmt)
-                    db_order = res.scalar_one_or_none()
-                    if not db_order and algo_alt and algo_alt != ex_id:
-                        stmt = select(OrderModel).where(OrderModel.exchange_order_id == algo_alt)
+                    async with session.begin():
+                        # Поиск по exchange_order_id ИЛИ client_order_id
+                        stmt = select(OrderModel).where(
+                            (OrderModel.exchange_order_id == ex_id) | 
+                            (OrderModel.exchange_order_id == algo_alt) |
+                            (OrderModel.client_order_id == cid_from_event)
+                        )
                         res = await session.execute(stmt)
                         db_order = res.scalar_one_or_none()
 
-                    if db_order:
-                        db_order.status = OrderStatus.FILLED
-                        ot = (db_order.order_type or "").upper()
-                        if any(x in ot for x in ["STOP", "TAKE", "TRAILING"]):
-                            is_protective_fill = True
-                            fill_price = float(order.get('average') or order.get('price') or 0.0)
-                            fill_size = float(order.get('filled') or order.get('amount') or 0.0)
-                            protective_fill_price = fill_price
-                            protective_fill_size = fill_size
-                            fill_type = "SL" if "STOP" in ot else ("TP" if "TAKE" in ot else "TRAILING")
-                            trade = self.active_trades.get(symbol, {})
-                            entry = trade.get("entry", 0)
-                            pnl_est = 0.0
-                            if entry > 0 and fill_price > 0 and fill_size > 0:
-                                is_long = trade.get("signal_type") == "LONG"
-                                pnl_est = (fill_price - entry) * fill_size if is_long else (entry - fill_price) * fill_size
-                            logger.info(
-                                f"💾 [WS_FILL] {fill_type} hit for {symbol}: "
-                                f"order_type={ot} fill_price={fill_price:.6f} size={fill_size} | "
-                                f"entry={entry:.6f} est_PnL={pnl_est:+.4f} USDT"
-                            )
-                            # Check for BE trigger (Target 2 hit)
-                            client_id = str(db_order.client_order_id or "")
-                            trade = self.active_trades.get(symbol, {})
-                            if "_2" in client_id and "atp_" in client_id:
-                                logger.info(f"🚀 [Scaling Out] Target 2 hit for {symbol}. Moving SL to Break Even.")
-                                asyncio.ensure_future(self._move_to_breakeven(symbol, trade))
-                                trade["trailing_active"] = True
-                                trade["trailing_source"] = "EMA20"
-
-                        await session.commit()
+                        if db_order:
+                            db_order.status = OrderStatus.FILLED
+                            ot = (db_order.order_type or "").upper()
+                            if any(x in ot for x in ["STOP", "TAKE", "TRAILING"]):
+                                is_protective_fill = True
+                                fill_price = float(order.get('average') or order.get('price') or 0.0)
+                                fill_size = float(order.get('filled') or order.get('amount') or 0.0)
+                                protective_fill_price = fill_price
+                                protective_fill_size = fill_size
+                                fill_type = "SL" if "STOP" in ot else ("TP" if "TAKE" in ot else "TRAILING")
+                                trade = self.active_trades.get(symbol, {})
+                                entry = trade.get("entry", 0)
+                                pnl_est = 0.0
+                                if entry > 0 and fill_price > 0 and fill_size > 0:
+                                    is_long = trade.get("signal_type") == "LONG"
+                                    pnl_est = (fill_price - entry) * fill_size if is_long else (entry - fill_price) * fill_size
+                                logger.info(
+                                    f"💾 [WS_FILL] {fill_type} hit for {symbol}: "
+                                    f"order_type={ot} fill_price={fill_price:.6f} size={fill_size} | "
+                                    f"entry={entry:.6f} est_PnL={pnl_est:+.4f} USDT"
+                                )
+                                # Check for BE trigger (Target 2 hit)
+                                client_id = str(db_order.client_order_id or "")
+                                trade = self.active_trades.get(symbol, {})
+                                if "_2" in client_id and "atp_" in client_id:
+                                    logger.info(f"🚀 [Scaling Out] Target 2 hit for {symbol}. Moving SL to Break Even.")
+                                    asyncio.ensure_future(self._move_to_breakeven(symbol, trade))
+                                    trade["trailing_active"] = True
+                                    trade["trailing_source"] = "EMA20"
 
                 if is_protective_fill and symbol in self.active_trades:
                     trade = self.active_trades.get(symbol)
@@ -469,15 +553,15 @@ class ExecutionEngine:
                         )
                         self._apply_position_update_to_trade(trade, position_update)
                         async with async_session() as session:
-                            await session.execute(
-                                update(PositionModel)
-                                .where(PositionModel.id == trade["position_db_id"])
-                                .values(
-                                    size=float(live_size),
-                                    realized_pnl=float(position_update.state.realized_pnl),
+                            async with session.begin():
+                                await session.execute(
+                                    update(PositionModel)
+                                    .where(PositionModel.id == trade["position_db_id"])
+                                    .values(
+                                        size=float(live_size),
+                                        realized_pnl=float(position_update.state.realized_pnl),
+                                    )
                                 )
-                            )
-                            await session.commit()
                         trade["current_size"] = float(live_size)
                         logger.info(
                             f"📉 [WS_ORDERS] Partial protective fill for {symbol}: "
@@ -510,6 +594,7 @@ class ExecutionEngine:
         price: Optional[float],
         size: float,
         status: OrderStatus = OrderStatus.FILLED,
+        session: Optional[AsyncSession] = None,
     ) -> None:
         """Аудит: биржевые ордера в БД (идемпотентно по exchange/client id)."""
         ex_id = str(exchange_order_id).strip() if exchange_order_id else None
@@ -518,35 +603,42 @@ class ExecutionEngine:
             return
         ps = (position_side or "LONG").upper()
         side_enum = SignalType.LONG if ps == "LONG" else SignalType.SHORT
-        try:
-            async with async_session() as session:
-                if ex_id:
-                    dup = await session.execute(
-                        select(OrderModel.id).where(OrderModel.exchange_order_id == ex_id)
-                    )
-                    if dup.scalar_one_or_none():
-                        return
-                if cl_id:
-                    dup = await session.execute(
-                        select(OrderModel.id).where(OrderModel.client_order_id == cl_id)
-                    )
-                    if dup.scalar_one_or_none():
-                        return
-                session.add(
-                    OrderModel(
-                        user_id=self.user_id,
-                        position_id=position_id,
-                        exchange_order_id=ex_id,
-                        client_order_id=cl_id,
-                        symbol=symbol,
-                        order_type=order_type,
-                        side=side_enum,
-                        price=float(price or 0.0),
-                        size=float(size),
-                        status=status,
-                    )
+        
+        async def _work(sess: AsyncSession):
+            if ex_id:
+                dup = await sess.execute(
+                    select(OrderModel.id).where(OrderModel.exchange_order_id == ex_id)
                 )
-                await session.commit()
+                if dup.scalar_one_or_none():
+                    return
+            if cl_id:
+                dup = await sess.execute(
+                    select(OrderModel.id).where(OrderModel.client_order_id == cl_id)
+                )
+                if dup.scalar_one_or_none():
+                    return
+            sess.add(
+                OrderModel(
+                    user_id=self.user_id,
+                    position_id=position_id,
+                    exchange_order_id=ex_id,
+                    client_order_id=cl_id,
+                    symbol=symbol,
+                    order_type=order_type,
+                    side=side_enum,
+                    price=float(price or 0.0),
+                    size=float(size),
+                    status=status,
+                )
+            )
+
+        try:
+            if session:
+                await _work(session)
+            else:
+                async with async_session() as sess:
+                    async with sess.begin():
+                        await _work(sess)
         except IntegrityError:
             pass
         except Exception as e:
@@ -779,17 +871,17 @@ class ExecutionEngine:
             lev = 1
         try:
             async with async_session() as session:
-                session.add(
-                    PnLModel(
-                        user_id=self.user_id,
-                        symbol=sym,
-                        pnl_usd=pnl_usd,
-                        pnl_pct=pnl_pct,
-                        leverage=lev,
-                        reason="RECONCILE_CLOSE",
+                async with session.begin():
+                    session.add(
+                        PnLModel(
+                            user_id=self.user_id,
+                            symbol=sym,
+                            pnl_usd=pnl_usd,
+                            pnl_pct=pnl_pct,
+                            leverage=lev,
+                            reason="RECONCILE_CLOSE",
+                        )
                     )
-                )
-                await session.commit()
             try:
                 bal, _, _ = await self.get_account_metrics()
                 await self.risk_manager.record_closed_pnl(pnl_usd, bal)
@@ -804,13 +896,13 @@ class ExecutionEngine:
             return
         try:
             async with async_session() as session:
-                r = await session.execute(
-                    select(OrderModel).where(OrderModel.exchange_order_id == oid)
-                )
-                row = r.scalar_one_or_none()
-                if row:
-                    row.status = OrderStatus.CANCELED
-                    await session.commit()
+                async with session.begin():
+                    r = await session.execute(
+                        select(OrderModel).where(OrderModel.exchange_order_id == oid)
+                    )
+                    row = r.scalar_one_or_none()
+                    if row:
+                        row.status = OrderStatus.CANCELED
         except Exception as e:
             logger.debug(f"[AUDIT] mark canceled {oid}: {e}")
 
@@ -864,7 +956,7 @@ class ExecutionEngine:
                     ctx=f"cancel_all_orders({symbol})"
                 )
                 # 2. Algo ордера: читаем список и отменяем по algoId.
-                clean_sym = symbol.replace("/", "").split(":")[0]
+                clean_sym = SymbolNormalizer.to_binance(symbol)
                 algo_raw = await self._with_time_sync_retry(
                     lambda: self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': clean_sym}),
                     ctx=f"openAlgoOrders({symbol})"
@@ -896,295 +988,202 @@ class ExecutionEngine:
         symbol: str,
         side: str,
         amount: float,
-        sl: float,
+        sl: Optional[float] = None,
         tp: Optional[float] = None,
         position_id: Optional[int] = None,
+        session: Optional[AsyncSession] = None,
     ) -> Tuple[Optional[str], Optional[str]]:
-        """Унифицированная установка SL и TP через Algo API (K6: fix closePosition для partial TP)"""
+        """Унифицированная установка SL и TP через Algo API."""
         sl_id, tp_id = None, None
         try:
             side = self._entry_side_to_order_side(side)
             await self._prepare_private_ops(ctx=f"set_protective_orders({symbol})")
             is_hedge = await self._get_position_mode()
-            clean_sym = symbol.replace("/", "").split(":")[0]
+            # Подготовка символа для Binance API
+            clean_sym = SymbolNormalizer.to_binance(symbol)
             reduce_side = "SELL" if side.upper() == "BUY" else "BUY"
+            rules = await self._get_market_rules(symbol)
+            max_algo = rules.get('max_algo', 100)
+            
+            # Быстрая проверка лимита алго-ордеров
+            try:
+                open_orders = await self._with_time_sync_retry(
+                    lambda: self.exchange.fetch_open_orders(symbol),
+                    ctx=f"check_max_algo({symbol})"
+                )
+                algo_types = ["STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"]
+                current_algo_count = sum(1 for o in open_orders if str(o.get('type','')).upper() in algo_types)
+                if current_algo_count >= max_algo:
+                    logger.warning(f"⚠️ [{symbol}] Лимит алго-ордеров исчерпан ({current_algo_count}/{max_algo}). SL/TP пропущены!")
+                    return None, None
+            except Exception as e:
+                logger.warning(f"⚠️ [{symbol}] Не удалось проверить лимит алго-ордеров: {e}")
+
             ref_price = await self._get_reference_price(symbol)
 
-            # Dedup перед постановкой новой защиты:
-            # удаляем конфликтующие closePosition/GTE ордера того же reduce-side,
-            # чтобы избежать -4130 (existing open stop/tp in direction).
-            try:
-                raw_existing = await self._with_time_sync_retry(
-                    lambda: self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': clean_sym}),
-                    ctx=f"protective_dedup.openAlgoOrders({symbol})"
-                )
-                existing = raw_existing.get("algoOrders", []) if isinstance(raw_existing, dict) else (raw_existing if isinstance(raw_existing, list) else [])
-                for eo in existing:
-                    eo_type = str(eo.get("type", "")).upper()
-                    algo_id = eo.get("algoId")
-                    if not algo_id:
-                        continue
-                    if ("STOP" in eo_type) or ("TAKE_PROFIT" in eo_type):
-                        try:
-                            await self._with_time_sync_retry(
-                                lambda: self.exchange.request(
-                                    'algoOrder', 'fapiPrivate', 'DELETE',
-                                    {'symbol': clean_sym, 'algoId': str(algo_id)}
-                                ),
-                                ctx=f"protective_dedup.cancel({symbol}:{algo_id})"
-                            )
-                        except Exception as cancel_err:
-                            logger.warning(f"⚠️ [PROTECT] Dedup cancel failed {symbol}:{algo_id}: {cancel_err}")
-            except Exception as dedup_err:
-                logger.warning(f"⚠️ [PROTECT] Dedup precheck failed for {symbol}: {dedup_err}")
+            # 1. STOP LOSS
+            if sl:
+                sl_trigger = await self._normalize_price(symbol, sl)
+                if ref_price and not self._is_valid_stop_side(sl_trigger, ref_price, side):
+                    eps = max(ref_price * 0.0015, 1e-8)
+                    sl_trigger = (ref_price - eps) if side.upper() == "BUY" else (ref_price + eps)
+                    sl_trigger = await self._normalize_price(symbol, sl_trigger)
 
-            # 1. STOP LOSS (closePosition=true — закрыть всё)
-            sl_trigger = await self._normalize_price(symbol, sl)
-            if ref_price and not self._is_valid_stop_side(sl_trigger, ref_price, side):
-                # Защита от -2021: корректируем триггер чуть дальше от рынка.
-                eps = max(ref_price * 0.0015, 1e-8)
-                sl_trigger = (ref_price - eps) if side.upper() == "BUY" else (ref_price + eps)
-                sl_trigger = await self._normalize_price(symbol, sl_trigger)
-                logger.warning(
-                    f"⚠️ [PROTECT] Adjust SL trigger for {symbol}: requested={sl:.8f}, ref={ref_price:.8f}, adjusted={sl_trigger:.8f}"
-                )
-            sl_cid = f"asl_{position_id}" if position_id else None
-            sl_p = {
-                "symbol": clean_sym,
-                "side": reduce_side,
-                "algoType": "CONDITIONAL",
-                "type": "STOP_MARKET",
-                "triggerPrice": str(sl_trigger),
-                "closePosition": "true",
-                "workingType": "MARK_PRICE"
-            }
-            if sl_cid:
-                sl_p["newClientStrategyId"] = sl_cid
-            if is_hedge:
-                sl_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
-                sl_p["reduceOnly"] = "true" # В хедж-режиме может быть полезно, но проверим
-            
-            try:
-                res_sl = await self._with_time_sync_retry(
-                    lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', sl_p),
-                    ctx=f"set_sl({symbol})"
-                )
-                sl_id = str(res_sl.get("algoId"))
-                logger.info(f"🛡 [PROTECT] SL установлен для {symbol}: {sl}")
-            except Exception as sl_err:
-                # Если Binance сообщает, что защитный closePosition уже существует,
-                # пробуем подобрать уже выставленный SL и не считаем это фатальной ошибкой.
-                err_text = str(sl_err)
-                if "-4130" in err_text:
-                    try:
-                        raw_existing = await self._with_time_sync_retry(
-                            lambda: self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': clean_sym}),
-                            ctx=f"set_sl.recover_openAlgoOrders({symbol})"
-                        )
-                        existing = raw_existing.get("algoOrders", []) if isinstance(raw_existing, dict) else (raw_existing if isinstance(raw_existing, list) else [])
-                        sl_trigger_f = float(sl_trigger)
-                        ref_f = float(ref_price) if ref_price is not None else None
-                        # Толеранс на округления/нормализацию триггеров.
-                        tol = max(abs(sl_trigger_f) * 1e-5, abs(ref_f) * 1e-7 if ref_f else 1e-8)
+                ts_ms = int(time.time() * 1000)
+                sl_cid = f"p{position_id}_sl_{ts_ms}" if position_id else None
+                
+                sl_p = {
+                    "symbol": clean_sym,
+                    "side": reduce_side,
+                    "algoType": "CONDITIONAL",
+                    "type": "STOP_MARKET",
+                    "triggerPrice": str(sl_trigger),
+                    "closePosition": "true",
+                    "workingType": "MARK_PRICE",
+                    "newClientStrategyId": sl_cid if sl_cid else None
+                }
+                if is_hedge:
+                    sl_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
+                    sl_p["reduceOnly"] = "true"
 
-                        def _close_pos(v) -> bool:
-                            vv = str(v).lower().strip()
-                            return vv in {"1", "true", "yes", "y"}
+                sl_p["stopPrice"] = str(sl_trigger)
+                try:
+                    res_sl = await self._with_time_sync_retry(
+                        lambda: self.exchange.fapiPrivatePostAlgoOrder(sl_p),
+                        ctx=f"create_algo_sl({symbol})"
+                    )
+                    sl_id = str(res_sl.get("algoId") or res_sl.get("orderId"))
+                    logger.info(f"🛡 [PROTECT] SL установлен для {symbol}: {sl}")
+                    ps = self._position_side_from_entry_side(side)
+                    await self._db_persist_order(
+                        position_id=position_id,
+                        symbol=symbol,
+                        exchange_order_id=sl_id,
+                        client_order_id=sl_cid,
+                        order_type="STOP_MARKET_ALGO",
+                        position_side=ps,
+                        price=float(sl_trigger),
+                        size=float(amount),
+                        status=OrderStatus.OPEN,
+                        session=session,
+                    )
+                except Exception as sl_err:
+                    logger.warning(f"⚠️ [PROTECT] SL creation failed for {symbol}: {sl_err}")
 
-                        def _get_trig(eo) -> float:
-                            for k in ("stopPrice", "triggerPrice"):
-                                try:
-                                    v = eo.get(k)
-                                    if v is None:
-                                        continue
-                                    fv = float(v)
-                                    if fv > 0:
-                                        return fv
-                                except Exception:
-                                    continue
-                            return 0.0
-
-                        entry_side_is_buy = side.upper() == "BUY"
-                        correct_side = lambda trig: (trig < ref_f) if (entry_side_is_buy and ref_f is not None) else ((trig > ref_f) if (not entry_side_is_buy and ref_f is not None) else True)
-
-                        stop_like = []
-                        for eo in existing:
-                            algo_id = eo.get("algoId")
-                            if not algo_id:
-                                continue
-                            type_str = str(eo.get("type", "")).upper()
-                            trig = _get_trig(eo)
-                            if trig <= 0:
-                                continue
-                            if not correct_side(trig):
-                                continue
-                            is_stop = "STOP" in type_str or "STOP_MARKET" in type_str
-                            is_close_pos = _close_pos(eo.get("closePosition"))
-                            near = abs(trig - sl_trigger_f) <= tol
-                            # Приоритет: STOP* + близко к нашему sl_trigger.
-                            if is_stop and near:
-                                stop_like.append((0, algo_id))
-                            elif is_stop and is_close_pos and near:
-                                stop_like.append((1, algo_id))
-                            elif is_stop and is_close_pos:
-                                stop_like.append((2, algo_id))
-                            elif near:
-                                # Иногда Binance отдаёт тип не содержащий STOP в точности.
-                                stop_like.append((3, algo_id))
-
-                        if stop_like:
-                            stop_like.sort(key=lambda x: x[0])
-                            sl_id = str(stop_like[0][1])
-                            logger.warning(f"⚠️ [PROTECT] SL already exists for {symbol}, reuse algoId={sl_id}")
-                        else:
-                            # Если конкретного SL-кандидата не нашлось — повторно попробуем поставить SL,
-                            # но уводим триггер чуть дальше от рынка (уменьшаем шанс на -4130/немедленный триггер).
-                            if ref_f is not None:
-                                extra = max(ref_f * 0.0005, 1e-8)
-                                sl_trigger2 = (sl_trigger_f - extra) if entry_side_is_buy else (sl_trigger_f + extra)
-                                sl_trigger2 = await self._normalize_price(symbol, sl_trigger2)
-                                if ref_f and self._is_valid_stop_side(sl_trigger2, ref_f, side):
-                                    sl_p["triggerPrice"] = str(sl_trigger2)
-                                    sl_p2 = dict(sl_p)
-                                    res_sl = await self._with_time_sync_retry(
-                                        lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', sl_p2),
-                                        ctx=f"set_sl.recover_retry({symbol})"
-                                    )
-                                    sl_id = str(res_sl.get("algoId"))
-                                    logger.warning(f"⟳ [PROTECT] SL recover retry success for {symbol}, algoId={sl_id}")
-                                else:
-                                    logger.error(f"❌ [PROTECT] SL recover retry invalid for {symbol}: {sl_trigger2}")
-                                    return None, None
-                            else:
-                                logger.error(f"❌ [PROTECT] SL missing after -4130 for {symbol}: {sl_err}")
-                                return None, None
-                    except Exception as rec_err:
-                        logger.error(f"❌ [PROTECT] SL recover failed for {symbol}: {rec_err}")
-                        return None, None
-                else:
-                    logger.error(f"❌ [PROTECT] Ошибка SL {symbol}: {sl_err}")
-                    return None, None
-
-            if sl_id:
-                ps = self._position_side_from_entry_side(side)
-                await self._db_persist_order(
-                    position_id=position_id,
-                    symbol=symbol,
-                    exchange_order_id=sl_id,
-                    client_order_id=sl_cid,
-                    order_type="STOP_MARKET_ALGO",
-                    position_side=ps,
-                    price=float(sl_trigger),
-                    size=float(amount),
-                    status=OrderStatus.OPEN,
-                )
-
-            # 2. TAKE PROFIT (Scale-out: Частичная фиксация)
+            # 2. TAKE PROFIT
             if tp:
-                tp_ids = []
-                if isinstance(tp, dict):
-                    portions = [0.4, 0.3, 0.3]
-                    targets = list(tp.values())
-                    remaining_amount = Decimal(str(amount))
-                    
-                    for i, target_price in enumerate(targets[:3]):
-                        part_amt = float((Decimal(str(amount)) * Decimal(str(portions[i]))).quantize(Decimal('0.001'), rounding=ROUND_DOWN))
-                        if i == 2 or i == len(targets)-1: part_amt = float(remaining_amount)
-                        if part_amt <= 0: continue
-                        remaining_amount -= Decimal(str(part_amt))
-                        norm_part_amt = await self._normalize_amount(symbol, part_amt)
-                        if norm_part_amt <= 0:
-                            continue
-                        
-                        tp_cid = f"atp_{position_id}_{i+1}" if position_id else None
-                        tp_p = {
-                            "symbol": clean_sym,
-                            "side": reduce_side,
-                            "algoType": "CONDITIONAL",
-                            "type": "TAKE_PROFIT_MARKET",
-                            "triggerPrice": str(await self._normalize_price(symbol, target_price)),
-                            "quantity": str(norm_part_amt),
-                            "reduceOnly": "true",
-                            "workingType": "MARK_PRICE"
-                        }
-                        if tp_cid: tp_p["newClientStrategyId"] = tp_cid
-                        if is_hedge: tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
-                        
-                        try:
-                            res_tp = await self._with_time_sync_retry(
-                                lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p),
-                                ctx=f"set_partial_tp({symbol})"
-                            )
-                            if res_tp.get("algoId"):
-                                aid = str(res_tp["algoId"])
-                                tp_ids.append(aid)
-                                logger.info(f"🎯 [PARTIAL TP {i+1}] {symbol} объем {norm_part_amt} по {target_price}")
-                                ps = self._position_side_from_entry_side(side)
-                                tp_px = float(await self._normalize_price(symbol, target_price))
-                                await self._db_persist_order(
-                                    position_id=position_id,
-                                    symbol=symbol,
-                                    exchange_order_id=aid,
-                                    client_order_id=tp_cid,
-                                    order_type="TAKE_PROFIT_MARKET_ALGO",
-                                    position_side=ps,
-                                    price=tp_px,
-                                    size=float(norm_part_amt),
-                                    status=OrderStatus.OPEN,
-                                )
-                        except Exception as tp_err:
-                            logger.warning(f"⚠️ [PROTECT] Partial TP {i+1} failed for {symbol}: {tp_err}")
-                            
-                    tp_id = ",".join(tp_ids)
-                else:
-                    tp_cid = f"atp_{position_id}_f" if position_id else None
-                    tp_p = {
-                        "symbol": clean_sym,
-                        "side": reduce_side,
-                        "algoType": "CONDITIONAL",
-                        "type": "TAKE_PROFIT_MARKET",
-                        "triggerPrice": str(await self._normalize_price(symbol, tp)),
-                        "closePosition": "true",
-                        "workingType": "MARK_PRICE"
-                    }
-                    if tp_cid: tp_p["newClientStrategyId"] = tp_cid
-                    if is_hedge: 
-                        tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
-                        tp_p["reduceOnly"] = "true"
-                    
-                    try:
-                        res_tp = await self._with_time_sync_retry(
-                            lambda: self.exchange.request('algoOrder', 'fapiPrivate', 'POST', tp_p),
-                            ctx=f"set_tp({symbol})"
-                        )
-                        tp_id = str(res_tp.get("algoId"))
-                        logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
-                        ps = self._position_side_from_entry_side(side)
-                        tp_px = float(await self._normalize_price(symbol, tp))
-                        await self._db_persist_order(
-                            position_id=position_id,
-                            symbol=symbol,
-                            exchange_order_id=tp_id,
-                            client_order_id=tp_cid,
-                            order_type="TAKE_PROFIT_MARKET_ALGO",
-                            position_side=ps,
-                            price=tp_px,
-                            size=float(amount),
-                            status=OrderStatus.OPEN,
-                        )
-                    except Exception as tp_err:
-                        logger.warning(f"⚠️ [PROTECT] TP failed for {symbol}, keep SL active: {tp_err}")
+                tp_trigger = await self._normalize_price(symbol, tp)
+                ts_ms = int(time.time() * 1000)
+                tp_cid = f"p{position_id}_tp_{ts_ms}" if position_id else None
+                tp_p = {
+                    "symbol": clean_sym,
+                    "side": reduce_side,
+                    "algoType": "CONDITIONAL",
+                    "type": "TAKE_PROFIT_MARKET",
+                    "triggerPrice": str(tp_trigger),
+                    "closePosition": "true",
+                    "workingType": "MARK_PRICE",
+                    "newClientStrategyId": tp_cid if tp_cid else None
+                }
+                if is_hedge:
+                    tp_p["positionSide"] = "LONG" if side.upper() == "BUY" else "SHORT"
+                    tp_p["reduceOnly"] = "true"
+
+                tp_p["stopPrice"] = str(tp_trigger)
+                try:
+                    res_tp = await self._with_time_sync_retry(
+                        lambda: self.exchange.fapiPrivatePostAlgoOrder(tp_p),
+                        ctx=f"create_algo_tp({symbol})"
+                    )
+                    tp_id = str(res_tp.get("algoId") or res_tp.get("orderId"))
+                    logger.info(f"🎯 [PROTECT] TP установлен для {symbol}: {tp}")
+                    ps = self._position_side_from_entry_side(side)
+                    await self._db_persist_order(
+                        position_id=position_id,
+                        symbol=symbol,
+                        exchange_order_id=tp_id,
+                        client_order_id=tp_cid,
+                        order_type="TAKE_PROFIT_MARKET_ALGO",
+                        position_side=ps,
+                        price=float(tp_trigger),
+                        size=float(amount),
+                        status=OrderStatus.OPEN,
+                        session=session,
+                    )
+                except Exception as tp_err:
+                    logger.warning(f"⚠️ [PROTECT] TP failed for {symbol}: {tp_err}")
 
         except Exception as e:
             logger.error(f"❌ [PROTECT] Ошибка защиты {symbol}: {e}")
         return sl_id, tp_id
+
+    async def _cancel_extra_algo_orders(self, symbol: str, keep_ids: List[str]) -> None:
+        """Cancel any open algo orders for *symbol* that are NOT in *keep_ids*.
+        This helps to remove leftover test orders (e.g., old SL/TP) after a rescue.
+        """
+        try:
+            # Fetch all open algo orders for the symbol.
+            res = await self.exchange.request('openAlgoOrders', 'fapiPrivate', 'GET', {'symbol': SymbolNormalizer.to_binance(symbol)})
+            raw_orders = res.get('algoOrders', []) if isinstance(res, dict) else (res if isinstance(res, list) else [])
+            for o in raw_orders:
+                oid = str(o.get('algoId') or o.get('id') or "").strip()
+                if oid and oid not in keep_ids:
+                    try:
+                        await self.exchange.cancel_order(oid, symbol)
+                        logger.info(f"🧹 [CLEANUP] Canceled stale algo order {oid} for {symbol}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ [CLEANUP] Failed to cancel stale algo order {oid} for {symbol}: {e}")
+        except Exception as e:
+            logger.warning(f"⚠️ [CLEANUP] Error retrieving algo orders for {symbol}: {e}")
+
+    async def _reconcile_orders_for_position(
+        self, 
+        symbol: str, 
+        position_db_id: int, 
+        entry_price: float, 
+        is_long: bool,
+        db_sl_val: float, 
+        db_tp_val: float,
+        exchange_orders: List[dict]
+    ) -> Tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
+        """
+        Унифицированный поиск SL и TP среди биржевых ордеров.
+        Возвращает: (sl_id, tp_id, found_sl_price, found_tp_price)
+        """
+        found_sl, found_tp = None, None
+        sl_id, tp_id = None, None
+        
+        for o in exchange_orders:
+            trig = float(o.get("stopPrice") or 0.0)
+            if trig <= 0:
+                continue
+            
+            kind = self._classify_protective_order(
+                str(o.get("type", "")), 
+                trig, 
+                entry_price, 
+                is_long,
+                db_stop=db_sl_val, 
+                db_tp=db_tp_val,
+                client_id=o.get("client_id") or o.get("client_order_id"),
+                position_id=position_db_id
+            )
+            
+            if kind == "SL":
+                found_sl = self._pick_better_level(found_sl, trig, kind="SL", is_long=is_long)
+                sl_id = str(o.get("id"))
+            elif kind == "TP":
+                found_tp = self._pick_better_level(found_tp, trig, kind="TP", is_long=is_long)
+                tp_id = str(o.get("id"))
+                
+        return sl_id, tp_id, found_sl, found_tp
 
     async def reconcile_full(self):
         """Полная синхронизация: Биржа -> БД -> Memory"""
         try:
             await self._prepare_private_ops(ctx="reconcile_full")
             pos_data = await self._with_time_sync_retry(
-                lambda: self.exchange.fetch_positions(),
+                lambda: self.exchange.fetch_positions_risk(),
                 ctx="reconcile.fetch_positions"
             )
             std_orders = await self._with_time_sync_retry(
@@ -1215,173 +1214,159 @@ class ExecutionEngine:
             # Единая сессия для всех операций с БД
             ghost_snaps: List[Dict[str, Any]] = []
             async with async_session() as session:
-                res = await session.execute(select(PositionModel).where(PositionModel.status == PositionStatus.OPEN))
-                db_positions_raw = res.scalars().all()
-                db_positions = {self._norm_sym(p.symbol): p for p in db_positions_raw}
+                async with session.begin():
+                    res = await session.execute(select(PositionModel).where(PositionModel.status == PositionStatus.OPEN))
+                    db_positions_raw = res.scalars().all()
+                    db_positions = {self._norm_sym(p.symbol): p for p in db_positions_raw}
 
-                new_active = {}
-                for p in (pos_data or []):
-                    contracts = float(p.get("contracts", 0) or p.get("pa", 0) or 0)
-                    symbol = self._norm_sym(p.get("symbol", ""))
-                    if not symbol or abs(contracts) <= 1e-8:
-                        continue
-
-                    entry = float(p.get("entryPrice") or 0.0)
-                    is_long = p.get("side", "").lower() == "long"
-                    contracts = abs(contracts)
-
-                    matching_db = [p_db for p_db in db_positions_raw if self._norm_sym(p_db.symbol) == symbol and p_db.status == PositionStatus.OPEN]
-
-                    dbp = None
-                    if not matching_db:
-                        sl_def = entry * (0.95 if is_long else 1.05)
-                        tp_def = entry * (1.10 if is_long else 0.90)
-                        dbp = PositionModel(
-                            user_id=self.user_id, symbol=symbol,
-                            side=SignalType.LONG if is_long else SignalType.SHORT,
-                            size=contracts, entry_price=entry,
-                            status=PositionStatus.OPEN,
-                            stop_loss=sl_def, take_profit=tp_def,
-                            opened_at=datetime.datetime.utcnow()
-                        )
-                        session.add(dbp)
-                        await session.flush()
-                    else:
-                        dbp = matching_db[-1]
-                        if len(matching_db) > 1:
-                            for extra in matching_db[:-1]:
-                                extra.status = PositionStatus.CLOSED
-                                extra.closed_at = datetime.datetime.utcnow()
-                            await session.flush()
-
-                        if abs(float(dbp.size) - contracts) > 1e-6:
-                            logger.info(f"[SYNC] Volume {symbol}: {dbp.size} -> {contracts}")
-                            dbp.size = contracts
-                            await session.flush()
-                
-                # [Lock logic moved to after the loop]
-                    found_sl, found_tp = None, None
-                    sl_id, tp_id = None, None
-                    db_sl_val = float(dbp.stop_loss or 0.0)
-                    db_tp_val = float(dbp.take_profit or 0.0)
-                    for o in ex_orders_by_symbol.get(symbol, []):
-                        trig = float(o.get("stopPrice") or 0.0)
-                        if trig <= 0:
+                    new_active = {}
+                    for p in (pos_data or []):
+                        contracts = float(p.get("contracts", 0) or p.get("pa", 0) or 0)
+                        symbol = self._norm_sym(p.get("symbol", ""))
+                        if not symbol or abs(contracts) <= 1e-8:
                             continue
-                        kind = self._classify_protective_order(
-                            str(o.get("type", "")), trig, entry, is_long,
-                            db_stop=db_sl_val, db_tp=db_tp_val,
-                            client_id=o.get("client_id"),
-                            position_id=dbp.id
-                        )
-                        if kind == "SL":
-                            found_sl = self._pick_better_level(found_sl, trig, kind="SL", is_long=is_long)
-                            sl_id = o.get("id")
-                        elif kind == "TP":
-                            found_tp = self._pick_better_level(found_tp, trig, kind="TP", is_long=is_long)
-                            tp_id = o.get("id")
 
-                    # RESCUE: восстановление SL если отсутствует на бирже
-                    if not sl_id and dbp.stop_loss:
-                        now_ts = time.time()
-                        if now_ts < self._rescue_cooldown_until.get(symbol, 0.0):
-                            logger.warning(f"[RESCUE] Cooldown active for {symbol}")
-                        else:
-                            live_size, live_side = await self._get_live_position(symbol, preferred_side=("LONG" if is_long else "SHORT"))
-                            if live_size <= 0 or (live_side and ((is_long and live_side != "LONG") or ((not is_long) and live_side != "SHORT"))):
-                                logger.warning(f"[RESCUE] Skip {symbol}: no live position or side mismatch")
-                                continue
-                            logger.warning(f"[RESCUE] Restoring protection for {symbol}")
-                            safe_stop = dbp.stop_loss
-                            if safe_stop:
-                                invalid_for_side = (is_long and float(safe_stop) >= entry) or ((not is_long) and float(safe_stop) <= entry)
-                                if invalid_for_side:
-                                    safe_stop = entry * (0.995 if is_long else 1.005)
-                                    logger.warning(f"[RESCUE] Adjusted stop for {symbol}: {dbp.stop_loss} -> {safe_stop}")
+                        entry = float(p.get("entryPrice") or 0.0)
+                        is_long = p.get("side", "").lower() == "long"
+                        contracts = abs(contracts)
 
-                            res_sl_id, res_tp_id = await self._set_protective_orders(
-                                symbol, "BUY" if is_long else "SELL", contracts, safe_stop, dbp.take_profit,
-                                position_id=dbp.id,
+                        matching_db = [p_db for p_db in db_positions_raw if self._norm_sym(p_db.symbol) == symbol and p_db.status == PositionStatus.OPEN]
+
+                        dbp = None
+                        if not matching_db:
+                            sl_def = entry * (0.95 if is_long else 1.05)
+                            tp_def = entry * (1.10 if is_long else 0.90)
+                            dbp = PositionModel(
+                                user_id=self.user_id, symbol=symbol,
+                                side=SignalType.LONG if is_long else SignalType.SHORT,
+                                size=contracts, entry_price=entry,
+                                status=PositionStatus.OPEN,
+                                stop_loss=sl_def, take_profit=tp_def,
+                                opened_at=datetime.datetime.utcnow()
                             )
-                            if res_sl_id:
-                                sl_id = res_sl_id
-                                self._rescue_cooldown_until.pop(symbol, None)
+                            session.add(dbp)
+                            await session.flush()
+                        else:
+                            dbp = matching_db[-1]
+                            if len(matching_db) > 1:
+                                for extra in matching_db[:-1]:
+                                    extra.status = PositionStatus.CLOSED
+                                    extra.closed_at = datetime.datetime.utcnow()
+                                await session.flush()
+
+                            if abs(float(dbp.size) - contracts) > 1e-6:
+                                logger.info(f"[SYNC] Volume {symbol}: {dbp.size} -> {contracts}")
+                                dbp.size = contracts
+                                await session.flush()
+                        
+                        # Унифицированная сверка ордеров защиты
+                        db_sl_val = float(dbp.stop_loss or 0.0)
+                        db_tp_val = float(dbp.take_profit or 0.0)
+                        sl_id, tp_id, found_sl, found_tp = await self._reconcile_orders_for_position(
+                            symbol=symbol,
+                            position_db_id=dbp.id,
+                            entry_price=entry,
+                            is_long=is_long,
+                            db_sl_val=db_sl_val,
+                            db_tp_val=db_tp_val,
+                            exchange_orders=ex_orders_by_symbol.get(symbol, [])
+                        )
+
+                        # RESCUE: восстановление недостающих ордеров защиты
+                        if (not sl_id and dbp.stop_loss) or (not tp_id and dbp.take_profit):
+                            now_ts = time.time()
+                            if now_ts < self._rescue_cooldown_until.get(symbol, 0.0):
+                                logger.warning(f"[RESCUE] Cooldown active for {symbol}")
                             else:
-                                self._rescue_cooldown_until[symbol] = now_ts + 60
-                                logger.warning(f"[RESCUE] Failed for {symbol}. Cooldown 60s.")
-                            if res_tp_id:
-                                tp_id = res_tp_id
+                                live_size, live_side = await self._get_live_position(symbol, preferred_side=("LONG" if is_long else "SHORT"))
+                                if live_size <= 0 or (live_side and ((is_long and live_side != "LONG") or ((not is_long) and live_side != "SHORT"))):
+                                    logger.warning(f"[RESCUE] Skip {symbol}: no live position or side mismatch")
+                                    await self._cancel_extra_algo_orders(symbol, [])
+                                    continue
+                                logger.warning(f"[RESCUE] Restoring protection for {symbol}")
 
-                            if res_sl_id or res_tp_id:
-                                await send_telegram_msg(
-                                    f"🛟 **ВОССТАНОВЛЕНИЕ ЗАЩИТЫ**\n\n"
-                                    f"🔹 Символ: {symbol}\n"
-                                    f"🛡 Стоп: {f'{dbp.stop_loss:.4f}' if dbp.stop_loss else 'N/A'}\n"
-                                    f"🎯 Тейк: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}"
-                                )
+                                safe_stop = dbp.stop_loss
+                                if safe_stop:
+                                    invalid_for_side = (is_long and float(safe_stop) >= entry) or ((not is_long) and float(safe_stop) <= entry)
+                                    if invalid_for_side:
+                                        safe_stop = entry * (0.995 if is_long else 1.005)
+                                        logger.warning(f"[RESCUE] Adjusted stop for {symbol}: {dbp.stop_loss} -> {safe_stop}")
 
-                    cache_stop = found_sl or dbp.stop_loss
-                    if cache_stop:
-                        cache_f = float(cache_stop)
-                        wrong_side = (is_long and cache_f >= entry) or ((not is_long) and cache_f <= entry)
-                        if wrong_side:
-                            be_moved = (is_long and cache_f >= entry) or ((not is_long) and cache_f <= entry)
-                            if be_moved and found_sl:
-                                pass  # trailing stop crossed BE — this is valid, keep it
-                            else:
-                                fallback_stop = dbp.stop_loss if dbp.stop_loss else (entry * (0.95 if is_long else 1.05))
-                                logger.warning(f"[RECONCILE] Invalid stop for {symbol}: {cache_stop} vs entry={entry}. Fallback={fallback_stop}")
-                                cache_stop = fallback_stop
+                                if not sl_id and safe_stop:
+                                    res_sl_id, _ = await self._set_protective_orders(
+                                        symbol, "BUY" if is_long else "SELL", contracts, safe_stop, None, position_id=dbp.id, session=session
+                                    )
+                                    if res_sl_id:
+                                        sl_id = res_sl_id
+                                        self._rescue_cooldown_until.pop(symbol, None)
+                                    else:
+                                        self._rescue_cooldown_until[symbol] = now_ts + settings.rescue_cooldown
+                                        logger.warning(f"[RESCUE] Failed to set SL for {symbol}. Cooldown {settings.rescue_cooldown}s.")
 
-                    prev_trade = self.active_trades.get(symbol, {})
-                    new_active[symbol] = {
-                        "entry": entry,
-                        "stop": cache_stop,
-                        "take_profit_live": found_tp or dbp.take_profit,
-                        "stage": prev_trade.get("stage", 0),
-                        "opened_at": dbp.opened_at.timestamp(),
-                        "signal_type": "LONG" if is_long else "SHORT",
-                        "current_size": contracts,
-                        "position_db_id": dbp.id,
-                        "stop_order_id": sl_id,
-                        "tp_order_id": tp_id,
-                        "position_is_open": True,
-                        "realized_pnl": prev_trade.get("realized_pnl", 0.0),
-                        "open_fees_usd": prev_trade.get("open_fees_usd", 0.0),
-                        "initial_stop": float(dbp.stop_loss or cache_stop or 0.0),
-                        "be_moved": (float(cache_stop) >= entry) if is_long else (float(cache_stop) <= entry),
-                        "strategy": prev_trade.get("strategy", "unknown"),
-                        "timeframe": prev_trade.get("timeframe", "1h"),
-                    }
+                                if not tp_id and dbp.take_profit:
+                                    _, res_tp_id = await self._set_protective_orders(
+                                        symbol, "BUY" if is_long else "SELL", contracts, None, dbp.take_profit, position_id=dbp.id, session=session
+                                    )
+                                    if res_tp_id:
+                                        tp_id = res_tp_id
+                                        self._rescue_cooldown_until.pop(symbol, None)
+                                    else:
+                                        self._rescue_cooldown_until[symbol] = now_ts + settings.rescue_cooldown
+                                        logger.warning(f"[RESCUE] Failed to set TP for {symbol}. Cooldown {settings.rescue_cooldown}s.")
 
-                # Подмена словаря под локом теперь после формирования new_active
-                async with self._trades_lock:
-                    self.active_trades = new_active
-                    logger.info(f"[RECONCILE] Active positions: {len(self.active_trades)}")
+                                if sl_id or tp_id:
+                                    msg = f"🛟 **ВОССТАНОВЛЕНИЕ ЗАЩИТЫ**\n\n" \
+                                          f"🔹 Символ: {symbol}\n" \
+                                          f"🛡 Стоп: {f'{dbp.stop_loss:.4f}' if dbp.stop_loss else 'N/A'}\n" \
+                                          f"🎯 Тейк: {f'{dbp.take_profit:.4f}' if dbp.take_profit else 'N/A'}\n\n"
+                                    if sl_id: msg += f"🆔 SL ID: `{sl_id}`\n"
+                                    if tp_id: msg += f"🆔 TP ID: `{tp_id}`"
+                                    await send_telegram_msg(msg)
+                                else:
+                                    self._rescue_cooldown_until[symbol] = now_ts + settings.rescue_cooldown
+                        
+                        await self._cancel_extra_algo_orders(symbol, [str(sl_id) for sl_id in [sl_id, tp_id] if sl_id])
+                        
+                        cache_stop = found_sl or dbp.stop_loss
+                        new_active[symbol] = {
+                            "entry": entry,
+                            "stop": cache_stop,
+                            "take_profit_live": found_tp or dbp.take_profit,
+                            "stage": prev_trade.get("stage", 0) if (prev_trade := self.active_trades.get(symbol, {})) else 0,
+                            "opened_at": dbp.opened_at.timestamp() if dbp.opened_at else time.time(),
+                            "signal_type": "LONG" if is_long else "SHORT",
+                            "current_size": contracts,
+                            "position_db_id": dbp.id,
+                            "stop_order_id": sl_id,
+                            "tp_order_id": tp_id,
+                            "position_is_open": True,
+                            "realized_pnl": prev_trade.get("realized_pnl", 0.0) if prev_trade else 0.0,
+                            "open_fees_usd": prev_trade.get("open_fees_usd", 0.0) if prev_trade else 0.0,
+                            "initial_stop": float(dbp.stop_loss or cache_stop or 0.0),
+                            "be_moved": (float(cache_stop) >= entry) if is_long else (float(cache_stop) <= entry),
+                            "strategy": prev_trade.get("strategy", "unknown") if prev_trade else "unknown",
+                            "timeframe": prev_trade.get("timeframe", "1h") if prev_trade else "1h",
+                        }
 
-                # Закрываем "призраков" (позиции в БД без живой позиции на бирже)
-                for sym, dbp in db_positions.items():
-                    if sym not in new_active:
-                        try:
-                            ots = dbp.opened_at.timestamp() if dbp.opened_at else time.time()
-                        except Exception:
-                            ots = time.time()
-                        ghost_snaps.append(
-                            {
+                    async with self._trades_lock:
+                        self.active_trades = new_active
+
+                    for sym, dbp in db_positions.items():
+                        if sym not in new_active:
+                            ghost_snaps.append({
                                 "symbol": dbp.symbol,
                                 "entry_price": float(dbp.entry_price or 0),
                                 "size": float(dbp.size or 0),
                                 "side": dbp.side,
-                                "opened_at_ts": ots,
-                            }
-                        )
-                        await session.execute(
-                            update(PositionModel)
-                            .where(PositionModel.id == dbp.id)
-                            .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
-                        )
+                                "opened_at_ts": dbp.opened_at.timestamp() if dbp.opened_at else time.time(),
+                            })
+                            await session.execute(
+                                update(PositionModel)
+                                .where(PositionModel.id == dbp.id)
+                                .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
+                            )
 
-                await session.commit()
+
 
             for snap in ghost_snaps:
                 await self._persist_pnl_reconciled_close(snap)
@@ -1394,7 +1379,7 @@ class ExecutionEngine:
                     if not oid:
                         continue
                     try:
-                        clean = orphan_sym.replace("/", "").split(":")[0]
+                        clean = SymbolNormalizer.to_binance(orphan_sym)
                         await self._with_time_sync_retry(
                             lambda _oid=oid, _cs=clean: self.exchange.request(
                                 'algoOrder', 'fapiPrivate', 'DELETE', {'algoId': str(_oid)}
@@ -1419,18 +1404,18 @@ class ExecutionEngine:
             # Cleanup stale PENDING/EXECUTING signals older than 10 minutes
             try:
                 async with async_session() as session:
-                    cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
-                    stale_result = await session.execute(
-                        update(SignalModel)
-                        .where(
-                            SignalModel.status.in_(["PENDING", "EXECUTING"]),
-                            SignalModel.timestamp < cutoff
+                    async with session.begin():
+                        cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=10)
+                        stale_result = await session.execute(
+                            update(SignalModel)
+                            .where(
+                                SignalModel.status.in_(["PENDING", "EXECUTING"]),
+                                SignalModel.timestamp < cutoff
+                            )
+                            .values(status="EXPIRED")
                         )
-                        .values(status="EXPIRED")
-                    )
-                    if stale_result.rowcount > 0:
-                        logger.info(f"🧹 [RECONCILE] Expired {stale_result.rowcount} stale signals")
-                    await session.commit()
+                        if stale_result.rowcount > 0:
+                            logger.info(f"🧹 [RECONCILE] Expired {stale_result.rowcount} stale signals")
             except Exception as sig_err:
                 logger.debug(f"Signal cleanup error: {sig_err}")
 
@@ -1439,7 +1424,8 @@ class ExecutionEngine:
             logger.error(f"Reconcile Error: {e}\n{traceback.format_exc()}")
 
     async def execute_signal(self, signal_data: dict, account_balance: float, drawdown: float, open_count: int):
-        symbol = signal_data['symbol']
+        # Нормализуем символ перед началом обработки
+        symbol = SymbolNormalizer.normalize(signal_data['symbol'])
         direction = signal_data['signal']
         signal_id = signal_data.get("id")
 
@@ -1495,8 +1481,9 @@ class ExecutionEngine:
 
             # Idempotency (по ID сигнала в БД)
             async with async_session() as session:
-                stmt = update(SignalModel).where(SignalModel.id == signal_id, SignalModel.status == "PENDING").values(status="EXECUTING")
-                res = await session.execute(stmt); await session.commit()
+                async with session.begin():
+                    stmt = update(SignalModel).where(SignalModel.id == signal_id, SignalModel.status == "PENDING").values(status="EXECUTING")
+                    res = await session.execute(stmt)
                 if res.rowcount == 0:
                     logger.info(f"⏭ [{symbol}] Сигнал {signal_id} уже обрабатывается или исполнен.")
                     del self.active_trades[symbol]
@@ -1550,6 +1537,14 @@ class ExecutionEngine:
 
                 if lot_size <= 0:
                     raise EntryExecutionError("normalized_to_zero", "Zero lot size after normalization")
+
+                # 3.5 Проверка MIN_NOTIONAL
+                rules = await self._get_market_rules(symbol)
+                min_notional = float(rules.get('min_notional', 5.0))
+                current_notional = lot_size * entry_price
+                if current_notional < min_notional:
+                    logger.warning(f"🚫 [{symbol}] Ордер отклонен: Notional {current_notional:.2f} < Min {min_notional}")
+                    raise EntryExecutionError("min_notional_fail", f"Notional {current_notional:.2f} < {min_notional}")
 
                 # 4. Умный Вход (Limit Chasing)
                 await self._set_leverage_best_effort(symbol, settings.leverage)
@@ -1655,12 +1650,51 @@ class ExecutionEngine:
                 )
                 position_state = position_update.state
 
-                # 7. БД Позиция
+                # 7. БД Позиция и Ордера (Транзакционно)
                 async with async_session() as session:
-                    pos = PositionModel(user_id=self.user_id, signal_id=signal_id, symbol=symbol, side=SignalType.LONG if direction.upper() == "LONG" else SignalType.SHORT,
-                                        entry_price=position_state.entry_price, size=position_state.qty, stop_loss=stop_price, take_profit=signal_data.get("take_profit"),
-                                        status=PositionStatus.OPEN, opened_at=datetime.datetime.utcnow())
-                    session.add(pos); await session.commit(); await session.refresh(pos)
+                    async with session.begin():
+                        pos = PositionModel(
+                            user_id=self.user_id,
+                            signal_id=signal_id,
+                            symbol=symbol,
+                            side=SignalType.LONG if direction.upper() == "LONG" else SignalType.SHORT,
+                            entry_price=position_state.entry_price,
+                            size=position_state.qty,
+                            stop_loss=stop_price,
+                            take_profit=signal_data.get("take_profit"),
+                            status=PositionStatus.OPEN,
+                            opened_at=datetime.datetime.utcnow()
+                        )
+                        session.add(pos)
+                        await session.flush()  # Получаем pos.id
+
+                        pos_side = self._position_side_from_entry_side(direction)
+                        for aud in entry_audit:
+                            od = aud.get("order") or {}
+                            oid = od.get("id")
+                            if oid is None:
+                                continue
+                            st_raw = str(od.get("status", "")).lower()
+                            if st_raw in ("closed", "filled"):
+                                ost = OrderStatus.FILLED
+                            elif st_raw in ("canceled", "cancelled"):
+                                ost = OrderStatus.CANCELED
+                            else:
+                                ost = OrderStatus.OPEN
+                            cid = od.get("clientOrderId")
+                            await self._db_persist_order(
+                                position_id=pos.id,
+                                symbol=symbol,
+                                exchange_order_id=str(oid),
+                                client_order_id=str(cid) if cid else None,
+                                order_type=str(aud.get("kind") or "entry"),
+                                position_side=pos_side,
+                                price=float(od.get("average") or od.get("price") or 0.0),
+                                size=float(od.get("filled") or od.get("amount") or 0.0),
+                                status=ost,
+                                session=session,
+                            )
+
                 await self._audit_event(
                     event_type="position_opened",
                     symbol=symbol,
@@ -1677,34 +1711,10 @@ class ExecutionEngine:
                     },
                 )
 
-                pos_side = self._position_side_from_entry_side(direction)
-                for aud in entry_audit:
-                    od = aud.get("order") or {}
-                    oid = od.get("id")
-                    if oid is None:
-                        continue
-                    st_raw = str(od.get("status", "")).lower()
-                    if st_raw in ("closed", "filled"):
-                        ost = OrderStatus.FILLED
-                    elif st_raw in ("canceled", "cancelled"):
-                        ost = OrderStatus.CANCELED
-                    else:
-                        ost = OrderStatus.OPEN
-                    cid = od.get("clientOrderId")
-                    await self._db_persist_order(
-                        position_id=pos.id,
-                        symbol=symbol,
-                        exchange_order_id=str(oid),
-                        client_order_id=str(cid) if cid else None,
-                        order_type=str(aud.get("kind") or "entry"),
-                        position_side=pos_side,
-                        price=float(od.get("average") or od.get("price") or 0.0),
-                        size=float(od.get("filled") or od.get("amount") or 0.0),
-                        status=ost,
-                    )
-
                 # 8. Защитные ордера
                 targets = signal_data.get("targets") or signal_data.get("take_profit")
+                # Мы не включаем постановку защиты в ту же транзакцию, т.к. это внешние вызовы API,
+                # но передаем сессию для записи ордеров защиты если нужно (опционально)
                 sl_id, tp_id = await self._set_protective_orders(
                     symbol, direction, lot_size, stop_price, targets, position_id=pos.id
                 )
@@ -1720,24 +1730,25 @@ class ExecutionEngine:
                         lambda: self.exchange.create_order(symbol, 'market', emergency_side, lot_size),
                         ctx=f"emergency_close_no_sl({symbol})"
                     )
-                    await self._db_persist_order(
-                        position_id=pos.id,
-                        symbol=symbol,
-                        exchange_order_id=str(em_o.get("id")) if em_o and em_o.get("id") is not None else None,
-                        client_order_id=None,
-                        order_type="MARKET_EMERGENCY_CLOSE",
-                        position_side=pos_side,
-                        price=float(em_o.get("average") or em_o.get("price") or 0.0),
-                        size=float(em_o.get("filled") or lot_size),
-                        status=OrderStatus.FILLED,
-                    )
                     async with async_session() as session:
-                        await session.execute(
-                            update(PositionModel)
-                            .where(PositionModel.id == pos.id)
-                            .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
-                        )
-                        await session.commit()
+                        async with session.begin():
+                            await self._db_persist_order(
+                                position_id=pos.id,
+                                symbol=symbol,
+                                exchange_order_id=str(em_o.get("id")) if em_o and em_o.get("id") is not None else None,
+                                client_order_id=None,
+                                order_type="MARKET_EMERGENCY_CLOSE",
+                                position_side=pos_side,
+                                price=float(em_o.get("average") or em_o.get("price") or 0.0),
+                                size=float(em_o.get("filled") or lot_size),
+                                status=OrderStatus.FILLED,
+                                session=session,
+                            )
+                            await session.execute(
+                                update(PositionModel)
+                                .where(PositionModel.id == pos.id)
+                                .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
+                            )
                     raise EntryExecutionError(
                         "protective_stop_missing",
                         "Protective STOP was not created; position closed by emergency market order"
@@ -1780,8 +1791,8 @@ class ExecutionEngine:
                 
                 # Обновляем сигнал в БД как EXECUTED
                 async with async_session() as session:
-                    await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED"))
-                    await session.commit()
+                    async with session.begin():
+                        await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED"))
                 _strat = signal_data.get("strategy", "?")
                 _tp_val = signal_data.get("take_profit")
                 _tp_str = f"{float(_tp_val):.4f}" if _tp_val else "—"
@@ -1842,8 +1853,8 @@ class ExecutionEngine:
 
                 # Помечаем сигнал как FAILED в БД
                 async with async_session() as session:
-                    await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="FAILED", comment=str(e)[:200]))
-                    await session.commit()
+                    async with session.begin():
+                        await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="FAILED", comment=str(e)[:200]))
 
                 try:
                     await send_telegram_msg(
@@ -1870,12 +1881,12 @@ class ExecutionEngine:
                 if abs(live_size - float(trade.get("current_size", 0.0))) > 1e-8:
                     trade["current_size"] = live_size
                     async with async_session() as session:
-                        await session.execute(
-                            update(PositionModel)
-                            .where(PositionModel.id == trade["position_db_id"])
-                            .values(size=float(live_size))
-                        )
-                        await session.commit()
+                        async with session.begin():
+                            await session.execute(
+                                update(PositionModel)
+                                .where(PositionModel.id == trade["position_db_id"])
+                                .values(size=float(live_size))
+                            )
                             
             # Trade management cycle (invalidation, time stop, partial); стоп — ниже, unified pipeline
             try:
@@ -1928,18 +1939,6 @@ class ExecutionEngine:
                         try:
                             side = 'buy' if trade['signal_type'] == "LONG" else 'sell'
                             pyr_o = await self.exchange.create_order(symbol, 'market', side, add_size)
-                            await self._db_persist_order(
-                                position_id=trade.get("position_db_id"),
-                                symbol=symbol,
-                                exchange_order_id=str(pyr_o.get("id")) if pyr_o and pyr_o.get("id") is not None else None,
-                                client_order_id=str(pyr_o.get("clientOrderId")) if pyr_o and pyr_o.get("clientOrderId") else None,
-                                order_type="MARKET_PYRAMID_ADD",
-                                position_side=str(trade.get("signal_type") or "LONG"),
-                                price=float(pyr_o.get("average") or pyr_o.get("price") or 0.0),
-                                size=float(pyr_o.get("filled") or add_size),
-                                status=OrderStatus.FILLED,
-                            )
-                            
                             fill_size = float(pyr_o.get("filled") or add_size)
                             fill_price = float(pyr_o.get("average") or pyr_o.get("price") or current_price)
                             position_update = PositionManager.open_position(
@@ -1954,14 +1953,26 @@ class ExecutionEngine:
 
                             trade['stage'] = next_stage
                             self._apply_position_update_to_trade(trade, position_update)
-                            
+
                             async with async_session() as session:
-                                await session.execute(
-                                    update(PositionModel)
-                                    .where(PositionModel.id == trade["position_db_id"])
-                                    .values(size=float(new_size), entry_price=float(new_entry))
-                                )
-                                await session.commit()
+                                async with session.begin():
+                                    await self._db_persist_order(
+                                        position_id=trade.get("position_db_id"),
+                                        symbol=symbol,
+                                        exchange_order_id=str(pyr_o.get("id")) if pyr_o and pyr_o.get("id") is not None else None,
+                                        client_order_id=str(pyr_o.get("clientOrderId")) if pyr_o and pyr_o.get("clientOrderId") else None,
+                                        order_type="MARKET_PYRAMID_ADD",
+                                        position_side=str(trade.get("signal_type") or "LONG"),
+                                        price=float(pyr_o.get("average") or pyr_o.get("price") or 0.0),
+                                        size=float(pyr_o.get("filled") or add_size),
+                                        status=OrderStatus.FILLED,
+                                        session=session,
+                                    )
+                                    await session.execute(
+                                        update(PositionModel)
+                                        .where(PositionModel.id == trade["position_db_id"])
+                                        .values(size=float(new_size), entry_price=float(new_entry))
+                                    )
                             
                             # Переставляем стопы
                             await self._cancel_all_orders(symbol)
@@ -2163,33 +2174,34 @@ class ExecutionEngine:
                     trade["be_moved"] = True
 
         async with async_session() as session:
-            await session.execute(
-                update(PositionModel)
-                .where(PositionModel.id == trade["position_db_id"])
-                .values(stop_loss=float(desired_stop))
-            )
-            await session.commit()
+            async with session.begin():
+                await session.execute(
+                    update(PositionModel)
+                    .where(PositionModel.id == trade["position_db_id"])
+                    .values(stop_loss=float(desired_stop))
+                )
 
-        if "confirmed" in source:
-            self._tm_record("confirmed_trailing")
+                if "confirmed" in source:
+                    self._tm_record("confirmed_trailing")
 
-        order_type = "SL_TRAILING_UPDATE"
-        if is_be and not be_before:
-            order_type = "SL_BREAKEVEN_MOVE"
-        elif "confirmed" in source:
-            order_type = "SL_TRAILING_CONFIRMED"
+                order_type_tag = "SL_TRAILING_UPDATE"
+                if is_be and not be_before:
+                    order_type_tag = "SL_BREAKEVEN_MOVE"
+                elif "confirmed" in source:
+                    order_type_tag = "SL_TRAILING_CONFIRMED"
 
-        await self._db_persist_order(
-            position_id=trade.get("position_db_id"),
-            symbol=symbol,
-            exchange_order_id=str(sl_id) if sl_id else None,
-            client_order_id=None,
-            order_type=order_type,
-            position_side=side,
-            price=float(desired_stop),
-            size=float(trade["current_size"]),
-            status=OrderStatus.OPEN,
-        )
+                await self._db_persist_order(
+                    position_id=trade.get("position_db_id"),
+                    symbol=symbol,
+                    exchange_order_id=str(sl_id) if sl_id else None,
+                    client_order_id=None,
+                    order_type=order_type_tag,
+                    position_side=side,
+                    price=float(desired_stop),
+                    size=float(trade["current_size"]),
+                    status=OrderStatus.OPEN,
+                    session=session,
+                )
 
         if is_be and not be_before:
             await send_telegram_msg(
@@ -2209,90 +2221,7 @@ class ExecutionEngine:
             return 0
         return int((time.time() - opened) / tf_sec)
 
-    def _tm_should_time_stop(self, trade: dict, current_price: float) -> bool:
-        """No-progress time stop: exit if position made no meaningful profit after N bars."""
-        setup_group = trade.get("setup_group", "trend")
-        tf = trade.get("timeframe", "1h")
-        bars = self._tm_bars_since_entry(trade, tf)
-        trade["bars_since_entry"] = bars
 
-        if bars >= settings.time_stop_hard_limit_bars:
-            return True
-
-        limit_map = {
-            "breakout": settings.time_stop_max_bars_breakout,
-            "trend": settings.time_stop_max_bars_trend,
-            "mean_reversion": settings.time_stop_max_bars_mean_reversion,
-        }
-        soft_limit = limit_map.get(setup_group, settings.time_stop_max_bars_trend)
-
-        if bars >= soft_limit:
-            entry = float(trade.get("entry", 0))
-            if entry <= 0:
-                return True
-            side = str(trade.get("signal_type", "")).upper()
-            min_pct = settings.time_stop_min_profit_pct / 100.0
-            if side == "LONG" and current_price < entry * (1 + min_pct):
-                return True
-            if side == "SHORT" and current_price > entry * (1 - min_pct):
-                return True
-        return False
-
-    def _tm_should_invalidation_exit(self, trade: dict, current_price: float, df: "Optional[pd.DataFrame]" = None) -> bool:
-        """Setup invalidation exit: the original technical premise is broken."""
-        if not settings.invalidation_exit_enabled:
-            return False
-        inv_level = trade.get("invalidation_level")
-        if inv_level is None or float(inv_level) <= 0:
-            return False
-        inv = float(inv_level)
-        side = str(trade.get("signal_type", "")).upper()
-        setup_group = trade.get("setup_group", "trend")
-
-        if setup_group == "breakout":
-            if side == "LONG" and current_price < inv:
-                return True
-            if side == "SHORT" and current_price > inv:
-                return True
-
-        elif setup_group == "trend":
-            ma_entry = trade.get("ma_at_entry", {})
-            if df is not None and not df.empty and 'ema50' in df.columns:
-                current_ma50 = float(df.iloc[-1].get('ema50', 0) or 0)
-                if current_ma50 > 0:
-                    if side == "LONG" and current_price < current_ma50:
-                        return True
-                    if side == "SHORT" and current_price > current_ma50:
-                        return True
-            elif inv > 0:
-                if side == "LONG" and current_price < inv:
-                    return True
-                if side == "SHORT" and current_price > inv:
-                    return True
-
-        elif setup_group == "mean_reversion":
-            r = self.risk_manager.current_r_multiple(
-                float(trade.get("entry", 0)),
-                float(trade.get("initial_stop", trade.get("stop", 0))),
-                current_price,
-                side,
-            )
-            bars = trade.get("bars_since_entry", 0)
-            if bars > 8 and r < -0.5:
-                return True
-
-        return False
-
-    def _tm_should_arm_break_even(self, trade: dict, current_r: float, adx: "Optional[float]") -> bool:
-        """Decide if we should move stop to break-even (1R + confirmation)."""
-        if trade.get("be_armed") or trade.get("be_moved"):
-            return False
-        if current_r < settings.be_trigger_r:
-            return False
-        if not settings.be_require_confirmation:
-            return True
-        adx_ok = adx is not None and float(adx) >= 20.0
-        return adx_ok
 
     async def _tm_partial_reduce(self, symbol: str, trade: dict, current_r: float) -> bool:
         """Reduce position by partial_fraction if partial trigger is met."""
@@ -2349,15 +2278,15 @@ class ExecutionEngine:
             new_size = float(position_update.state.qty)
             trade["partial_done"] = True
             async with async_session() as session:
-                await session.execute(
-                    update(PositionModel)
-                    .where(PositionModel.id == trade["position_db_id"])
-                    .values(
-                        size=float(max(0.0, new_size)),
-                        realized_pnl=float(position_update.state.realized_pnl),
+                async with session.begin():
+                    await session.execute(
+                        update(PositionModel)
+                        .where(PositionModel.id == trade["position_db_id"])
+                        .values(
+                            size=float(max(0.0, new_size)),
+                            realized_pnl=float(position_update.state.realized_pnl),
+                        )
                     )
-                )
-                await session.commit()
 
             self._tm_record("partial_reduce")
             await self._audit_event(
@@ -2440,13 +2369,100 @@ class ExecutionEngine:
 
         trade["max_adverse_r"] = min(float(trade.get("max_adverse_r", 0)), current_r)
 
+
+
         # 1. Setup invalidation exit
+        if TradeGuard.should_invalidation_exit(trade, current_price, df_tf, self.risk_manager):
+            self._tm_record("invalidation_exit")
+            if trade_mgmt_r_at_exit:
+                trade_mgmt_r_at_exit.observe(current_r)
+            if trade_mgmt_max_favorable_r:
+                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
+            logger.info(
+                f"⚠️ [TM-INVALIDATION] {symbol} {side}: setup invalidated at {current_r:.2f}R, closing"
+            )
+            await send_telegram_msg(
+                f"⚠️ **ИНВАЛИДАЦИЯ СЕТАПА**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"📊 R: `{current_r:.2f}` | Группа: `{trade.get('setup_group')}`\n"
+                f"🔴 Позиция закрыта досрочно"
+            )
+            await self._close_position(symbol, reason="INVALIDATION")
+            return
+
+        # 2. Time stop
+        tf = trade.get("timeframe", "1h")
+        tf_sec = 3600
+        if tf.endswith("m"): tf_sec = int(tf[:-1]) * 60
+        elif tf.endswith("h"): tf_sec = int(tf[:-1]) * 3600
+        elif tf.endswith("d"): tf_sec = int(tf[:-1]) * 86400
+        opened = float(trade.get("opened_at", time.time()))
+        trade["bars_since_entry"] = int((time.time() - opened) / tf_sec) if tf_sec > 0 else 0
+        
+        if TradeGuard.should_time_stop(trade, current_price):
+            self._tm_record("time_stop")
+            if trade_mgmt_r_at_exit:
+                trade_mgmt_r_at_exit.observe(current_r)
+            if trade_mgmt_max_favorable_r:
+                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
+            logger.info(
+                f"⏰ [TM-TIMESTOP] {symbol} {side}: bars={trade.get('bars_since_entry', 0)}, "
+                f"R={current_r:.2f}, closing"
+            )
+            await send_telegram_msg(
+                f"⏰ **ТАЙМСТОП**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"📊 Баров: `{trade.get('bars_since_entry', 0)}` | R: `{current_r:.2f}`\n"
+                f"🔴 Позиция закрыта по таймауту"
+            )
+            await self._close_position(symbol, reason="TIME_MGMT")
+            return
+
+        # 3. Break-even (arm flag, actual BE move happens in schedule_update_positions)
+        if TradeGuard.should_arm_break_even(trade, current_r, adx):
+            if not trade.get("be_armed"):
+                trade["be_armed"] = True
+                self._tm_record("be_move")
+                logger.info(f"🔰 [TM-BE-ARM] {symbol} {side}: armed BE at {current_r:.2f}R")
+
+        # 3.1 CVD-based BE (Advanced Phase 4)
+        # If CVD shows strong reversal (delta > 0.7 against us) and we are in profit, protect at BE
+        is_in_profit = (current_price > entry) if side == "LONG" else (current_price < entry)
+        if not trade.get("be_armed") and is_in_profit:
+            cvd_threshold = 0.7
+            should_cvd_be = (side == "LONG" and cvd_val < -cvd_threshold) or (side == "SHORT" and cvd_val > cvd_threshold)
+            if should_cvd_be:
+                trade["be_armed"] = True
+                self._tm_record("be_cvd")
+                logger.info(f"🔰 [TM-BE-CVD] {symbol} {side}: armed BE due to CVD reversal ({cvd_val:.2f})")
+
+        # 3.2 Volspike Exhaustion Exit (Advanced Phase 4)
+        if df_tf is not None and not df_tf.empty and current_r >= 1.0:
+            last_vol = float(df_tf.iloc[-1].get("volume", 0))
+            avg_vol = float(df_tf["volume"].tail(20).mean())
+            if avg_vol > 0 and last_vol > avg_vol * 5.0: # 5x volume spike
+                logger.info(f"🚀 [TM-VOLSPIKE] {symbol} {side}: volume exhaustion {last_vol/avg_vol:.1f}x avg, closing at {current_r:.2f}R")
+                await send_telegram_msg(f"🚀 **VOLSPIKE EXIT**\n`{symbol}`: Volume spike {last_vol/avg_vol:.1f}x -> profit locked")
+                await self._close_position(symbol, reason="VOLSPIKE")
+                return
+
+        # 4. Partial reduction (Scaling Out)
+        if TradeGuard.should_partial_reduce(trade, current_r):
+            fraction = getattr(settings, "partial_fraction", 0.33)
+            await self._partially_close_position(symbol, fraction=fraction, reason="PARTIAL_TP")
+            
+            # Автоматически переводим в безубыток после частичной фиксации для защиты прибыли
+            if not trade.get("be_armed") and not trade.get("be_moved"):
+                trade["be_armed"] = True
+                logger.info(f"🔰 [TM-AUTO-BE] {symbol}: arming BE after partial reduction")
+
+        # Confirmed trailing + ATR trail + BE: см. _compute_unified_desired_stop / schedule_update_positions
 
     async def _update_stop_order_only(self, symbol: str, trade: dict, new_price: float):
         """Cancels ONLY the current Stop-Loss and places a new one at new_price."""
         try:
             sl_id = trade.get("stop_order_id")
-            clean_sym = symbol.replace("/", "").split(":")[0]
+            clean_sym = SymbolNormalizer.to_binance(symbol)
             
             # 1. Cancel old SL if exists
             if sl_id:
@@ -2477,78 +2493,68 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Error in _update_stop_order_only for {symbol}: {e}")
 
-        # 1. Setup invalidation exit
-        if self._tm_should_invalidation_exit(trade, current_price, df_tf):
-            self._tm_record("invalidation_exit")
-            if trade_mgmt_r_at_exit:
-                trade_mgmt_r_at_exit.observe(current_r)
-            if trade_mgmt_max_favorable_r:
-                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
-            logger.info(
-                f"⚠️ [TM-INVALIDATION] {symbol} {side}: setup invalidated at {current_r:.2f}R, closing"
-            )
-            await send_telegram_msg(
-                f"⚠️ **ИНВАЛИДАЦИЯ СЕТАПА**\n\n"
-                f"🔹 Символ: `{symbol}`\n"
-                f"📊 R: `{current_r:.2f}` | Группа: `{trade.get('setup_group')}`\n"
-                f"🔴 Позиция закрыта досрочно"
-            )
-            await self._close_position(symbol, reason="INVALIDATION")
-            return
-
-        # 2. Time stop
-        if self._tm_should_time_stop(trade, current_price):
-            self._tm_record("time_stop")
-            if trade_mgmt_r_at_exit:
-                trade_mgmt_r_at_exit.observe(current_r)
-            if trade_mgmt_max_favorable_r:
-                trade_mgmt_max_favorable_r.observe(float(trade.get("max_favorable_r", 0)))
-            logger.info(
-                f"⏰ [TM-TIMESTOP] {symbol} {side}: bars={trade.get('bars_since_entry', 0)}, "
-                f"R={current_r:.2f}, closing"
-            )
-            await send_telegram_msg(
-                f"⏰ **ТАЙМСТОП**\n\n"
-                f"🔹 Символ: `{symbol}`\n"
-                f"📊 Баров: `{trade.get('bars_since_entry', 0)}` | R: `{current_r:.2f}`\n"
-                f"🔴 Позиция закрыта по таймауту"
-            )
-            await self._close_position(symbol, reason="TIME_MGMT")
-            return
-
-        # 3. Break-even (arm flag, actual BE move happens in schedule_update_positions)
-        if self._tm_should_arm_break_even(trade, current_r, adx):
-            if not trade.get("be_armed"):
-                trade["be_armed"] = True
-                self._tm_record("be_move")
-                logger.info(f"🔰 [TM-BE-ARM] {symbol} {side}: armed BE at {current_r:.2f}R")
-
-        # 3.1 CVD-based BE (Advanced Phase 4)
-        # If CVD shows strong reversal (delta > 0.7 against us) and we are in profit, protect at BE
-        is_in_profit = (current_price > entry) if side == "LONG" else (current_price < entry)
-        if not trade.get("be_armed") and is_in_profit:
-            cvd_threshold = 0.7
-            should_cvd_be = (side == "LONG" and cvd_val < -cvd_threshold) or (side == "SHORT" and cvd_val > cvd_threshold)
-            if should_cvd_be:
-                trade["be_armed"] = True
-                self._tm_record("be_cvd")
-                logger.info(f"🔰 [TM-BE-CVD] {symbol} {side}: armed BE due to CVD reversal ({cvd_val:.2f})")
-
-        # 3.2 Volspike Exhaustion Exit (Advanced Phase 4)
-        if df_tf is not None and not df_tf.empty and current_r >= 1.0:
-            last_vol = float(df_tf.iloc[-1].get("volume", 0))
-            avg_vol = float(df_tf["volume"].tail(20).mean())
-            if avg_vol > 0 and last_vol > avg_vol * 5.0: # 5x volume spike
-                logger.info(f"🚀 [TM-VOLSPIKE] {symbol} {side}: volume exhaustion {last_vol/avg_vol:.1f}x avg, closing at {current_r:.2f}R")
-                await send_telegram_msg(f"🚀 **VOLSPIKE EXIT**\n`{symbol}`: Volume spike {last_vol/avg_vol:.1f}x -> profit locked")
-                await self._close_position(symbol, reason="VOLSPIKE")
+    async def _partially_close_position(self, symbol: str, fraction: float = 0.5, reason: str = "PARTIAL_TP"):
+        """Частичное закрытие позиции (Scaling Out)"""
+        if symbol not in self.active_trades: return
+        trade = self.active_trades[symbol]
+        
+        try:
+            live_size, live_side = await self._get_live_position(symbol, preferred_side=trade.get('signal_type'))
+            base_amount = live_size if live_size > 1e-8 else trade['current_size']
+            close_amount = base_amount * fraction
+            
+            if close_amount < 1e-8:
+                logger.warning(f"⚠️ [PARTIAL] {symbol}: amount too small to close ({close_amount})")
                 return
 
-        # 4. Partial reduction
-        if not trade.get("partial_done") and current_r >= settings.partial_trigger_r:
-            await self._tm_partial_reduce(symbol, trade, current_r)
+            side = 'sell' if trade['signal_type'] == "LONG" else 'buy'
+            
+            # Отправляем рыночный ордер на часть объема
+            try:
+                co = await self.exchange.create_order(symbol, 'market', side, close_amount, None, {"reduceOnly": True})
+            except Exception as _ce:
+                logger.error(f"❌ [PARTIAL] Error creating order for {symbol}: {_ce}")
+                return
 
-        # Confirmed trailing + ATR trail + BE: см. _compute_unified_desired_stop / schedule_update_positions
+            exit_price = float(co.get("average") or co.get("price") or 0.0)
+            if exit_price <= 0:
+                ticker = await self.exchange.fetch_ticker(symbol)
+                exit_price = float(ticker["last"])
+
+            # Считаем реализованный профит по этой части
+            entry = float(trade["entry"])
+            is_long = trade["signal_type"] == "LONG"
+            pnl_usd = (exit_price - entry) * close_amount if is_long else (entry - exit_price) * close_amount
+            
+            # Обновляем состояние сделки
+            trade["realized_pnl"] = float((trade.get("realized_pnl") or 0.0) + pnl_usd)
+            trade["current_size"] = float(trade["current_size"]) - close_amount
+            trade["partial_done"] = True
+            
+            # Запись в БД
+            async with async_session() as session:
+                async with session.begin():
+                    await self._db_persist_order(
+                        position_id=trade.get("position_db_id"),
+                        symbol=symbol,
+                        exchange_order_id=str(co.get("id")),
+                        order_type="PARTIAL_CLOSE",
+                        position_side=str(trade["signal_type"]),
+                        price=exit_price,
+                        size=close_amount,
+                        status=OrderStatus.FILLED,
+                    )
+            
+            logger.info(f"💰 [TM-PARTIAL] {symbol} {trade['signal_type']}: closed {fraction*100:.0f}% at {exit_price}. PnL: ${pnl_usd:.2f}")
+            await send_telegram_msg(
+                f"💰 **ЧАСТИЧНАЯ ФИКСАЦИЯ (Scaling Out)**\n\n"
+                f"🔹 Символ: `{symbol}`\n"
+                f"📊 Фиксация: `{fraction*100:.0f}%` позиции\n"
+                f"📈 Цена: `{exit_price}` | PnL: `{pnl_usd:+.2f} USDT`"
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ [PARTIAL] Critical error for {symbol}: {e}")
 
     async def _close_position(self, symbol: str, reason: str = "AUTO"):
         if symbol not in self.active_trades: return
@@ -2583,17 +2589,7 @@ class ExecutionEngine:
                         else:
                             raise
                     ps = str(trade.get("signal_type") or "LONG").upper()
-                    await self._db_persist_order(
-                        position_id=trade.get("position_db_id"),
-                        symbol=symbol,
-                        exchange_order_id=str(co.get("id")) if co and co.get("id") is not None else None,
-                        client_order_id=str(co.get("clientOrderId")) if co and co.get("clientOrderId") else None,
-                        order_type="MARKET_CLOSE",
-                        position_side=ps,
-                        price=float(co.get("average") or co.get("price") or 0.0),
-                        size=float(co.get("filled") or close_amount),
-                        status=OrderStatus.FILLED,
-                    )
+
                     exit_price_hint = float(co.get("average") or co.get("price") or 0.0)
             
             try:
@@ -2601,72 +2597,96 @@ class ExecutionEngine:
             except Exception:
                 lev = 1
 
-            async with async_session() as session:
-                position_update = None
-                await session.execute(
-                    update(PositionModel)
-                    .where(PositionModel.id == trade["position_db_id"])
-                    .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
-                )
+            # Подготовка данных для PnL ДО начала транзакции
+            exit_price = exit_price_hint
+            if reason == "EXTERNAL":
+                pnl_usd, pnl_pct = await self._realized_pnl_from_exchange_trades(symbol, trade)
+                if abs(pnl_usd) < 1e-12:
+                    try:
+                        ticker = await self.exchange.fetch_ticker(symbol)
+                        exit_price = float(ticker.get("last") or 0)
+                        entry = float(trade["entry"])
+                        size = float(trade["current_size"])
+                        is_long = trade["signal_type"] == "LONG"
+                        if entry > 0 and size > 0 and exit_price > 0:
+                            pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
+                            pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
+                    except Exception as e:
+                        logger.warning(f"Ticker fetch failed for external close PnL: {e}")
+            else:
+                if exit_price <= 0:
+                    try:
+                        ticker = await self.exchange.fetch_ticker(symbol)
+                        exit_price = float(ticker["last"])
+                    except Exception as e:
+                        logger.warning(f"Ticker fetch failed for close PnL: {e}")
 
                 try:
-                    if reason == "EXTERNAL":
-                        pnl_usd, pnl_pct = await self._realized_pnl_from_exchange_trades(symbol, trade)
-                        if abs(pnl_usd) < 1e-12:
-                            ticker = await self.exchange.fetch_ticker(symbol)
-                            exit_price = float(ticker.get("last") or 0)
-                            entry = float(trade["entry"])
-                            size = float(trade["current_size"])
-                            is_long = trade["signal_type"] == "LONG"
-                            if entry > 0 and size > 0 and exit_price > 0:
-                                pnl_usd = (exit_price - entry) * size if is_long else (entry - exit_price) * size
-                                pnl_pct = ((exit_price / entry) - 1) * 100 if is_long else ((entry / exit_price) - 1) * 100
-                    else:
-                        exit_price = exit_price_hint
-                        if exit_price <= 0:
-                            ticker = await self.exchange.fetch_ticker(symbol)
-                            exit_price = float(ticker["last"])
-                        position_update = PositionManager.close_position(
-                            state=self._trade_position_state(trade),
-                            exit_price=exit_price,
-                            exit_fee_usd=self._extract_order_fee_usd(co, "market_close") if close_amount > 1e-8 else 0.0,
-                        )
-                        pnl_usd = float(position_update.realized_pnl)
-                        pnl_pct = PnLCalculator.calculate_realized_pnl(
-                            side=str(trade["signal_type"]),
-                            entry_price=float(trade["entry"]),
-                            exit_price=exit_price,
-                            qty=float(trade["current_size"]),
-                            entry_fee_usd=float(trade.get("open_fees_usd", 0.0) or 0.0),
-                            exit_fee_usd=self._extract_order_fee_usd(co, "market_close") if close_amount > 1e-8 else 0.0,
-                        ).pnl_pct
-                except Exception as e:
-                    logger.warning(f"PnL record error: {e}")
-
-                final_realized = float((trade.get("realized_pnl") or 0.0) + pnl_usd)
-                await session.execute(
-                    update(PositionModel)
-                    .where(PositionModel.id == trade["position_db_id"])
-                    .values(realized_pnl=final_realized)
-                )
-
-                session.add(
-                    PnLModel(
-                        user_id=self.user_id,
-                        symbol=symbol,
-                        pnl_usd=pnl_usd,
-                        pnl_pct=pnl_pct,
-                        leverage=lev,
-                        reason=reason,
+                    position_update = PositionManager.close_position(
+                        state=self._trade_position_state(trade),
+                        exit_price=exit_price,
+                        exit_fee_usd=self._extract_order_fee_usd(co, "market_close") if reason != "EXTERNAL" and close_amount > 1e-8 else 0.0,
                     )
-                )
-                try:
-                    bal, _, _ = await self.get_account_metrics()
-                    await self.risk_manager.record_closed_pnl(pnl_usd, bal)
-                except Exception:
-                    pass
+                    pnl_usd = float(position_update.realized_pnl)
+                    pnl_pct = PnLCalculator.calculate_realized_pnl(
+                        side=str(trade["signal_type"]),
+                        entry_price=float(trade["entry"]),
+                        exit_price=exit_price,
+                        qty=float(trade["current_size"]),
+                        entry_fee_usd=float(trade.get("open_fees_usd", 0.0) or 0.0),
+                        exit_fee_usd=self._extract_order_fee_usd(co, "market_close") if reason != "EXTERNAL" and close_amount > 1e-8 else 0.0,
+                    ).pnl_pct
+                except Exception as e:
+                    logger.warning(f"PnL calculation error: {e}")
 
-                await session.commit()
+            final_realized = float((trade.get("realized_pnl") or 0.0) + pnl_usd)
+
+            async with async_session() as session:
+                async with session.begin():
+                    # 1. Запись закрывающего ордера (если он был)
+                    if reason != "EXTERNAL" and close_amount > 1e-8:
+                        ps = str(trade.get("signal_type") or "LONG").upper()
+                        await self._db_persist_order(
+                            position_id=trade.get("position_db_id"),
+                            symbol=symbol,
+                            exchange_order_id=str(co.get("id")) if co and co.get("id") is not None else None,
+                            client_order_id=str(co.get("clientOrderId")) if co and co.get("clientOrderId") else None,
+                            order_type="MARKET_CLOSE",
+                            position_side=ps,
+                            price=float(co.get("average") or co.get("price") or 0.0),
+                            size=float(co.get("filled") or close_amount),
+                            status=OrderStatus.FILLED,
+                            session=session,
+                        )
+
+                    # 2. Обновление статуса позиции
+                    await session.execute(
+                        update(PositionModel)
+                        .where(PositionModel.id == trade["position_db_id"])
+                        .values(
+                            status=PositionStatus.CLOSED, 
+                            closed_at=datetime.datetime.utcnow(),
+                            realized_pnl=final_realized
+                        )
+                    )
+
+                    # 3. Запись PnL
+                    session.add(
+                        PnLModel(
+                            user_id=self.user_id,
+                            symbol=symbol,
+                            pnl_usd=pnl_usd,
+                            pnl_pct=pnl_pct,
+                            leverage=lev,
+                            reason=reason,
+                        )
+                    )
+                    
+                    try:
+                        bal, _, _ = await self.get_account_metrics()
+                        await self.risk_manager.record_closed_pnl(pnl_usd, bal)
+                    except Exception:
+                        pass
 
             closed_size = float(trade.get("current_size", 0.0) or 0.0)
             trade["realized_pnl"] = float((trade.get("realized_pnl") or 0.0) + pnl_usd)
@@ -2740,11 +2760,16 @@ class ExecutionEngine:
             strategy_name = trade.get("strategy", "unknown")
             for cb in self._trade_close_callbacks:
                 try:
-                    cb(strategy_name, pnl_usd)
+                    if asyncio.iscoroutinefunction(cb):
+                        await cb(strategy_name, pnl_usd)
+                    else:
+                        cb(strategy_name, pnl_usd)
                 except Exception as cb_err:
                     logger.debug(f"Trade close callback error: {cb_err}")
 
+            self._tm_partial_reduce_skip_log_ts.pop(symbol, None) # Устраняем утечку памяти (Этап 1)
             self.active_trades.pop(symbol, None)
+
             await send_telegram_msg(
                 f"💰 **ПОЗИЦИЯ ЗАКРЫТА**\n\n"
                 f"🔹 Символ: `{symbol}`\n"
@@ -2754,6 +2779,8 @@ class ExecutionEngine:
 
     async def manual_close(self, symbol: str) -> bool:
         """Публичный метод для ручного закрытия из Telegram. (Баг 4.1)"""
+        symbol = SymbolNormalizer.normalize(symbol)
+        logger.info(f"🚨 [MANUAL] Запрос на закрытие: {symbol}")
         if symbol in self.active_trades:
             await self._close_position(symbol, reason="MANUAL")
             return True
@@ -2761,6 +2788,7 @@ class ExecutionEngine:
 
     async def manual_reduce(self, symbol: str, fraction: float) -> Dict[str, Any]:
         """Частичное ручное закрытие позиции (reduce-only market)."""
+        symbol = SymbolNormalizer.normalize(symbol)
         if symbol not in self.active_trades:
             return {"status": "error", "message": "Trade not found"}
         try:
@@ -2822,7 +2850,7 @@ class ExecutionEngine:
         """K4: Метрики с кэшированием + anti-storm backoff при деградации API."""
         now = time.time()
         # Fast path: свежий кэш.
-        if self._metrics_cache and (now - self._metrics_cache_ts) < self._METRICS_CACHE_TTL:
+        if self._metrics_cache and (now - self._metrics_cache_ts) < settings.metrics_cache_ttl:
             return self._metrics_cache
 
         # API в деградации: не штурмим биржу из параллельных задач.
@@ -2832,7 +2860,7 @@ class ExecutionEngine:
         # Single-flight: только один concurrent запрос метрик наружу.
         async with self._metrics_lock:
             now = time.time()
-            if self._metrics_cache and (now - self._metrics_cache_ts) < self._METRICS_CACHE_TTL:
+            if self._metrics_cache and (now - self._metrics_cache_ts) < settings.metrics_cache_ttl:
                 return self._metrics_cache
             if now < self._metrics_backoff_until and self._metrics_cache:
                 return self._metrics_cache
@@ -2964,15 +2992,15 @@ class ExecutionEngine:
                 logger.warning(f"🧹 [SOFT_CLEANUP] Removed stale active_trades: {stale_symbols}")
                 try:
                     async with async_session() as session:
-                        for sym in stale_symbols:
-                            await session.execute(
-                                update(PositionModel)
-                                .where(
-                                    PositionModel.symbol == sym,
-                                    PositionModel.status == PositionStatus.OPEN
+                        async with session.begin():
+                            for sym in stale_symbols:
+                                await session.execute(
+                                    update(PositionModel)
+                                    .where(
+                                        PositionModel.symbol == sym,
+                                        PositionModel.status == PositionStatus.OPEN
+                                    )
+                                    .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
                                 )
-                                .values(status=PositionStatus.CLOSED, closed_at=datetime.datetime.utcnow())
-                            )
-                        await session.commit()
                 except Exception as e:
                     logger.warning(f"⚠️ [SOFT_CLEANUP] DB close sync failed: {e}")

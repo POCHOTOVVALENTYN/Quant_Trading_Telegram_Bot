@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import SecretStr
+from pydantic import SecretStr, Field
 from typing import Optional
 
 class Settings(BaseSettings):
@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     # Binance REAL API
     api_key_binance: Optional[str] = None
     secret_api_key_binance: Optional[str] = None
+    
+    # Telegram Webhook (New)
+    webhook_url: Optional[str] = Field(None, env="WEBHOOK_URL")
+    webhook_secret: Optional[str] = Field("secure_token_abc123", env="WEBHOOK_SECRET")
     
     # Binance TEST API (НОВОЕ)
     test_api_key_binance: Optional[str] = None
@@ -43,6 +47,10 @@ class Settings(BaseSettings):
     max_risk_per_trade_pct: float = 0.02
     max_drawdown_pct: float = 0.20
     max_open_trades: int = 5
+    max_daily_drawdown_pct: float = 0.05
+    max_correlated_same_direction: int = 2
+    streak_loss_threshold_soft: int = 3
+    streak_loss_threshold_hard: int = 5
     
     per_trade_margin_pct: float = 0.02 # 2% маржи на каждую новую позицию
     position_size_usdt: float = 0.0   # Фиксированный объём позиции в USDT (0 = авто через % маржи)
@@ -65,6 +73,13 @@ class Settings(BaseSettings):
     session_asia_risk_mult: float = 0.5
     session_volatility_high_risk_mult: float = 0.7
     session_funding_extreme_risk_mult: float = 0.8
+    
+    # Execution & Reconciliation
+    reconcile_interval: float = 60.0
+    metrics_cache_ttl: float = 30.0
+    rescue_cooldown: int = 60
+    ws_backoff_max: int = 60
+    heartbeat_interval: float = 30.0
 
     # Strategy-regime matrix (JSON string: strategy -> list of allowed regime combos)
     # Each entry: {"strategy": "name", "trend": ["TREND","NEUTRAL"], "volatility": ["*"], "funding": ["*"]}

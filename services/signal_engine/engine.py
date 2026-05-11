@@ -117,6 +117,11 @@ class TradingOrchestrator:
         self.news_filter = NewsFilter(check_interval=3600)
 
         self.execution.register_trade_close_callback(self.dynamic_strategy_scorer.record_trade)
+        
+        async def _rm_callback(strat: str, pnl: float):
+            await self.risk_manager.record_trade_result(pnl)
+            
+        self.execution.register_trade_close_callback(_rm_callback)
         self.market_history: Dict[str, Dict[str, pd.DataFrame]] = {}
 
         self.funding_rates: Dict[str, float] = {}
@@ -517,6 +522,7 @@ class TradingOrchestrator:
         logger.info(f"Запуск Торгового Движка (8 стратегий, Schwager-based ensemble)...")
         await self._prefetch_history()
         asyncio.create_task(self._heartbeat_loop())
+        asyncio.create_task(self._cleanup_setups_loop()) # Garbage Collector для утечек памяти (Этап 1)
         if settings.scoring_learner_enabled:
             asyncio.create_task(learning_loop(
                 self.scoring_learner, self.ai_model,
@@ -696,7 +702,8 @@ class TradingOrchestrator:
             
             # Оптимизация: Считаем все индикаторы только для сигнальных ТФ
             is_signal_tf = timeframe in TRADING_SIGNAL_TIMEFRAMES
-            df = self._calculate_indicators(df, minimal=not is_signal_tf)
+            # Вычисляем индикаторы в отдельном пуле потоков, чтобы не блокировать Event Loop (Этап 2)
+            df = await asyncio.to_thread(self._calculate_indicators, df.copy(), minimal=not is_signal_tf)
             
             df['funding_rate'] = self.funding_rates.get(symbol, 0.0)
             self.market_history[symbol][timeframe] = df
@@ -763,17 +770,26 @@ class TradingOrchestrator:
                     )
                     return
 
-            meta_selection = self.meta_strategy.select_strategies(df_eval, self.strategies)
+            meta_selection = await asyncio.to_thread(self.meta_strategy.select_strategies, df_eval, self.strategies)
             market_regime = meta_selection.regime
             mkt_ctx = self._build_market_context(symbol, df_eval, market_regime, current_adx)
 
             candidate_signals = []
 
-            for strategy in meta_selection.strategies:
-                allowed_tfs = _STRATEGY_TIMEFRAME_MATRIX.get(type(strategy))
-                if allowed_tfs is not None and timeframe not in allowed_tfs:
-                    continue
-                signal = strategy.evaluate(df_eval)
+            def _eval_strats(strategies, df, tf):
+                res = []
+                for s in strategies:
+                    allowed_tfs = _STRATEGY_TIMEFRAME_MATRIX.get(type(s))
+                    if allowed_tfs is not None and tf not in allowed_tfs:
+                        continue
+                    sig = s.evaluate(df)
+                    if sig:
+                        res.append(sig)
+                return res
+
+            raw_signals = await asyncio.to_thread(_eval_strats, meta_selection.strategies, df_eval, timeframe)
+
+            for signal in raw_signals:
                 if signal:
                     self._mark_signal_stage("raw", signal.get("strategy", ""), timeframe)
                     sdl = {
@@ -1007,9 +1023,7 @@ class TradingOrchestrator:
                         if not hasattr(self, '_last_limit_notify') or (now - self._last_limit_notify) > 900:
                             self._last_limit_notify = now
                             await send_telegram_msg(
-                                f"⚠️ **ВХОД ПРОПУЩЕН**\n\n"
-                                f"🔹 Символ: `{symbol}`\n"
-                                f"📂 Причина: Лимит позиций ({live_open_count}/{self.risk_manager.max_open_trades})"
+                                f"⚠️ Достигнут лимит открытых позиций ({self.risk_manager.max_open_trades}). Новые сигналы откладываются."
                             )
                         _filter_flags["f_max_positions"] = False
                         self._mark_signal_stage("filtered_max_positions", signal.get("strategy", ""), timeframe)
@@ -1291,38 +1305,38 @@ class TradingOrchestrator:
                     self._mark_signal_stage("accepted", signal.get("strategy", ""), timeframe)
 
                     async with async_session() as session:
-                        new_sig_model = Signal(
-                            symbol=symbol,
-                            signal_type=signal['signal'],
-                            strategy=signal['strategy'],
-                            confidence=score,
-                            win_prob=ai_prediction['win_prob'],
-                            expected_return=ai_prediction['expected_return'],
-                            risk=ai_prediction['risk'],
-                            entry_price=signal['entry_price'],
-                            stop_loss=sl,
-                            take_profit=tp,
-                            status="PENDING"
-                        )
-                        session.add(new_sig_model)
-                        await session.commit()
-                        enrich_signal["id"] = new_sig_model.id
+                        async with session.begin():
+                            new_sig_model = Signal(
+                                symbol=symbol,
+                                signal_type=signal['signal'],
+                                strategy=signal['strategy'],
+                                confidence=score,
+                                win_prob=ai_prediction['win_prob'],
+                                expected_return=ai_prediction['expected_return'],
+                                risk=ai_prediction['risk'],
+                                entry_price=signal['entry_price'],
+                                stop_loss=sl,
+                                take_profit=tp,
+                                status="PENDING"
+                            )
+                            session.add(new_sig_model)
+                            await session.flush()
+                            enrich_signal["id"] = new_sig_model.id
 
-                        if ext_ai_decision and new_sig_model.id:
-                            try:
-                                session.add(AIDecisionLog(
-                                    signal_id=new_sig_model.id,
-                                    symbol=symbol, strategy=signal.get("strategy"),
-                                    provider=ext_ai_decision["provider"],
-                                    recommendation=ext_ai_decision["recommendation"],
-                                    confidence=ext_ai_decision.get("confidence"),
-                                    reasoning=ext_ai_decision.get("reasoning", "")[:500],
-                                    score=score, win_prob=ai_prediction["win_prob"],
-                                    latency_ms=ext_ai_decision.get("latency_ms"),
-                                ))
-                                await session.commit()
-                            except Exception:
-                                pass
+                            if ext_ai_decision and new_sig_model.id:
+                                try:
+                                    session.add(AIDecisionLog(
+                                        signal_id=new_sig_model.id,
+                                        symbol=symbol, strategy=signal.get("strategy"),
+                                        provider=ext_ai_decision["provider"],
+                                        recommendation=ext_ai_decision["recommendation"],
+                                        confidence=ext_ai_decision.get("confidence"),
+                                        reasoning=ext_ai_decision.get("reasoning", "")[:500],
+                                        score=score, win_prob=ai_prediction["win_prob"],
+                                        latency_ms=ext_ai_decision.get("latency_ms"),
+                                    ))
+                                except Exception:
+                                    pass
 
                     # Log accepted signal to decision journal
                     await self._persist_decision_log(sdl, _filter_flags, "ACCEPTED")
@@ -1371,9 +1385,9 @@ class TradingOrchestrator:
 
             now = time.time()
             self._recent_error_ts.append(now)
-            window_sec = 600
+            window_sec = settings.error_window_seconds
             errors_in_window = sum(1 for ts in self._recent_error_ts if (now - ts) <= window_sec)
-            if errors_in_window >= 20 and settings.is_trading_enabled:
+            if errors_in_window >= settings.error_threshold and settings.is_trading_enabled:
                 settings.is_trading_enabled = False
                 await send_telegram_msg(
                     f"🚨 **АВАРИЙНАЯ ОСТАНОВКА**\n\n"
@@ -1421,10 +1435,24 @@ class TradingOrchestrator:
         df['roc10'] = df['close'].pct_change(10)
 
         return df
+    async def _cleanup_setups_loop(self):
+        """Фоновый сборщик мусора для устранения утечки памяти в pending_setups (Этап 1)."""
+        while True:
+            await asyncio.sleep(600)  # Раз в 10 минут
+            now = time.time()
+            stale_keys = []
+            for key, data in self.pending_setups.items():
+                if now - data.get("timestamp", 0) > 14400:  # 4 часа (соответствует логике M15 охоты)
+                    stale_keys.append(key)
+            for k in stale_keys:
+                del self.pending_setups[k]
+            if stale_keys:
+                logger.debug(f"🧹 [GC] Удалено {len(stale_keys)} устаревших сетапов из памяти.")
+
 
     async def _heartbeat_loop(self):
         while True:
-            await asyncio.sleep(14400) # Раз в 4 часа (было 3600)
+            await asyncio.sleep(settings.heartbeat_interval)
             uptime_hours = (time.time() - self.start_time) / 3600
             msg = (
                 f"💓 **ПУЛЬС БОТА**\n\n"

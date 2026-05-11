@@ -32,8 +32,19 @@ class BinanceRateLimiter:
             return await op()
 
 
+class BinanceUnknownStatusError(Exception):
+    """Raised when Binance returns a 503 'Unknown Error' meaning the order might have been placed."""
+    pass
+
 def classify_binance_error(err: Exception) -> str:
     text = str(err or "").lower()
+    
+    # Специфические случаи из документации Binance Demo
+    if "unknown error" in text and ("check your request" in text or "try again later" in text):
+        return "unknown_status"
+    if "-1008" in text or "throttled by system-level protection" in text:
+        return "throttled"
+        
     if "-1021" in text or "timestamp for this request" in text:
         return "time_sync"
     if "429" in text or "ratelimit" in text or "rate limit" in text or "too many requests" in text:
@@ -81,12 +92,16 @@ async def call_with_binance_retry(
                 except Exception:
                     pass
 
+            if category == "unknown_status":
+                # Документация Binance: "It is important to NOT treat this as a failure operation; the execution status is UNKNOWN"
+                raise BinanceUnknownStatusError(str(err))
+
             if category == "time_sync" and exchange is not None and policy.sync_time_on_1021:
                 try:
                     await exchange.load_time_difference()
                 except Exception:
                     pass
-            elif category not in {"rate_limit", "timeout", "network", "server"}:
+            elif category not in {"rate_limit", "timeout", "network", "server", "throttled"}:
                 raise
 
             if attempt >= policy.max_attempts:

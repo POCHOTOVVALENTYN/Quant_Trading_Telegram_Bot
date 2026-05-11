@@ -9,6 +9,7 @@ import httpx
 from contextlib import asynccontextmanager
 
 from config.settings import settings
+from utils.symbol_normalizer import SymbolNormalizer
 
 # Global client for preventing TIME_WAIT exhaustion
 global_client = httpx.AsyncClient(
@@ -584,17 +585,28 @@ def _format_trade_info(symbol: str, info: dict) -> str:
     else:
         opened_ago = f"{int(opened_for // 86400)}д {int((opened_for % 86400) // 3600)}ч"
 
-    return (
+    msg = (
         f"🔹 **{symbol}**\n"
         f"📌 {side_emoji}\n"
         f"💰 Вход: `{entry:.6f}`\n"
         f"📈 Текущая: {curr_p_str}\n"
         f"📊 Объем: `{float(info.get('current_size', 0.0) or 0.0):.4f}`\n"
         f"🛡 Стоп: `{stop:.6f}`\n"
+        f"🎯 Тейк: `{float(info.get('take_profit_live', 0.0) or 0.0):.6f}`\n"
         f"📉 PnL: {pnl_str}\n"
         f"🚨 Риск до стопа: {risk_tag}\n"
-        f"⏱ В позиции: `{opened_ago}`"
+        f"⏱ В позиции: `{opened_ago}`\n\n"
     )
+    
+    sl_id = info.get('stop_order_id')
+    tp_id = info.get('tp_order_id')
+    
+    if sl_id:
+        msg += f"🆔 SL ID: `{sl_id}`\n"
+    if tp_id:
+        msg += f"🆔 TP ID: `{tp_id}`\n"
+        
+    return msg
 
 @admin_only
 async def show_active_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1043,7 +1055,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             symbol_raw = query.data.replace("pos_view_", "")
         elif query.data.startswith("pos_nav_"):
             symbol_raw = query.data.replace("pos_nav_", "")
-        symbol = symbol_raw.replace("_", "/") if symbol_raw else ""
+        
+        # Нормализуем символ через SymbolNormalizer
+        symbol = SymbolNormalizer.normalize(symbol_raw.replace("_", "/")) if symbol_raw else ""
         try:
             async with get_http_client() as client:
                 data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/trades", timeout=8.0, retries=1)
@@ -1604,28 +1618,61 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     except Exception:
         pass
 
-def run_bot():
-    app = ApplicationBuilder().token(settings.telegram_bot_token.get_secret_value()).build()
+def setup_application():
+    """Инициализация приложения Telegram бота без запуска."""
+    token = settings.telegram_bot_token.get_secret_value() if settings.telegram_bot_token else None
+    if not token:
+        logger.error("TELEGRAM_TOKEN not found in settings!")
+        return None
 
-    # Исключение для остановки хэндлеров
-    global ApplicationHandlerStop
-    from telegram.ext import ApplicationHandlerStop
+    app = ApplicationBuilder().token(token).build()
 
-    # Добавляем Rate Limit Middleware с высшим приоритетом (-1)
+    # Middleware / Глобальные хэндлеры
+    from telegram.ext import TypeHandler
     app.add_handler(TypeHandler(Update, rate_limit_middleware), group=-1)
 
+    # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("connect_exchange", connect_exchange))
     app.add_handler(CommandHandler("start_trading", toggle_trading))
     app.add_handler(CommandHandler("stop_trading", toggle_trading))
     
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    # Inline кнопки
     app.add_handler(CallbackQueryHandler(callback_handler))
+    
+    # Текстовые сообщения (меню)
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    
+    # Ошибки
     app.add_error_handler(global_error_handler)
+    
+    return app
 
-    logger.info("Telegram Bot is polling...")
-    app.run_polling()
+async def main_polling():
+    """Запуск в режиме Polling (для локальной разработки)."""
+    app = setup_application()
+    if not app:
+        return
+    
+    logger.info("🚀 Запуск Telegram Bot в режиме POLLING...")
+    # В PTA 20.x+ для ручного управления циклом:
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        # Держим запущенным
+        while True:
+            await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    run_bot()
+    try:
+        # Для простоты в __main__ оставим run_polling если не хотим async запуск
+        app = setup_application()
+        if app:
+            logger.info("Telegram Bot is polling...")
+            app.run_polling(drop_pending_updates=True)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Telegram Bot остановлен.")
+    except Exception as e:
+        logger.error(f"Критическая ошибка бота: {e}")

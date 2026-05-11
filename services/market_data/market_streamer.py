@@ -29,7 +29,8 @@ class MarketDataService:
         Источники: Binance WebSocket + REST fallback
         Потоки: свечи, ордербук, funding rate.
         """
-        self.symbols = symbols
+        from utils.symbol_normalizer import SymbolNormalizer
+        self.symbols = [SymbolNormalizer.normalize(s) for s in symbols]
         self.timeframes = timeframes
         self.last_candle_time: Dict[str, float] = {}
         from config.settings import settings
@@ -47,7 +48,7 @@ class MarketDataService:
             self.exchange = ccxtpro.binance({
                 'enableRateLimit': True,
                 'timeout': int(settings.api_timeout_seconds * 1000), 
-                'options': {'defaultType': 'future', 'fetchCurrencies': False, 'sandbox-future': True, 'types': ['future'], 'types': ['future']}
+                'options': {'defaultType': 'future', 'fetchCurrencies': False, 'sandbox-future': True, 'types': ['future']}
             })
             if settings.testnet:
                 # Manual switch to Demo URLs to avoid CCXT NotSupported error

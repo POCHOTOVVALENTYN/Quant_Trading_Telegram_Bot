@@ -33,282 +33,136 @@ from core.risk.risk_manager import RiskManager
 from core.execution.engine import ExecutionEngine
 from services.signal_engine.engine import TradingOrchestrator
 from utils.logger import app_logger
+from utils.symbol_normalizer import SymbolNormalizer
+
+from api.telegram.main import setup_application
+from telegram import Update
+from fastapi import Request
 
 # Глобальная переменная для ссылок на процессы
 orchestrator = None
 exchange_client = None
 reconcile_task = None
+telegram_app = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global orchestrator, exchange_client, reconcile_task
+    global orchestrator, exchange_client, reconcile_task, telegram_app
     
-    print("!!!!!!!! APP STARTING !!!!!!!!", flush=True) # DEBUG
     app_logger.info("🚀 [1/5] Инициализация базы данных...")
     try:
         from prometheus_client import start_http_server
-        # Пытаемся запустить на 9091, если занят — пробуем 9092 или игнорируем
         try:
             start_http_server(9091)
             app_logger.info("✅ Prometheus metrics server running on port 9091.")
         except Exception:
-            try:
-                start_http_server(9092)
-                app_logger.info("✅ Prometheus metrics server running on port 9092.")
-            except Exception:
-                app_logger.warning("⚠️ Prometheus server failed to start (port occupied), skipping.")
-    except Exception as e:
-        app_logger.error(f"❌ Failed to start Prometheus server: {e}")
+            app_logger.warning("⚠️ Prometheus server port occupied, skipping.")
 
-    try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        app_logger.info("✅ База данных готова.")
         
-        # 0. ГАРАНТИРУЕМ ПОЛЬЗОВАТЕЛЯ (Это должно быть ПЕРЕД синхронизацией)
         from database.session import async_session
         from database.models.all_models import User
         from sqlalchemy import select
         async with async_session() as session:
             result = await session.execute(select(User).where(User.id == 1))
-            user_exists = result.scalar_one_or_none()
-            if not user_exists:
-                app_logger.info("👥 [DB] Создание дефолтного пользователя (ID=1)...")
-                new_user = User(id=1, telegram_id=0)
-                session.add(new_user)
-                try:
-                    await session.commit()
-                    app_logger.info("✅ Пользователь ID=1 создан.")
-                except Exception as e:
-                    await session.rollback()
-                    app_logger.warning(f"⚠️ Не удалось создать пользователя (возможно, уже есть): {e}")
-            else:
-                app_logger.info("✅ Пользователь ID=1 найден.")
+            if not result.scalar_one_or_none():
+                session.add(User(id=1, telegram_id=0))
+                await session.commit()
+        app_logger.info("✅ База данных готова.")
     except Exception as e:
         app_logger.error(f"❌ Ошибка БД: {e}")
 
-    # 2. Инициализация биржевого клиента Binance
-    # Выбор ключей в зависимости от режима (Testnet или Real)
-    api_key = settings.api_key_binance
-    secret = settings.secret_api_key_binance
-    
-    # Debug: что реально загружено из settings
-    app_logger.info(f"DEBUG Settings: testnet={settings.testnet}")
-    app_logger.info(f"DEBUG Settings: test_api_key_binance={'Loaded ('+settings.test_api_key_binance[:4]+')' if settings.test_api_key_binance else 'None'}")
-    app_logger.info(f"DEBUG Settings: api_key_binance={'Loaded ('+settings.api_key_binance[:4]+')' if settings.api_key_binance else 'None'}")
+    # 2. Telegram Bot (Webhooks)
+    telegram_app = setup_application()
+    if telegram_app and settings.webhook_url:
+        await telegram_app.initialize()
+        await telegram_app.start()
+        app_logger.info(f"🌐 Регистрация Webhook: {settings.webhook_url}")
+        try:
+            await telegram_app.bot.set_webhook(
+                url=settings.webhook_url,
+                secret_token=settings.webhook_secret,
+                drop_pending_updates=True
+            )
+            app_logger.info("✅ Webhook готов.")
+        except Exception as e:
+            app_logger.error(f"❌ Ошибка Webhook: {e}")
 
-    if settings.testnet and settings.test_api_key_binance:
-        app_logger.info("Используются ТЕСТОВЫЕ API ключи (Binance Testnet)")
-        api_key = settings.test_api_key_binance.strip()
-        secret = settings.test_secret_api_key_binance.strip()
-    else:
-        app_logger.info("Используются РЕАЛЬНЫЕ API ключи (или ключи по умолчанию)")
-        api_key = settings.api_key_binance.strip() if settings.api_key_binance else ""
-        secret = settings.secret_api_key_binance.strip() if settings.secret_api_key_binance else ""
-    
-    if api_key:
-        app_logger.info(f"FINAL API Key Selected: {api_key[:4]}...{api_key[-4:] if len(api_key)>4 else ''}")
-    
-    app_logger.info(f"Инициализация клиента Binance API (Testnet: {settings.testnet})...")
-    
-    options = {
-        'defaultType': 'future',
-        'adjustForTimeDifference': True,
-        'recvWindow': 10000,
-        'fetchCurrencies': False,
-    }
-    
-    # КРИТИЧНО: Для Binance Futures Demo Trading (бывший Testnet) 
-    # НЕЛЬЗЯ использовать флаг 'testnet': True или .set_sandbox_mode(True), 
-    # так как CCXT считает их устаревшими для фьючерсов.
-    # Вместо этого мы вручную подменяем URLs на демо-эндпоинты.
+    # 3. Биржевой клиент (Binance)
+    api_key = (settings.test_api_key_binance or "").strip() if settings.testnet else (settings.api_key_binance or "").strip()
+    secret = (settings.test_secret_api_key_binance or "").strip() if settings.testnet else (settings.secret_api_key_binance or "").strip()
     
     exchange_client = ccxtpro.binance({
         'apiKey': api_key,
         'secret': secret,
         'enableRateLimit': True,
-        'options': options,
-        'timeout': 30000 
-    })
-    
-    if settings.testnet:
-        app_logger.info("🔮 Используем Binance Futures DEMO mode (Manual URL override)")
-        # Подменяем URLs на демо-сервера Binance
-        exchange_client.urls['api'] = {
-            'public': 'https://demo-api.binance.com/api/v3',
-            'private': 'https://demo-api.binance.com/api/v3',
-            'fapiPublic': 'https://demo-fapi.binance.com/fapi/v1',
-            'fapiPrivate': 'https://demo-fapi.binance.com/fapi/v1',
-            'fapiPrivateV2': 'https://demo-fapi.binance.com/fapi/v2',
-            'dapiPublic': 'https://demo-dapi.binance.com/dapi/v1',
-            'dapiPrivate': 'https://demo-dapi.binance.com/dapi/v1',
+        'options': {
+            'defaultType': 'future', 
+            'adjustForTimeDifference': True,
+            'recvWindow': 10000,
+            'disableFuturesSandboxWarning': True
         }
-        # Важно также подменить WS эндпоинты если используются
-        if 'ws' in exchange_client.urls:
-             exchange_client.urls['ws']['future'] = 'wss://fstream.binancefuture.com/ws'
-        
-        # K4: Отключаем загрузку валют (sapi), так как в Testnet/Demo нет SAPI эндпоинтов
-        exchange_client.has['fetchCurrencies'] = False
-        exchange_client.has['fetchTradingFees'] = False
-        exchange_client.has['fetchAccounts'] = False
-        exchange_client.has['fetchStandardConfig'] = False
-    
-    
-    app_logger.info(f"API URLs: {exchange_client.urls}")
+    })
+
+    if settings.testnet:
+        app_logger.info(f"🔮 Режим: Binance Futures Sandbox (Key: {api_key[:4]}...{api_key[-4:]})")
+        exchange_client.set_sandbox_mode(True)
+    else:
+        app_logger.info("⚡ Режим: Binance Futures LIVE")
+
+    # 4. Диагностика ключей
     try:
-        await exchange_client.load_markets()
+        balance = await exchange_client.fetch_balance()
+        app_logger.info(f"💰 Баланс успешно получен. Total USDT: {balance.get('total', {}).get('USDT', 0)}")
     except Exception as e:
-        app_logger.error(f"Не удалось загрузить markets: {e}")
-    
-    # Startup validation: verify API key permissions and balance
-    startup_balance = 0.0
-    try:
-        balance_info = await exchange_client.fetch_balance()
-        startup_balance = float(balance_info.get("total", {}).get("USDT", 0) or 0)
-        app_logger.info(f"✅ API key valid. Futures balance: {startup_balance:.2f} USDT")
+        app_logger.error(f"❌ Ошибка авторизации (REST): {e}")
 
-        if startup_balance <= 0 and not settings.testnet:
-            app_logger.warning(
-                "⚠️ ZERO BALANCE on real account — bot will run but cannot open positions"
-            )
-    except Exception as e:
-        err_msg = str(e)
-        if "APIError" in err_msg or "AuthenticationError" in err_msg:
-            app_logger.error(f"❌ API KEY VALIDATION FAILED: {err_msg[:200]}")
-        else:
-            app_logger.warning(f"⚠️ Balance check failed (non-fatal): {err_msg[:200]}")
+    # 5. Инициализация торгового ядра
+    base_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+    tfs = ["1m", "5m", "15m", "1h", "4h", "1d"]
+    
+    market_data = MarketDataClient(symbols=base_symbols, timeframes=tfs, exchange=exchange_client)
+    risk_manager = RiskManager(max_risk_pct=0.02, max_drawdown_pct=0.20, max_open_trades=settings.max_open_trades)
+    execution_engine = ExecutionEngine(exchange_client=exchange_client, risk_manager=risk_manager)
 
-    # Symbol list — reduced for micro accounts
-    desired_symbols_full = [
-        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-        "DOGE/USDT", "ADA/USDT", "TRX/USDT", "LINK/USDT", "DOT/USDT",
-        "LTC/USDT", "BCH/USDT", "SHIB/USDT", "UNI/USDT", "NEAR/USDT",
-        "MATIC/USDT", "FIL/USDT", "ICP/USDT", "APT/USDT"
-    ]
-    micro_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
-    is_micro = settings.micro_account_mode and startup_balance < settings.micro_account_threshold
-    desired_symbols = micro_symbols if is_micro else desired_symbols_full
-    if is_micro:
-        app_logger.info(
-            f"💰 MICRO-ACCOUNT MODE: balance={startup_balance:.2f} < {settings.micro_account_threshold}, "
-            f"reduced to {len(desired_symbols)} liquid symbols"
-        )
-    
-    # K2: Фильтрация — оставляем только символы, реально доступные на бирже
-    available_markets = set(exchange_client.markets.keys()) if exchange_client.markets else set()
-    base_symbols = []
-    skipped = []
-    for s in desired_symbols:
-        # Проверяем через несколько форматов (BTC/USDT и BTC/USDT:USDT)
-        if s in available_markets or f"{s}:USDT" in available_markets:
-            base_symbols.append(s)
-        else:
-            skipped.append(s)
-    
-    # K2+Testnet: Дополнительная проверка — пробуем загрузить 1 свечу для каждого символа
-    if settings.testnet and base_symbols:
-        verified_symbols = []
-        for s in base_symbols:
-            try:
-                candles = await exchange_client.fetch_ohlcv(s, '1h', limit=1)
-                if candles:
-                    verified_symbols.append(s)
-                else:
-                    skipped.append(s)
-            except Exception:
-                skipped.append(s)
-            await asyncio.sleep(0.2)  # Пауза чтобы не триггерить рейт-лимит
-        base_symbols = verified_symbols
-    
-    if skipped:
-        app_logger.warning(f"⚠️ [K2] Символы отсутствуют на бирже и пропущены: {list(set(skipped))}")
-    app_logger.info(f"✅ Валидных символов: {len(base_symbols)} из {len(desired_symbols)}")
-    
-    tfs = ["1m", "5m", "15m", "1h", "4h"]
-    if settings.use_daily_timeframe_filter and "1d" not in tfs:
-        tfs.append("1d")
-    
-    app_logger.info(f"🚀 [1/6] Запуск мониторинга {len(base_symbols)} монет на {len(tfs)} ТФ...")
-    
-    # 2. Инициализация сервисов (Client-side)
-    market_data = MarketDataClient(
-        symbols=base_symbols, 
-        timeframes=tfs,
-        exchange=exchange_client
-    )
-    
-    risk_manager = RiskManager(
-        max_risk_pct=0.02, 
-        max_drawdown_pct=0.20, 
-        max_open_trades=settings.max_open_trades
-    )
-    
-    execution_engine = ExecutionEngine(
-        exchange_client=exchange_client, 
-        risk_manager=risk_manager
-    )
-
-    # 4. Предварительная настройка двигателя и ПЕРВИЧНАЯ СИНХРОНИЗАЦИЯ
     try:
         await execution_engine.start()
-        # Сразу опрашиваем биржу, чтобы active_trades заполнились ДО того, как API станет доступно
         await execution_engine.reconcile_full()
         app_logger.info("✅ Синхронизация ExecutionEngine завершена.")
     except Exception as e:
-        app_logger.error(f"⚠️ Ошибка инициализации ExecutionEngine: {e}")
+        app_logger.warning(f"⚠️ Синхронизация не удалась (режим мониторинга): {e}")
 
-    # Periodic reconcile loop (keeps state aligned with exchange)
+    orchestrator = TradingOrchestrator(market_data=market_data, execution_engine=execution_engine)
+    asyncio.create_task(orchestrator.start())
+
     async def _reconcile_loop():
-        # Testnet algo orders expire fast (~2-5 min), so reconcile more frequently.
-        # On production, 300s is fine since algo orders persist until triggered.
-        RECONCILE_INTERVAL = 60 if settings.testnet else 120
         while True:
-            # Сначала ждем интервал, т.к. первичный reconcile уже сделан выше
-            await asyncio.sleep(RECONCILE_INTERVAL)
+            await asyncio.sleep(60 if settings.testnet else 120)
             try:
                 await execution_engine.reconcile_full()
-                # Вывод текущих метрик для отладки
-                bal, dd, count = await execution_engine.get_account_metrics()
-                app_logger.info(f"📊 [MONITOR] Balance={bal:.2f} USDT | Drawdown={dd*100:.2f}% | Positions={count}")
-                # Update Prometheus gauges
-                try:
-                    from utils.metrics import balance_gauge, drawdown_gauge, open_positions_gauge
-                    balance_gauge.set(bal)
-                    drawdown_gauge.set(dd * 100)
-                    open_positions_gauge.set(count)
-                except Exception:
-                    pass
             except Exception as e:
-                app_logger.error(f"Periodic reconcile error: {e}")
+                app_logger.error(f"Reconcile error: {e}")
     reconcile_task = asyncio.create_task(_reconcile_loop())
     
-    # 4. Инициализация Оркестратора
-    app_logger.info("🚀 [4/6] Инициализация Оркестратора...")
-    orchestrator = TradingOrchestrator(
-        market_data=market_data, 
-        execution_engine=execution_engine
-    )
-
-    # 5. Запуск Оркестратора в фоновой задаче (не блокируя FastAPI)
-    app_logger.info("🚀 [5/5] Запуск Торгового Движка (Orchestrator)...")
-    asyncio.create_task(orchestrator.start())
+    app_logger.info("🎉 Платформа запущена!")
     
-    app_logger.info("🎉 Платформа успешно запущена!")
+    yield # --- РАБОТА ---
     
-    yield  # --- Здесь работает FastAPI ---
-    
-    # 6. Корректное завершение работы при выключении (Graceful Shutdown)
-    app_logger.info("Выключение торговой платформы...")
-    if reconcile_task:
-        reconcile_task.cancel()
-    if orchestrator:
-        await orchestrator.stop()
-    if execution_engine:
-        await execution_engine.stop()
-    if exchange_client:
-        await exchange_client.close()
+    app_logger.info("🛑 Остановка платформы...")
+    if telegram_app and settings.webhook_url:
+        try:
+            await telegram_app.bot.delete_webhook()
+            await telegram_app.stop()
+            await telegram_app.shutdown()
+        except Exception: pass
+        
+    if reconcile_task: reconcile_task.cancel()
+    if orchestrator: await orchestrator.stop()
+    if execution_engine: await execution_engine.stop()
+    if exchange_client: await exchange_client.close()
     await engine.dispose()
-    app_logger.info("Все ресурсы корректно освобождены.")
+    app_logger.info("✅ Все ресурсы освобождены.")
 
 # Экземпляр веб-сервера FastAPI, который является Gateway для REST
 app = FastAPI(title="Quant Trading System API", lifespan=lifespan)
@@ -423,11 +277,32 @@ async def get_runtime_settings():
         "max_open_trades": settings.max_open_trades,
         "leverage": settings.leverage,
         "tp_pct": settings.tp_pct,
-        "signal_expiry_seconds": settings.signal_expiry_seconds,
         "allowed_position_side": settings.allowed_position_side,
-        "apply_after_flat": settings.apply_new_entry_rules_after_flat,
+        "signal_expiry_seconds": settings.signal_expiry_seconds,
+        "apply_after_flat": settings.apply_new_entry_rules_after_flat
     }
 
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    """Эндпоинт для приема обновлений от Telegram через Webhook."""
+    if not telegram_app:
+        return {"status": "bot not initialized"}
+    
+    # Проверка секретного токена
+    x_telegram_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if settings.webhook_secret and x_telegram_secret != settings.webhook_secret:
+        app_logger.warning("⛔️ Получен webhook с неверным секретным токеном!")
+        raise HTTPException(status_code=403, detail="Invalid secret token")
+
+    try:
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        # Обработка обновления асинхронно через process_update
+        await telegram_app.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        app_logger.error(f"❌ Ошибка при обработке Webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.post("/api/v1/runtime-settings/pyramiding/toggle", dependencies=[Depends(verify_api_key)])
 async def toggle_pyramiding_runtime():
@@ -759,9 +634,8 @@ async def get_active_trades():
 
 @app.post("/api/v1/trades/close/{symbol}", dependencies=[Depends(verify_api_key)])
 async def close_trade(symbol: str):
-    # CCXT использует BTC/USDT, но в URL удобнее передавать BTCUSDT или кодировать /
-    # Попробуем найти символ. Если в URL передали BTC_USDT, заменим на BTC/USDT
-    normalized_symbol = symbol.replace("_", "/")
+    # Нормализация символа: преобразуем "_" в "/" и прогоняем через SymbolNormalizer
+    normalized_symbol = SymbolNormalizer.normalize(symbol.replace("_", "/"))
     if not orchestrator:
         return {"status": "error", "message": "Engine not ready"}
     
@@ -774,7 +648,7 @@ async def close_trade(symbol: str):
 
 @app.post("/api/v1/trades/reduce/{symbol}", dependencies=[Depends(verify_api_key)])
 async def reduce_trade(symbol: str, fraction: float):
-    normalized_symbol = symbol.replace("_", "/")
+    normalized_symbol = SymbolNormalizer.normalize(symbol.replace("_", "/"))
     if not orchestrator:
         return {"status": "error", "message": "Engine not ready", "symbol": normalized_symbol}
     result = await orchestrator.execution.manual_reduce(normalized_symbol, float(fraction))

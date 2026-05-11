@@ -1,0 +1,12 @@
+[ignoring loop detection]
+
+# 📋 Детальный аудит ✅ бота **QuantTradingBot**
+
+## 1️⃣ Общее описание проекта
+| Компонент | Описание | Ключевые файлы |
+|-----------|----------|----------------|
+| **core/** | Основная бизнес‑логика (исполнение, риск‑менеджмент, позиции, стратегии, PnL) | `execution/engine.py`, `risk/`, `position/position_manager.py`, `strategies/` |
+| **api/** | HTTP‑интерфейс (FastAPI) для внешних запросов | `api/v1/trades.py`, `api/v1/positions.py` |
+| **services/** | Telegram‑бот, мониторинг, скрипты‑утилиты | `services/telegram.py`, `services/monitoring/*` |
+| **database/** | SQLAlchemy‑модели, сессии | `models/all_models.py`, `session.py` |
+<truncated 18946 bytes>
