@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     metrics_cache_ttl: float = 30.0
     rescue_cooldown: int = 60
     ws_backoff_max: int = 60
-    heartbeat_interval: float = 30.0
+    heartbeat_interval: float = 3600.0
 
     # Strategy-regime matrix (JSON string: strategy -> list of allowed regime combos)
     # Each entry: {"strategy": "name", "trend": ["TREND","NEUTRAL"], "volatility": ["*"], "funding": ["*"]}

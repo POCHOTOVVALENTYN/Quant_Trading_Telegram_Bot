@@ -36,6 +36,7 @@ BTN_SIGNALS = "📉 Сигналы"
 BTN_STRATEGIES = "📚 Стратегии"
 BTN_FAQ = "❓ FAQ"
 BTN_HOME = "🏠 Главное меню"
+BTN_MARKET_ANALYSIS = "📊 AI-Аналитика"
 
 # --- НОВЫЕ КНОПКИ НАВИГАЦИИ ---
 BTN_BACK_SETTINGS = "◀️ Назад в настройки"
@@ -266,6 +267,7 @@ def _build_main_menu_markup() -> ReplyKeyboardMarkup:
         [KeyboardButton(BTN_TOGGLE), KeyboardButton(BTN_ACTIVE)],
         [KeyboardButton(BTN_HISTORY), KeyboardButton(BTN_STATS)],
         [KeyboardButton(BTN_SIGNALS), KeyboardButton(BTN_STRATEGIES)],
+        [KeyboardButton(BTN_MARKET_ANALYSIS)],
         [KeyboardButton(BTN_FAQ), KeyboardButton(BTN_HOME)],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -1012,6 +1014,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сама функция show_trade_history должна уметь во внутреннюю очистку или трекинг
         await show_trade_history(update, context)
         await update.message.reply_text("🔙 Вернуться?", reply_markup=_build_back_home_markup())
+    elif text.endswith(BTN_MARKET_ANALYSIS) or "Аналитика" in text:
+        m_wait = await update.message.reply_text("🔍 Собираю данные с биржи и запрашиваю ИИ-анализ... Подождите немного.")
+        try:
+            async with get_http_client() as client:
+                data = await _get_json_with_retry(client, f"{ENGINE_URL}/api/v1/market-overview", timeout=45.0, retries=0)
+                
+                # Сначала пытаемся удалить "ожидалку"
+                try: await m_wait.delete()
+                except: pass
+                
+                if data and data.get("status") == "success":
+                    report = data.get("report", "Отчет пуст.")
+                    await update.message.reply_text(report, parse_mode='Markdown')
+                else:
+                    err_msg = data.get("message", "Не удалось получить отчет") if data else "API недоступно"
+                    await update.message.reply_text(f"❌ Ошибка: {err_msg}")
+        except Exception as e:
+            logger.error(f"AI Analysis Error: {e}")
+            try: await m_wait.edit_text("❌ Произошла ошибка при генерации аналитики.")
+            except: await update.message.reply_text("❌ Произошла ошибка при генерации аналитики.")
+
     elif text.endswith("Главное меню") or text == "/start":
         await _render_main_menu(update.message)
     else:

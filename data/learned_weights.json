@@ -1,25 +1,54 @@
 {
-  "weights": {
-    "atr_ratio": 0.11740919065761303,
-    "range_relative": 0.058704595328806515,
-    "rsi": 0.11740919065761303,
-    "roc_10": 0.10268166389105593,
-    "price_to_sma20": 0.058704595328806515,
-    "sma20_to_sma50": 0.05279173328379272,
-    "volume_ratio": 0.14007145887947306,
-    "orderbook_imbalance": 0.1761137859864196,
-    "funding_rate": 0.1761137859864196
-  },
-  "stats": {
-    "last_trained": "2026-03-30T08:49:08.486051+00:00",
-    "num_samples": 193,
-    "old_accuracy": 0.5337,
-    "old_loss": 0.6908,
-    "new_accuracy": 0.5337,
-    "new_loss": 0.6874,
-    "accuracy": 0.5337,
-    "improved": false,
-    "win_rate": 0.0,
-    "strategies": {}
-  }
+    "weights": {
+        "volume_ratio": 0.2,
+        "orderbook_imbalance": 0.15,
+        "funding_rate": 0.1,
+        "roc_10": 0.15,
+        "atr_ratio": 0.1,
+        "rsi": 0.1,
+        "sma20_to_sma50": 0.1,
+        "price_to_sma20": 0.1
+    },
+    "strategy_performance": {
+        "BollingerMR": {
+            "Weight": -0.004669445696859929,
+            "Win Rate": 65.0788888888889,
+            "Profit USD": 157.73
+        },
+        "Donchian": {
+            "Weight": 0.2974883633908116,
+            "Win Rate": 47.08694444444444,
+            "Profit USD": -10048.91
+        },
+        "Fakeout": {
+            "Weight": -0.012785986156557431,
+            "Win Rate": 61.76933333333333,
+            "Profit USD": 431.90000000000003
+        },
+        "MATrend": {
+            "Weight": 0.03995539262806043,
+            "Win Rate": 34.00388888888889,
+            "Profit USD": -1349.6599999999999
+        },
+        "RuleOf7": {
+            "Weight": 0.3616956840561802,
+            "Win Rate": 48.26472222222222,
+            "Profit USD": -12217.779999999999
+        },
+        "VolContraction": {
+            "Weight": 0.006285530402315984,
+            "Win Rate": 29.375,
+            "Profit USD": -212.32
+        },
+        "WRD": {
+            "Weight": 0.3120304613760492,
+            "Win Rate": 48.038333333333334,
+            "Profit USD": -10540.13
+        }
+    },
+    "stats": {
+        "last_trained": "2026-05-11T10:30:00Z",
+        "num_samples": 5650,
+        "source": "backtest_csv_pretrain"
+    }
 }

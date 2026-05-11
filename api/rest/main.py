@@ -420,6 +420,76 @@ async def check_exchange_connection():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.get("/api/v1/market-overview", dependencies=[Depends(verify_api_key)])
+async def get_market_overview():
+    """Сбор данных и генерация AI-отчета по рынку."""
+    if not orchestrator or not orchestrator.market_data:
+        return {"status": "error", "message": "Market data service not initialized"}
+    
+    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+    results = {}
+    
+    import pandas as pd
+    import json
+    import core.indicators.indicators as ind
+    try:
+        from ai.feature_generator import FeatureGenerator
+    except ImportError:
+        FeatureGenerator = None
+    
+    for symbol in symbols:
+        try:
+            # Получаем свечи 15м для анализа
+            candles = await exchange_client.fetch_ohlcv(symbol, '15m', limit=100)
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # Расчет индикаторов
+            df['rsi'] = ind.calculate_rsi(df['close'])
+            adx_df = ind.calculate_adx(df)
+            df['adx'] = adx_df['adx']
+            df['ema20'] = ind.calculate_ema(df['close'], 20)
+            df['ema50'] = ind.calculate_ema(df['close'], 50)
+            
+            last = df.iloc[-1]
+            results[symbol] = {
+                "price": float(last['close']),
+                "rsi": float(last['rsi']),
+                "adx": float(last['adx']),
+                "trend": "UP" if last['ema20'] > last['ema50'] else "DOWN",
+                "volatility": float(ind.calculate_atr(df).iloc[-1])
+            }
+        except Exception as e:
+            app_logger.warning(f"Failed to fetch market data for {symbol}: {e}")
+
+    # Формируем строгий промпт для ИИ, повторяющий структуру из диалога
+    market_data_str = json.dumps(results, indent=2)
+    prompt = (
+        f"Ты — профессиональный крипто-аналитик. Проанализируй данные:\n{market_data_str}\n\n"
+        "Твой ответ должен СТРОГО соответствовать следующему шаблону (используй Markdown):\n\n"
+        "📊 **Сравнение активов (время)**:\n\n"
+        "**SYMBOL/USDT (Статус: Горячо 🔥 / Умеренно ⚖️ / Спит 💤)**\n"
+        "• **ADX**: значение (краткое пояснение силы тренда).\n"
+        "• **RSI**: значение (статус перекупленности/перепроданности).\n"
+        "• **Тренд**: UP/DOWN.\n"
+        "• **Вердикт**: Твой детальный комментарий, почему этот актив интересен или нет для бота прямо сейчас.\n\n"
+        "(Повтори для всех монет из данных)\n\n"
+        "🧠 **Оценка ситуации**:\n"
+        "Сделай общий вывод: на какой монете сейчас сфокусировано внимание бота и при каких условиях будет открыта сделка."
+    )
+    
+    # Используем встроенный в оркестратор AI-клиент
+    report = "Аналитика временно недоступна."
+    if orchestrator and orchestrator.external_ai:
+        try:
+            # Используем новый метод для свободного анализа
+            report = await orchestrator.external_ai.generate_custom_analysis(prompt)
+        except Exception as e:
+            app_logger.error(f"AI Market Overview Error: {e}")
+            report = f"⚠️ Ошибка ИИ-анализа: {str(e)}"
+    
+    return {"status": "success", "report": report}
+
+
 @app.get("/api/v1/stats", dependencies=[Depends(verify_api_key)])
 async def get_stats():
     from database.session import async_session

@@ -45,16 +45,20 @@ class MarketDataService:
                 self.exchange.urls['api']['ws']['future'] = prod_ws
                 app_logger.info(f"🔮 MarketDataService: используем PROD WS для графиков: {prod_ws}")
         else:
-            self.exchange = ccxtpro.binance({
+            exchange_config = {
                 'enableRateLimit': True,
                 'timeout': int(settings.api_timeout_seconds * 1000), 
-                'options': {'defaultType': 'future', 'fetchCurrencies': False, 'sandbox-future': True, 'types': ['future']}
-            })
+                'options': {
+                    'defaultType': 'future', 
+                    'fetchCurrencies': False,
+                    'disableFuturesSandboxWarning': True
+                }
+            }
+            self.exchange = ccxtpro.binance(exchange_config)
+            
             if settings.testnet:
-                # Manual switch to Demo URLs to avoid CCXT NotSupported error
-                self.exchange.urls['api'] = self.exchange.urls['demo']
-                # Переопределяем WS на боевой для стабильности (as intended by previous dev)
-                self.exchange.urls['api']['ws']['future'] = "wss://fstream.binance.com/ws"
+                self.exchange.set_sandbox_mode(True)
+                
         self.running = False
         self.callbacks = [] # type: list[Callable]
         self.instrument_info = {} # Кэш инфо об инструментах
