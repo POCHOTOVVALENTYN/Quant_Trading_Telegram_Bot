@@ -272,6 +272,7 @@ def main() -> int:
         report["trades"][sym] = {"count": n, "error": err}
         clean = sym.replace("/", "").split(":")[0]
         report["algo_preview"][sym] = _fetch_algo_open(ex, clean)
+        time.sleep(0.2)  # Rate limit protection: 5 requests per second max
 
     try:
         ex.close()

@@ -15,6 +15,7 @@ import argparse
 import json
 import sys
 import os
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -26,15 +27,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.strategies.strategies import (
     StrategyDonchian, StrategyWRD, StrategyMATrend, StrategyPullback,
     StrategyVolContraction, StrategyWideRangeReversal, StrategyWilliamsR,
-    StrategyFundingSqueeze, StrategyRuleOf7,
+    StrategyFundingSqueeze, StrategyRuleOf7, StrategyBollingerMR, StrategyFakeout,
 )
 from core.indicators.indicators import (
     calculate_atr, calculate_rsi, calculate_ema, calculate_adx, calculate_williams_r,
+    calculate_bollinger_bands,
 )
 from core.strategies.scoring import SignalScorer
 from ai.feature_generator import FeatureGenerator
 from ai.model import AIModel
 from core.risk.risk_manager import RiskManager
+from core.pnl.pnl_calculator import PnLCalculator
+from config.settings import settings
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -50,6 +54,15 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['adx'] = adx_df['adx']
 
     df['williams_r'] = calculate_williams_r(df, period=14)
+    
+    # Добавляем Bollinger Bands
+    upper, mid, lower = calculate_bollinger_bands(df['close'], period=20, std=2.0)
+    df['bb_upper'] = upper
+    df['bb_mid'] = mid
+    df['bb_lower'] = lower
+    
+    df['vol_ma20'] = df['volume'].rolling(20).mean()
+    df['roc10'] = df['close'].pct_change(10)
     df['funding_rate'] = 0.0
 
     return df
@@ -65,6 +78,11 @@ class BacktestEngine:
         risk_per_trade_pct: float = 0.05,
         score_threshold: float = 0.55,
         ai_threshold: float = 0.55,
+        maker_fee_pct: Optional[float] = None,
+        taker_fee_pct: Optional[float] = None,
+        entry_slippage_pct: float = 0.0003,
+        exit_slippage_pct: float = 0.0005,
+        strategies: Optional[List[Any]] = None,
     ):
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -74,8 +92,15 @@ class BacktestEngine:
         self.risk_pct = risk_per_trade_pct
         self.score_threshold = score_threshold
         self.ai_threshold = ai_threshold
+        self.maker_fee_pct = float(settings.maker_fee_pct if maker_fee_pct is None else maker_fee_pct)
+        self.taker_fee_pct = float(settings.taker_fee_pct if taker_fee_pct is None else taker_fee_pct)
+        self.entry_slippage_pct = float(entry_slippage_pct)
+        self.exit_slippage_pct = float(exit_slippage_pct)
 
-        self.strategies = [
+        if strategies is not None:
+            self.strategies = strategies
+        else:
+            self.strategies = [
             StrategyDonchian(period=20),
             StrategyWRD(atr_multiplier=1.6),
             StrategyVolContraction(lookback=300, contraction_ratio=0.6),
@@ -84,6 +109,9 @@ class BacktestEngine:
             StrategyWilliamsR(),
             StrategyWideRangeReversal(),
             StrategyFundingSqueeze(),
+            StrategyRuleOf7(),
+            StrategyBollingerMR(),
+            StrategyFakeout(),
         ]
         self.scorer = SignalScorer()
         self.ai_model = AIModel()
@@ -94,7 +122,73 @@ class BacktestEngine:
         self.signals_generated = 0
         self.signals_filtered = 0
 
-    def run(self, df: pd.DataFrame) -> Dict[str, Any]:
+    def _apply_slippage(self, price: float, direction: str, *, is_entry: bool) -> float:
+        slip_pct = self.entry_slippage_pct if is_entry else self.exit_slippage_pct
+        side = str(direction or "").upper()
+        if side == "LONG":
+            factor = (1.0 + slip_pct) if is_entry else (1.0 - slip_pct)
+        else:
+            factor = (1.0 - slip_pct) if is_entry else (1.0 + slip_pct)
+        return float(price) * factor
+
+    def _entry_fill_price(self, bar: pd.Series, direction: str) -> float:
+        base_price = float(bar["open"])
+        slipped = self._apply_slippage(base_price, direction, is_entry=True)
+        low = float(bar["low"])
+        high = float(bar["high"])
+        return min(max(slipped, low), high)
+
+    def _exit_fill_price(self, bar: pd.Series, direction: str, trigger_price: float, reason: str) -> float:
+        low = float(bar["low"])
+        high = float(bar["high"])
+        open_price = float(bar["open"])
+        side = str(direction or "").upper()
+        trigger = float(trigger_price)
+
+        # Worst-case fill model inside a single OHLC bar:
+        # - Stop: allow gap-through beyond trigger against us
+        # - TP: require trade-through and then apply adverse slippage
+        if reason == "SL":
+            if side == "LONG":
+                raw_fill = min(trigger, open_price)
+            else:
+                raw_fill = max(trigger, open_price)
+        else:
+            if side == "LONG":
+                raw_fill = max(trigger, open_price)
+            else:
+                raw_fill = min(trigger, open_price)
+
+        slipped = self._apply_slippage(raw_fill, direction, is_entry=False)
+        return min(max(slipped, low), high)
+
+    def _close_trade(self, trade: Dict[str, Any], exit_price: float, exit_reason: str) -> Dict[str, Any]:
+        entry_fee = float(trade.get("entry_fee_usd", 0.0) or 0.0)
+        exit_fee = PnLCalculator.estimate_fee(
+            price=exit_price,
+            qty=float(trade["size"]),
+            fee_rate=self.taker_fee_pct,
+        )
+        pnl = PnLCalculator.calculate_realized_pnl(
+            side=str(trade["direction"]),
+            entry_price=float(trade["entry"]),
+            exit_price=float(exit_price),
+            qty=float(trade["size"]),
+            entry_fee_usd=entry_fee,
+            exit_fee_usd=exit_fee,
+        )
+        closed = dict(trade)
+        closed["exit_price"] = float(exit_price)
+        closed["exit_reason"] = exit_reason
+        closed["entry_fee_usd"] = entry_fee
+        closed["exit_fee_usd"] = exit_fee
+        closed["fees_usd"] = pnl.fees_usd
+        closed["gross_pnl"] = pnl.gross_pnl_usd
+        closed["pnl"] = pnl.pnl_usd
+        closed["pnl_pct"] = pnl.pnl_pct
+        return closed
+
+    def run(self, df: pd.DataFrame, symbol: str = "BTC/USDT") -> Dict[str, Any]:
         """Run backtest on OHLCV DataFrame with pre-calculated indicators."""
         if len(df) < 200:
             return {"error": "Need at least 200 bars"}
@@ -110,52 +204,67 @@ class BacktestEngine:
             # Check open trade exit
             if open_trade:
                 is_long = open_trade["direction"] == "LONG"
+                entry = open_trade["entry"]
+                
+                # Dynamic SL (EMA20 Trailing)
+                if open_trade.get("trailing_active"):
+                    ema20 = bar.get("ema20")
+                    if not pd.isna(ema20):
+                        # Only move stop in favorable direction
+                        if is_long and ema20 > open_trade["sl"]:
+                            open_trade["sl"] = ema20
+                        elif not is_long and ema20 < open_trade["sl"]:
+                            open_trade["sl"] = ema20
+
                 sl = open_trade["sl"]
-                tp = open_trade["tp"]
+                
+                # Check for hits
+                stop_hit = bool(is_long and bar['low'] <= sl) or bool((not is_long) and bar['high'] >= sl)
+                
+                # Sequential TP targets (40/30/30)
+                tp_indices = open_trade.get("tp_indices_hit", [])
+                for idx in range(len(open_trade["tp_levels"])):
+                    if idx in tp_indices: continue
+                    
+                    target_px = open_trade["tp_levels"][idx]
+                    hit = bool(is_long and bar['high'] >= target_px) or bool((not is_long) and bar['low'] <= target_px)
+                    
+                    if hit:
+                        tp_indices.append(idx)
+                        portion = [0.4, 0.3, 0.3][idx]
+                        portion_qty = open_trade["original_size"] * portion
+                        
+                        # Fix amount for the last one or if overflow
+                        if idx == 2: portion_qty = open_trade["size"]
+                        
+                        exit_price = self._exit_fill_price(bar, open_trade["direction"], target_px, f"TP{idx+1}")
+                        closed_part = self._close_trade(open_trade, exit_price, f"TP{idx+1}")
+                        # In _close_trade, we calculate PnL based on the qty we pass. Let's adjust.
+                        real_pnl = closed_part["pnl"] * (portion / (open_trade["size"] / open_trade["original_size"]))
+                        
+                        self.balance += real_pnl
+                        self.trades.append({**closed_part, "pnl": real_pnl, "size": portion_qty})
+                        
+                        open_trade["size"] -= portion_qty
+                        
+                        # Trigger BE and Trailing on TP2
+                        if idx == 1:
+                            open_trade["sl"] = entry # Break Even
+                            open_trade["trailing_active"] = True
+                            
+                        if open_trade["size"] <= 0:
+                            open_trade = None
+                            break
+                
+                if not open_trade: continue
 
-                # SL hit
-                if is_long and bar['low'] <= sl:
-                    pnl = (sl - open_trade["entry"]) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = sl
-                    open_trade["exit_reason"] = "SL"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (sl / open_trade["entry"] - 1) * 100
-                    self.trades.append(open_trade)
+                # Check Stop Loss (if not already exited by last TP)
+                if stop_hit:
+                    exit_price = self._exit_fill_price(bar, open_trade["direction"], sl, "SL")
+                    closed = self._close_trade(open_trade, exit_price, "SL")
+                    self.balance += closed["pnl"]
+                    self.trades.append(closed)
                     open_trade = None
-                elif not is_long and bar['high'] >= sl:
-                    pnl = (open_trade["entry"] - sl) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = sl
-                    open_trade["exit_reason"] = "SL"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (1 - sl / open_trade["entry"]) * 100
-                    self.trades.append(open_trade)
-                    open_trade = None
-
-                # TP hit
-                elif is_long and bar['high'] >= tp:
-                    pnl = (tp - open_trade["entry"]) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = tp
-                    open_trade["exit_reason"] = "TP"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (tp / open_trade["entry"] - 1) * 100
-                    self.trades.append(open_trade)
-                    open_trade = None
-                elif not is_long and bar['low'] <= tp:
-                    pnl = (open_trade["entry"] - tp) * open_trade["size"]
-                    self.balance += pnl
-                    open_trade["exit_price"] = tp
-                    open_trade["exit_reason"] = "TP"
-                    open_trade["pnl"] = pnl
-                    open_trade["pnl_pct"] = (1 - tp / open_trade["entry"]) * 100
-                    self.trades.append(open_trade)
-                    open_trade = None
-                else:
-                    continue
-
-            if open_trade:
                 continue
 
             # Evaluate strategies on closed bars (up to i, excluding i)
@@ -168,6 +277,7 @@ class BacktestEngine:
             if pd.isna(atr) or atr <= 0:
                 continue
 
+            candidates = []
             for strategy in self.strategies:
                 signal = strategy.evaluate(eval_df)
                 if not signal:
@@ -175,9 +285,14 @@ class BacktestEngine:
 
                 self.signals_generated += 1
 
-                # ADX filter for trend strategies
-                trend_strats = ["MA Trend", "Donchian", "Pullback"]
-                if signal['strategy'] in trend_strats and adx < 20:
+                # ADX filter for trend strategies (Sync with settings)
+                trend_strats = ["MA Trend", "Donchian", "Pullback", "Rule of 7"]
+                if signal['strategy'] in trend_strats and adx < settings.regime_adx_trend_min:
+                    self.signals_filtered += 1
+                    continue
+                
+                range_strats = ["Williams R", "WRD Reversal"]
+                if signal['strategy'] in range_strats and adx > settings.regime_adx_range_max:
                     self.signals_filtered += 1
                     continue
 
@@ -192,33 +307,92 @@ class BacktestEngine:
                     self.signals_filtered += 1
                     continue
 
-                # Execute trade
-                entry = bar['close']
+                candidates.append({
+                    "signal": signal,
+                    "score": score,
+                    "win_prob": ai['win_prob'],
+                    "prio": score * ai['win_prob']
+                })
+            if candidates:
+                candidates.sort(key=lambda x: x['prio'], reverse=True)
+                top = candidates[0]
+                signal = top['signal']
+                
+                # EXECUTE: Professional Scaling Out logic
+                entry = self._entry_fill_price(bar, signal['signal'])
                 direction = signal['signal']
-                sl_price = self.risk.calculate_atr_stop(entry, atr, direction, self.sl_mult)
+                
+                # StrategyRuleOf7 logic matched: 1.5x / 2.5x / 3.5x tiers
+                sl_price = self.risk.calculate_atr_stop(entry, atr, direction, 2.0)
+                risk_dist = abs(entry - sl_price)
+                
+                # Multi-stage targets
+                targets = [1.5, 2.5, 4.0] # Professional swing targets
+                tp_levels = []
+                for mult in targets:
+                    tp_px = (entry + risk_dist * mult) if direction == "LONG" else (entry - risk_dist * mult)
+                    tp_levels.append(tp_px)
 
-                if direction == "LONG":
-                    tp_price = entry + abs(entry - sl_price) * self.tp_mult
-                else:
-                    tp_price = entry - abs(entry - sl_price) * self.tp_mult
-
+                # Portfolio sizing
                 margin = self.balance * self.risk_pct
                 size = (margin * self.leverage) / entry
-
+                
                 open_trade = {
                     "entry": entry,
                     "sl": sl_price,
-                    "tp": tp_price,
+                    "tp_levels": tp_levels,
+                    "tp_indices_hit": [],
+                    "trailing_active": False,
                     "direction": direction,
                     "strategy": signal['strategy'],
+                    "original_size": size,
                     "size": size,
-                    "score": score,
-                    "win_prob": ai['win_prob'],
+                    "score": top['score'],
+                    "win_prob": top['win_prob'],
                     "bar_idx": i,
+                    "entry_fee_usd": PnLCalculator.estimate_fee(price=entry, qty=size, fee_rate=self.taker_fee_pct),
                 }
-                break
 
         return self._compile_results()
+
+    def run_monte_carlo(self, n_simulations: int = 1000) -> Dict[str, Any]:
+        """
+        Perform Monte Carlo simulation by shuffling trade sequences.
+        Helps understand the range of possible outcomes and risk of ruin.
+        """
+        if not self.trades:
+            return {"error": "No trades to simulate"}
+
+        original_trades = [t["pnl"] for t in self.trades]
+        final_balances = []
+        max_drawdowns = []
+
+        for _ in range(n_simulations):
+            shuffled = list(original_trades)
+            random.shuffle(shuffled)
+            
+            balance = self.initial_balance
+            peak = balance
+            mdd = 0
+            
+            for pnl in shuffled:
+                balance += pnl
+                peak = max(peak, balance)
+                dd = (peak - balance) / peak
+                mdd = max(mdd, dd)
+            
+            final_balances.append(balance)
+            max_drawdowns.append(mdd)
+
+        return {
+            "n_simulations": n_simulations,
+            "avg_final_balance": float(np.mean(final_balances)),
+            "median_final_balance": float(np.median(final_balances)),
+            "std_final_balance": float(np.std(final_balances)),
+            "avg_max_drawdown_pct": float(np.mean(max_drawdowns)) * 100,
+            "max_drawdown_95_percentile": float(np.percentile(max_drawdowns, 95)) * 100,
+            "prob_of_negative_return": float(len([b for b in final_balances if b < self.initial_balance]) / n_simulations) * 100
+        }
 
     def _compile_results(self) -> Dict[str, Any]:
         n_trades = len(self.trades)
@@ -284,13 +458,17 @@ class BacktestEngine:
         }
 
 
-async def fetch_candles(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
+async def fetch_candles(symbol: str, timeframe: str, days: int = 30, since_ts: Optional[int] = None) -> pd.DataFrame:
     """Download historical candles via ccxt."""
     import ccxt.pro as ccxtpro
 
     exchange = ccxtpro.binance({"enableRateLimit": True})
     try:
-        since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+        if since_ts:
+            since = since_ts
+        else:
+            since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+            
         all_candles = []
         limit = 1000
 
@@ -302,7 +480,12 @@ async def fetch_candles(symbol: str, timeframe: str, days: int) -> pd.DataFrame:
             since = candles[-1][0] + 1
             if len(candles) < limit:
                 break
-            await asyncio.sleep(0.2)
+            
+            # If we are doing intrabar resolution, we likely only need one batch
+            if since_ts and len(all_candles) >= 500:
+                break
+                
+            await asyncio.sleep(0.1)
 
         df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         return df
@@ -325,7 +508,7 @@ async def main():
     print(f"Downloaded {len(df)} candles")
 
     engine = BacktestEngine(initial_balance=args.balance)
-    results = engine.run(df)
+    results = engine.run(df, symbol=args.symbol)
 
     print("\n" + "=" * 60)
     print("BACKTEST RESULTS")
@@ -348,6 +531,39 @@ async def main():
     with open("data/backtest_results.json", "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to data/backtest_results.json")
+
+    # --- NEW: Monte Carlo ---
+    if results.get("total_trades", 0) > 5:
+        print("\n Running Monte Carlo Simulation (1000 iterations)...")
+        mc_results = engine.run_monte_carlo(1000)
+        print("-" * 40)
+        print(f"  Avg Final Balance:  ${mc_results['avg_final_balance']:.2f}")
+        print(f"  Median Balance:     ${mc_results['median_final_balance']:.2f}")
+        print(f"  Avg Max Drawdown:   {mc_results['avg_max_drawdown_pct']:.2f}%")
+        print(f"  95% Prob Max DD:    {mc_results['max_drawdown_95_percentile']:.2f}%")
+        print(f"  Risk of Ruin/Loss:  {mc_results['prob_of_negative_return']:.1f}%")
+        print("-" * 40)
+        
+        with open("data/monte_carlo_results.json", "w") as f:
+            json.dump(mc_results, f, indent=2)
+
+    # --- NEW: Walk-Forward Analysis (Concept) ---
+    if args.days >= 60:
+        print("\n Running Walk-Forward Analysis (2 Segments)...")
+        mid_idx = len(df) // 2
+        df_is = df.iloc[:mid_idx]
+        df_oos = df.iloc[mid_idx:]
+        
+        print(f"  IS Period: {len(df_is)} candles | OOS Period: {len(df_oos)} candles")
+        
+        engine_oos = BacktestEngine(initial_balance=args.balance)
+        oos_results = engine_oos.run(df_oos, symbol=args.symbol)
+        
+        print(f"  OOS Return: {oos_results.get('return_pct', 0):.2f}% (vs {results.get('return_pct', 0):.2f}% total)")
+        if oos_results.get('return_pct', 0) > 0 and results.get('return_pct', 0) > 0:
+            print("  ✅ Strategy shows robustness on OOS data!")
+        elif oos_results.get('return_pct', 0) < 0:
+            print("  ⚠️ Warning: Strategy failed OOS validation. High risk of over-optimization.")
 
 
 if __name__ == "__main__":

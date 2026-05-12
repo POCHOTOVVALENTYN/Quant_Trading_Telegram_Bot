@@ -114,9 +114,9 @@ def test_show_trade_history_formats_reason(monkeypatch):
     stub = _HttpStub({("GET", url): lambda *_: _Resp(payload)})
     monkeypatch.setattr(tg.httpx, "AsyncClient", lambda *a, **k: stub)
     asyncio.run(tg.show_trade_history(upd, None))
-    assert len(msg.sent) == 2
+    assert len(msg.sent) == 1
     assert "ИСТОРИЯ СДЕЛОК" in msg.sent[0]["text"]
-    assert "🛑 стоп" in msg.sent[1]["text"]
+    assert "🛑 стоп" in msg.sent[0]["text"]
 
 
 def test_handle_text_routes_to_active_positions(monkeypatch):
@@ -172,6 +172,8 @@ def test_stress_callback_burst_refresh_with_level_messages(monkeypatch):
     tg._action_cooldowns.clear()
     tg._action_spam_score.clear()
     tg._action_spam_last_ts.clear()
+
+    monkeypatch.setattr(tg.settings, "admin_user_ids", "42")
 
     q = _Q()
     upd = SimpleNamespace(callback_query=q, effective_user=SimpleNamespace(id=42))

@@ -114,7 +114,7 @@ async def _call_openai_compatible(
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "max_tokens": 300,
+        "max_tokens": 800,
     }
 
     async with aiohttp.ClientSession() as session:
@@ -251,6 +251,34 @@ class ExternalAIAdapter:
         logger.error(f"ExternalAI cascade exhausted: {err_summary}")
         return {"recommendation": "PASS", "confidence": 0.0, "reasoning": f"cascade exhausted: {err_summary[:200]}"}
 
+    async def generate_custom_analysis(self, prompt: str) -> str:
+        """Запрос произвольного анализа у ИИ (без парсинга в JSON)."""
+        if not self._enabled:
+            return "ИИ-анализ отключен."
+
+        now = time.time()
+        for name in self._cascade:
+            cfg = self._providers.get(name)
+            if not cfg or not cfg.api_key:
+                continue
+
+            h = self._health.get(name, _ProviderHealth())
+            if now < h.backoff_until:
+                continue
+
+            h.total_calls += 1
+            try:
+                raw_text = await self._call_provider(name, cfg, prompt)
+                h.total_ok += 1
+                h.fail_count = 0
+                return raw_text
+            except Exception as e:
+                h.fail_count += 1
+                h.backoff_until = now + 30.0
+                logger.warning(f"ExternalAI [{name}] failed in custom analysis: {e}")
+
+        return "⚠️ Не удалось получить ответ от ИИ-провайдеров."
+
     # ---- provider dispatch ----
 
     async def _call_provider(self, name: str, cfg: ProviderConfig, prompt: str) -> str:
@@ -293,7 +321,7 @@ class ExternalAIAdapter:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={cfg.api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 800},
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
