@@ -72,17 +72,19 @@ def test_start_admin_renders_main_menu(monkeypatch):
 
 
 def test_show_active_positions_empty(monkeypatch):
+    monkeypatch.setattr(tg.settings, "admin_user_ids", "1")
     upd, msg = _mk_update()
-    url = f"{tg.ENGINE_URL}/api/v1/trades"
+    url = f"{tg._engine_url()}/api/v1/trades"
     stub = _HttpStub({("GET", url): lambda *_: _Resp({"trades": {}})})
-    monkeypatch.setattr(tg.httpx, "AsyncClient", lambda *a, **k: stub)
+    monkeypatch.setattr(tg, "global_client", stub)
     asyncio.run(tg.show_active_positions(upd, None))
     assert "Активных позиций" in msg.sent[0]["text"]
 
 
 def test_show_active_positions_sends_summary_and_list(monkeypatch):
+    monkeypatch.setattr(tg.settings, "admin_user_ids", "1")
     upd, msg = _mk_update()
-    url = f"{tg.ENGINE_URL}/api/v1/trades"
+    url = f"{tg._engine_url()}/api/v1/trades"
     trades = {
         "BTC/USDT": {
             "signal_type": "LONG",
@@ -96,7 +98,7 @@ def test_show_active_positions_sends_summary_and_list(monkeypatch):
         }
     }
     stub = _HttpStub({("GET", url): lambda *_: _Resp({"trades": trades})})
-    monkeypatch.setattr(tg.httpx, "AsyncClient", lambda *a, **k: stub)
+    monkeypatch.setattr(tg, "global_client", stub)
     asyncio.run(tg.show_active_positions(upd, None))
     assert len(msg.sent) == 2
     assert "ОТКРЫТЫЕ ПОЗИЦИИ" in msg.sent[0]["text"]
@@ -104,15 +106,16 @@ def test_show_active_positions_sends_summary_and_list(monkeypatch):
 
 
 def test_show_trade_history_formats_reason(monkeypatch):
+    monkeypatch.setattr(tg.settings, "admin_user_ids", "1")
     upd, msg = _mk_update()
-    url = f"{tg.ENGINE_URL}/api/v1/history"
+    url = f"{tg._engine_url()}/api/v1/history"
     payload = {
         "items": [
             {"symbol": "BTC/USDT", "pnl_usd": 1.2, "pnl_pct": 0.5, "reason": "STOP", "closed_at": "2026-01-01T10:00:00"}
         ]
     }
     stub = _HttpStub({("GET", url): lambda *_: _Resp(payload)})
-    monkeypatch.setattr(tg.httpx, "AsyncClient", lambda *a, **k: stub)
+    monkeypatch.setattr(tg, "global_client", stub)
     asyncio.run(tg.show_trade_history(upd, None))
     assert len(msg.sent) == 1
     assert "ИСТОРИЯ СДЕЛОК" in msg.sent[0]["text"]
@@ -153,7 +156,7 @@ def test_stress_callback_burst_refresh_with_level_messages(monkeypatch):
         async def edit_message_text(self, text, **kwargs):
             self.edits.append(text)
 
-    trades_url = f"{tg.ENGINE_URL}/api/v1/trades"
+    trades_url = f"{tg._engine_url()}/api/v1/trades"
     trades = {
         "BTC/USDT": {
             "signal_type": "LONG",
@@ -167,7 +170,7 @@ def test_stress_callback_burst_refresh_with_level_messages(monkeypatch):
         }
     }
     stub = _HttpStub({("GET", trades_url): lambda *_: _Resp({"trades": trades})})
-    monkeypatch.setattr(tg.httpx, "AsyncClient", lambda *a, **k: stub)
+    monkeypatch.setattr(tg, "global_client", stub)
 
     tg._action_cooldowns.clear()
     tg._action_spam_score.clear()

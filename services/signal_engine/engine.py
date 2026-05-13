@@ -49,6 +49,7 @@ from database.models.all_models import Signal, AIDecisionLog, SignalDecisionLog
 from utils.exporter import exporter
 from utils.metrics import (
     signals_generated, signals_filtered, signals_accepted,
+    signal_decision_log_entries,
     signal_score_hist, ai_latency_hist, regime_gauge,
     balance_gauge, drawdown_gauge, open_positions_gauge,
     signal_stage_total,
@@ -58,6 +59,17 @@ from utils.metrics import (
 SETUP_TIMEFRAMES = frozenset({"1h", "4h"})
 ENTRY_TIMEFRAMES = frozenset({"15m"})
 TRADING_SIGNAL_TIMEFRAMES = SETUP_TIMEFRAMES | ENTRY_TIMEFRAMES
+
+# M15: требуется недавний сетап с 1h/4h в том же направлении (hunting).
+# Добавлены mean-reversion на 15m, чтобы не входить «в пустоту» без старшего контекста.
+# Funding Squeeze намеренно исключён (событийный сигнал по фандингу/режиму).
+_STRATEGIES_REQUIRING_PENDING_SETUP_ON_15M = frozenset({
+    "Williams R",
+    "Pullback",
+    "WRD Reversal",
+    "BB Mean Reversion",
+    "Fakeout",
+})
 
 _STRATEGY_TIMEFRAME_MATRIX = {
     # Сетап-стратегии (только старшие ТФ)
@@ -203,19 +215,6 @@ class TradingOrchestrator:
         }
         return mapping.get(name, name)
 
-    @staticmethod
-    def _classify_market_regime(adx: float, trend_min: float, range_max: float) -> str:
-        """TREND | RANGE | NEUTRAL — в зоне между порогами не режем входы (fail-safe)."""
-        try:
-            a = float(adx)
-        except (TypeError, ValueError):
-            return "NEUTRAL"
-        if a >= trend_min:
-            return "TREND"
-        if a <= range_max:
-            return "RANGE"
-        return "NEUTRAL"
-
     def _build_market_context(
         self, symbol: str, df_eval: pd.DataFrame, market_regime: str, current_adx: float
     ) -> MarketContext:
@@ -265,10 +264,15 @@ class TradingOrchestrator:
             if outcome.startswith("FILTERED:"):
                 filter_name = outcome.split(":", 1)[1]
                 signals_filtered.labels(filter_name=filter_name).inc()
+                oc = "filtered"
             elif outcome == "ACCEPTED":
                 signals_accepted.labels(strategy=sdl.get("strategy", "?")).inc()
                 if sdl.get("score") is not None:
                     signal_score_hist.observe(sdl["score"])
+                oc = "accepted"
+            else:
+                oc = "other"
+            signal_decision_log_entries.labels(outcome_class=oc).inc()
         except Exception:
             pass
         try:
@@ -288,6 +292,7 @@ class TradingOrchestrator:
                     ai_recommendation=sdl.get("ai_recommendation"),
                     ai_confidence=sdl.get("ai_confidence"),
                     f_daily_filter=flags.get("f_daily_filter"),
+                    f_weekly_filter=flags.get("f_weekly_filter"),
                     f_regime_router=flags.get("f_regime_router"),
                     f_adx_threshold=flags.get("f_adx_threshold"),
                     f_cooldown=flags.get("f_cooldown"),
@@ -303,6 +308,7 @@ class TradingOrchestrator:
                     f_score=flags.get("f_score"),
                     f_ai_prob=flags.get("f_ai_prob"),
                     f_ext_ai=flags.get("f_ext_ai"),
+                    f_cvd=flags.get("f_cvd"),
                     f_ml_validator=flags.get("f_ml_validator"),
                     outcome=outcome,
                 ))
@@ -312,6 +318,11 @@ class TradingOrchestrator:
 
     @staticmethod
     def _mark_signal_stage(stage: str, strategy: str, timeframe: str) -> None:
+        """
+        Increment trading_signal_stage_total. Keep `stage` to a bounded vocabulary
+        (stable Prometheus label cardinality) — use distinct stage strings such as
+        filtered_mtf_1w_bias rather than a free-form reason dimension.
+        """
         try:
             signal_stage_total.labels(
                 stage=stage,
@@ -697,7 +708,6 @@ class TradingOrchestrator:
             return
 
         try:
-            await asyncio.sleep(0.05)
             self.processed_candles += 1
             
             # Оптимизация: Считаем все индикаторы только для сигнальных ТФ
@@ -736,24 +746,6 @@ class TradingOrchestrator:
             self._last_eval_candle_ts[eval_key] = eval_candle_ts
 
             current_adx = df_eval.iloc[-1].get('adx', 0)
-
-            market_regime = "NEUTRAL"
-            if getattr(settings, "strategy_regime_routing_enabled", True):
-                try:
-                    adx_val = float(current_adx)
-                    if pd.isna(adx_val) or adx_val <= 0:
-                        market_regime = "NEUTRAL"
-                    else:
-                        market_regime = self._classify_market_regime(
-                            adx_val,
-                            float(getattr(settings, "regime_adx_trend_min", 22.0)),
-                            float(getattr(settings, "regime_adx_range_max", 18.0)),
-                        )
-                except Exception:
-                    market_regime = "NEUTRAL"
-
-            # Build multi-dimensional market context
-            mkt_ctx = self._build_market_context(symbol, df_eval, market_regime, current_adx)
 
             fr = self.funding_rates.get(symbol, 0.0)
             _last_row = df_eval.iloc[-1]
@@ -822,7 +814,7 @@ class TradingOrchestrator:
                             # 1. Weekly check
                             if weekly_bias and str(signal.get("signal", "")).upper() != weekly_bias:
                                 logger.info(f"[{symbol}] 1W filter: {signal['strategy']} {signal['signal']} conflicts with weekly {weekly_bias}, skip")
-                                self._mark_signal_stage("filtered", signal['strategy'], timeframe, "1w-bias")
+                                self._mark_signal_stage("filtered_mtf_1w_bias", signal['strategy'], timeframe)
                                 _filter_flags["f_weekly_filter"] = False
                                 await self._persist_decision_log(sdl, _filter_flags, f"FILTERED:1w_bias_{weekly_bias}")
                                 continue
@@ -830,11 +822,13 @@ class TradingOrchestrator:
                             # 2. Daily check
                             if daily_bias and str(signal.get("signal", "")).upper() != daily_bias:
                                 logger.info(f"[{symbol}] 1D filter: {signal['strategy']} {signal['signal']} conflicts with daily {daily_bias}, skip")
-                                self._mark_signal_stage("filtered", signal['strategy'], timeframe, "1d-bias")
+                                self._mark_signal_stage("filtered_mtf_1d_bias", signal['strategy'], timeframe)
                                 _filter_flags["f_daily_filter"] = False
                                 await self._persist_decision_log(sdl, _filter_flags, f"FILTERED:1d_bias_{daily_bias}")
                                 continue
 
+                            _filter_flags["f_weekly_filter"] = True
+                            _filter_flags["f_daily_filter"] = True
                     _filter_flags["f_mtf_bias"] = True
                     self._mark_signal_stage("passed_mtf_filter", signal.get("strategy", ""), timeframe)
 
@@ -885,7 +879,7 @@ class TradingOrchestrator:
                         logger.warning(f"[{symbol}] Daily drawdown limit reached, all entries halted")
                         _filter_flags["f_daily_halt"] = False
                         await self._persist_decision_log(sdl, _filter_flags, "FILTERED:daily_halt")
-                        return
+                        continue
                     _filter_flags["f_daily_halt"] = True
 
                     # Duplicate-position guard
@@ -910,6 +904,7 @@ class TradingOrchestrator:
                             "strategy": strat_name
                         }
                         logger.info(f"🔍 [SETUP] {strat_name} triggered on {timeframe} for {symbol}. Watching M15 for entry...")
+                        self._mark_signal_stage("setup_registered", strat_name, timeframe)
                         # Сетапы не торгуются напрямую, а ждут подтверждения на М15
                         # Исключение: если стратегия позволяет вход сразу (опционально)
                         continue 
@@ -927,10 +922,14 @@ class TradingOrchestrator:
                                     break
                         
                         # Если это стратегия исполнения, но сетапа нет — пропускаем
-                        execution_only = {StrategyWilliamsR, StrategyPullback, StrategyWideRangeReversal}
-                        if not setup_found and any(isinstance(self.strategies[i], tuple(execution_only)) for i in range(len(self.strategies)) if TradingOrchestrator._strategy_name(self.strategies[i]) == strat_name):
-                             logger.debug(f"⏳ [HUNT] {strat_name} on {symbol} M15 ignored: No active H1/H4 setup.")
-                             continue
+                        if not setup_found and strat_name in _STRATEGIES_REQUIRING_PENDING_SETUP_ON_15M:
+                            logger.debug(
+                                f"⏳ [HUNT] {strat_name} on {symbol} M15 ignored: No active H1/H4 setup."
+                            )
+                            _filter_flags["f_pending_setup"] = False
+                            self._mark_signal_stage("filtered_no_pending_setup", strat_name, timeframe)
+                            await self._persist_decision_log(sdl, _filter_flags, "FILTERED:no_pending_setup")
+                            continue
 
                     # Direction filter
                     allowed_side = str(getattr(settings, "allowed_position_side", "BOTH") or "BOTH").upper()
@@ -1028,7 +1027,7 @@ class TradingOrchestrator:
                         _filter_flags["f_max_positions"] = False
                         self._mark_signal_stage("filtered_max_positions", signal.get("strategy", ""), timeframe)
                         await self._persist_decision_log(sdl, _filter_flags, "FILTERED:max_positions")
-                        return
+                        continue
                     _filter_flags["f_max_positions"] = True
 
                     # Correlation filter
@@ -1064,6 +1063,7 @@ class TradingOrchestrator:
                     if safe_atr <= 0:
                         logger.warning(f"[{symbol}] ATR=0/NaN, skip signal (cannot compute stop)")
                         self._mark_signal_stage("filtered_invalid_atr", signal.get("strategy", ""), timeframe)
+                        await self._persist_decision_log(sdl, _filter_flags, "FILTERED:invalid_atr")
                         continue
                     candidate_sl = self.risk_manager.calculate_atr_stop(signal['entry_price'], safe_atr, signal['signal'])
                     size_check = self.risk_manager.assess_trade_feasibility(
@@ -1111,10 +1111,14 @@ class TradingOrchestrator:
                         if is_long and cvd_val < cvd_thresh:
                             logger.info(f"[{symbol}] CVD {cvd_val:.2f} too low for LONG, skip")
                             _filter_flags["f_cvd"] = False
+                            self._mark_signal_stage("filtered_cvd", signal.get("strategy", ""), timeframe)
+                            await self._persist_decision_log(sdl, _filter_flags, "FILTERED:cvd")
                             continue
                         elif not is_long and cvd_val > -cvd_thresh:
                             logger.info(f"[{symbol}] CVD {cvd_val:.2f} too high for SHORT, skip")
                             _filter_flags["f_cvd"] = False
+                            self._mark_signal_stage("filtered_cvd", signal.get("strategy", ""), timeframe)
+                            await self._persist_decision_log(sdl, _filter_flags, "FILTERED:cvd")
                             continue
                     _filter_flags["f_cvd"] = True
 

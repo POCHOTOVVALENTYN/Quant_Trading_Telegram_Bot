@@ -2,12 +2,15 @@ import asyncio
 import json
 import logging
 import signal
+import time
+from datetime import datetime, timezone
 from typing import Any
 import redis.asyncio as aioredis
 from services.market_data.market_streamer import MarketDataService
 from config.settings import settings
 
 from utils.logger import get_market_data_logger
+from utils.market_config import parse_market_symbols, parse_market_timeframes
 
 _log = get_market_data_logger()
 
@@ -28,9 +31,8 @@ class MarketDataWorker:
         # For a microservice, we might want to fetch these from a central config or DB
         # For now, we reuse the same logic as in main.py but simplified
         
-        # Use symbols and timeframes from settings
-        symbols = [s.strip() for s in settings.market_symbols.split(",") if s.strip()]
-        tfs = [t.strip() for t in settings.market_timeframes.split(",") if t.strip()]
+        symbols = parse_market_symbols(settings.market_symbols)
+        tfs = parse_market_timeframes(settings.market_timeframes)
             
         self.market_service = MarketDataService(symbols=symbols, timeframes=tfs)
         self.market_service.register_callback(self._publish_to_redis)
@@ -58,7 +60,9 @@ class MarketDataWorker:
             "symbol": symbol,
             "timeframe": timeframe,
             "data": data,
-            "ts": asyncio.get_event_loop().time()
+            "ts": asyncio.get_event_loop().time(),
+            "wall_ts": time.time(),
+            "wall_ts_iso": datetime.now(timezone.utc).isoformat(),
         }
         try:
             # We can use specific channels for higher performance if needed:

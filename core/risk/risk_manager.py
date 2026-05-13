@@ -181,11 +181,83 @@ class RiskManager:
             self._streak_risk_mult = 1.0
             
         _rm_logger.info(f"Risk Update: streak_mult={self._streak_risk_mult}, losses={self._consecutive_losses}")
-    def current_r_multiple(self, entry: float, initial_stop: float, current_price: float, side: str) -> float:
+
+    def calculate_trailing_stop(
+        self,
+        current_stop: float,
+        current_price: float,
+        atr: float,
+        side: str,
+        multiplier: float = 2.5,
+    ) -> float:
+        """ATR-based protective trailing level (tighter stop in favorable direction)."""
+        dist = max(float(atr), 0.0) * float(multiplier)
+        su = str(side or "").upper()
+        cp = float(current_price)
+        cs = float(current_stop)
+        if su == "LONG":
+            return max(cs, cp - dist)
+        return min(cs, cp + dist)
+
+    @staticmethod
+    def favorable_bar_confirmed(bar: Dict[str, Any], side: str) -> bool:
+        o = float(bar.get("open", 0))
+        c = float(bar.get("close", 0))
+        hi = float(bar.get("high", 0))
+        lo = float(bar.get("low", 0))
+        rng = hi - lo
+        body = abs(c - o)
+        if rng < 1e-12:
+            return False
+        br = body / rng
+        su = str(side or "").upper()
+        if su == "LONG":
+            return c > o and br >= 0.25
+        if su == "SHORT":
+            return c < o and br >= 0.25
+        return False
+
+    @staticmethod
+    def risk_unit(entry: float, stop: float) -> float:
+        if float(entry) <= 0:
+            return 0.0
+        return abs(float(entry) - float(stop))
+
+    @staticmethod
+    def adverse_bar_is_strong(bar: Dict[str, Any], side: str, atr: float) -> bool:
+        o = float(bar.get("open", 0))
+        c = float(bar.get("close", 0))
+        hi = float(bar.get("high", 0))
+        lo = float(bar.get("low", 0))
+        rng = hi - lo
+        body = abs(c - o)
+        if rng < 1e-12:
+            return False
+        br = body / rng
+        su = str(side or "").upper()
+        if su == "LONG":
+            adverse = c < o
+        else:
+            adverse = c > o
+        if not adverse:
+            return False
+        return br >= 0.4 and body >= 0.5 * float(atr)
+
+    @staticmethod
+    def break_even_price(entry: float, side: str, buffer_pct: float = 0.0004) -> float:
+        e = float(entry)
+        b = float(buffer_pct)
+        su = str(side or "").upper()
+        if su == "LONG":
+            return e * (1.0 + b)
+        return e * (1.0 - b)
+
+    @staticmethod
+    def current_r_multiple(entry: float, initial_stop: float, current_price: float, side: str) -> float:
         """Рассчитывает текущую кратность R (профит/риск)."""
         risk = abs(entry - initial_stop)
         if risk < 1e-12:
             return 0.0
-        
+
         profit = (current_price - entry) if side.upper() == "LONG" else (entry - current_price)
         return profit / risk

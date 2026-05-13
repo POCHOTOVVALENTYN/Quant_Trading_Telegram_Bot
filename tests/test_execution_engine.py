@@ -12,12 +12,24 @@ class _DummySession:
     def __init__(self):
         self.execute = AsyncMock(return_value=SimpleNamespace(rowcount=1))
         self.commit = AsyncMock()
+        self.flush = AsyncMock()
         self.refresh = AsyncMock(side_effect=self._refresh)
         self.add = MagicMock()
+
+    def begin(self):
+        return _DummyBeginCtx()
 
     async def _refresh(self, obj):
         if getattr(obj, "id", None) is None:
             obj.id = 123
+
+
+class _DummyBeginCtx:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _DummySessionCtx:
@@ -44,15 +56,14 @@ class _SessionFactory:
 
 
 @pytest.mark.asyncio
-async def test_set_protective_orders_partial_tp_creates_scaled_orders(monkeypatch):
+async def test_set_protective_orders_single_sl_tp_via_algo_api(monkeypatch):
     exchange = MagicMock()
-    exchange.request = AsyncMock(
+    exchange.fetch_open_orders = AsyncMock(return_value=[])
+    exchange.fetch_ticker = AsyncMock(return_value={"last": 100.0})
+    exchange.fapiPrivatePostAlgoOrder = AsyncMock(
         side_effect=[
-            {"algoOrders": []},
             {"algoId": "sl-1"},
             {"algoId": "tp-1"},
-            {"algoId": "tp-2"},
-            {"algoId": "tp-3"},
         ]
     )
     engine = ExecutionEngine(exchange_client=exchange, risk_manager=RiskManager())
@@ -60,22 +71,25 @@ async def test_set_protective_orders_partial_tp_creates_scaled_orders(monkeypatc
     engine._normalize_price = AsyncMock(side_effect=lambda _s, p: p)
     engine._normalize_amount = AsyncMock(side_effect=lambda _s, a: a)
 
-    tp_targets = {"t1": 101.0, "t2": 102.0, "t3": 103.0}
-    sl_id, tp_id = await engine._set_protective_orders("BTC/USDT", "LONG", 1.0, 95.0, tp_targets)
+    async def _passthrough_retry(fn, **kwargs):
+        out = fn()
+        if asyncio.iscoroutine(out):
+            return await out
+        return out
+
+    monkeypatch.setattr(engine, "_with_time_sync_retry", _passthrough_retry)
+
+    sl_id, tp_id = await engine._set_protective_orders("BTC/USDT", "LONG", 1.0, 95.0, 103.0)
 
     assert sl_id == "sl-1"
-    assert tp_id == "tp-1,tp-2,tp-3"
-
-    # 1 вызов на pre-dedup + 1 SL + 3 частичных TP.
-    assert exchange.request.await_count == 5
-    _, _, _, sl_payload = exchange.request.await_args_list[1].args
+    assert tp_id == "tp-1"
+    assert exchange.fapiPrivatePostAlgoOrder.await_count == 2
+    sl_payload = exchange.fapiPrivatePostAlgoOrder.await_args_list[0].args[0]
     assert sl_payload["type"] == "STOP_MARKET"
     assert sl_payload["closePosition"] == "true"
 
-    tp_payloads = [call.args[3] for call in exchange.request.await_args_list[2:]]
-    assert all(p["type"] == "TAKE_PROFIT_MARKET" for p in tp_payloads)
-    assert all("quantity" in p for p in tp_payloads)
-    assert all("closePosition" not in p for p in tp_payloads)
+    tp_payload = exchange.fapiPrivatePostAlgoOrder.await_args_list[1].args[0]
+    assert tp_payload["type"] == "TAKE_PROFIT_MARKET"
 
 
 @pytest.mark.asyncio
@@ -140,7 +154,7 @@ async def test_execute_signal_emergency_close_when_sl_not_created(monkeypatch):
     # Должны быть entry + аварийное закрытие.
     assert exchange.create_order.await_count == 2
     # После аварийного пути EXECUTED не ставится, сигнал должен уйти в FAILED.
-    assert session_factory.sessions[-1].execute.await_count == 1
+    assert sum(s.execute.await_count for s in session_factory.sessions) >= 2
 
 
 @pytest.mark.asyncio
@@ -181,6 +195,38 @@ async def test_execute_signal_normalized_to_zero_fails_before_order_placement(mo
 
     exchange.create_order.assert_not_awaited()
     assert notify.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_unexpected_error_after_executing_marks_failed(monkeypatch):
+    exchange = MagicMock()
+    engine = ExecutionEngine(exchange_client=exchange, risk_manager=RiskManager())
+    engine._entry_policy_activated = True
+    engine._audit_event = AsyncMock()
+    engine._prepare_private_ops = AsyncMock(side_effect=RuntimeError("boom_after_executing"))
+    engine.risk_manager.check_trade_allowed = MagicMock(return_value=True)
+
+    session_factory = _SessionFactory()
+    monkeypatch.setattr("core.execution.engine.async_session", session_factory)
+    monkeypatch.setattr("core.execution.engine.send_telegram_msg", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="boom_after_executing"):
+        await engine.execute_signal(
+            {
+                "id": 42,
+                "symbol": "BTC/USDT",
+                "signal": "LONG",
+                "entry_price": 100.0,
+                "atr": 2.0,
+                "take_profit": 110.0,
+                "timeframe": "1h",
+            },
+            account_balance=1000.0,
+            drawdown=0.0,
+            open_count=0,
+        )
+
+    assert sum(s.execute.await_count for s in session_factory.sessions) >= 2
 
 
 @pytest.mark.asyncio

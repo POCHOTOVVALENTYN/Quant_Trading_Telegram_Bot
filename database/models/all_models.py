@@ -114,6 +114,16 @@ class Order(Base):
         UniqueConstraint("client_order_id", name="uq_orders_client_order_id"),
     )
 
+class RuntimeEngineSettings(Base):
+    """Singleton (id=1) JSON snapshot for POST /api/v1/runtime-settings/* toggles (multi-instance)."""
+
+    __tablename__ = "runtime_engine_settings"
+
+    id = Column(Integer, primary_key=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
 class Signal(Base):
     __tablename__ = "signals"
     
@@ -125,11 +135,12 @@ class Signal(Base):
     win_prob = Column(Float, nullable=True)   # AI Win Probability (0-1)
     expected_return = Column(Float, nullable=True) # Expected Return %
     risk = Column(Float, nullable=True)       # Risk Level %
-    status = Column(String, default="PENDING") # PENDING, EXECUTED, FAILED
+    status = Column(String, default="PENDING")  # PENDING, EXECUTING, EXECUTED, FAILED, SUPERSEDED, EXPIRED
     entry_price = Column(Float, nullable=True)
     stop_loss = Column(Float, nullable=True)
     take_profit = Column(Float, nullable=True)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    failure_reason = Column(String(512), nullable=True)
 
 
 class AIDecisionLog(Base):
@@ -176,6 +187,7 @@ class SignalDecisionLog(Base):
     ai_confidence = Column(Float, nullable=True)
     # Filter pass/fail flags (True = passed, False = blocked)
     f_daily_filter = Column(Boolean, nullable=True)
+    f_weekly_filter = Column(Boolean, nullable=True)
     f_regime_router = Column(Boolean, nullable=True)
     f_adx_threshold = Column(Boolean, nullable=True)
     f_cooldown = Column(Boolean, nullable=True)
@@ -191,6 +203,7 @@ class SignalDecisionLog(Base):
     f_score = Column(Boolean, nullable=True)
     f_ai_prob = Column(Boolean, nullable=True)
     f_ext_ai = Column(Boolean, nullable=True)
+    f_cvd = Column(Boolean, nullable=True)
     f_ml_validator = Column(Boolean, nullable=True)
     ml_confidence = Column(Float, nullable=True)
     outcome = Column(String, nullable=True)  # ACCEPTED / FILTERED:<reason> / ERROR

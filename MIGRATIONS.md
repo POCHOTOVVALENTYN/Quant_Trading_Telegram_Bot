@@ -14,7 +14,9 @@ python3 -m pip install -r requirements.txt
 python3 -m alembic -c alembic.ini upgrade head
 ```
 
-### 3) Create new migration (optional)
+Revision **`20260511_signal_pipeline_observability`** adds `signals.failure_reason` and columns `f_weekly_filter`, `f_cvd` on `signal_decision_logs` (observability / entry failure text).
+
+### 4) Create new migration (optional)
 
 ```bash
 python3 -m alembic -c alembic.ini revision --autogenerate -m "your message"

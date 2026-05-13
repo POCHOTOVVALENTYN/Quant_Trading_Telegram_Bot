@@ -26,6 +26,11 @@ from fastapi.responses import HTMLResponse
 import ccxt.pro as ccxtpro
 
 from config.settings import settings
+from config.schema_version import CONFIG_SCHEMA_VERSION
+from services.runtime_settings_store import (
+    load_runtime_settings_from_database,
+    persist_runtime_settings_snapshot,
+)
 from database.session import engine, Base
 from database.models import all_models  # Загружает модели в Base.metadata
 from services.market_data.client import MarketDataClient
@@ -34,6 +39,7 @@ from core.execution.engine import ExecutionEngine
 from services.signal_engine.engine import TradingOrchestrator
 from utils.logger import app_logger
 from utils.symbol_normalizer import SymbolNormalizer
+from utils.market_config import parse_market_symbols, parse_market_timeframes
 
 from api.telegram.main import setup_application
 from telegram import Update
@@ -44,6 +50,10 @@ orchestrator = None
 exchange_client = None
 reconcile_task = None
 telegram_app = None
+
+# Лимит символов в market-overview (REST + промпт), чтобы не раздувать запросы при длинном MARKET_SYMBOLS.
+MARKET_OVERVIEW_MAX_SYMBOLS = 24
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,13 +108,13 @@ async def lifespan(app: FastAPI):
         'secret': secret,
         'enableRateLimit': True,
         'options': {
-            'defaultType': 'future', 
+            'defaultType': 'future',
             'adjustForTimeDifference': True,
-            'recvWindow': 10000,
+            'recvWindow': 10000, 
             'disableFuturesSandboxWarning': True
         }
     })
-
+    
     if settings.testnet:
         app_logger.info(f"🔮 Режим: Binance Futures Sandbox (Key: {api_key[:4]}...{api_key[-4:]})")
         exchange_client.set_sandbox_mode(True)
@@ -118,12 +128,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         app_logger.error(f"❌ Ошибка авторизации (REST): {e}")
 
-    # 5. Инициализация торгового ядра
-    base_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
-    tfs = ["1m", "5m", "15m", "1h", "4h", "1d"]
-    
+    # 5. Инициализация торгового ядра (символы и ТФ — из settings, как у market-data worker)
+    base_symbols = parse_market_symbols(settings.market_symbols)
+    if not base_symbols:
+        app_logger.warning("⚠️ settings.market_symbols пуст — fallback на BTC/USDT")
+        base_symbols = ["BTC/USDT"]
+
+    tfs = parse_market_timeframes(settings.market_timeframes)
+    if not tfs:
+        app_logger.warning("⚠️ settings.market_timeframes пуст — fallback на стандартный набор ТФ")
+        tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
+
+    app_logger.info(f"📡 MarketDataClient: {len(base_symbols)} символов, ТФ: {','.join(tfs)}")
+
     market_data = MarketDataClient(symbols=base_symbols, timeframes=tfs, exchange=exchange_client)
-    risk_manager = RiskManager(max_risk_pct=0.02, max_drawdown_pct=0.20, max_open_trades=settings.max_open_trades)
+    risk_manager = RiskManager(
+        max_risk_pct=settings.max_risk_per_trade_pct,
+        max_drawdown_pct=settings.max_drawdown_pct,
+        max_open_trades=settings.max_open_trades,
+    )
     execution_engine = ExecutionEngine(exchange_client=exchange_client, risk_manager=risk_manager)
 
     try:
@@ -134,6 +157,7 @@ async def lifespan(app: FastAPI):
         app_logger.warning(f"⚠️ Синхронизация не удалась (режим мониторинга): {e}")
 
     orchestrator = TradingOrchestrator(market_data=market_data, execution_engine=execution_engine)
+    await load_runtime_settings_from_database(orchestrator=orchestrator)
     asyncio.create_task(orchestrator.start())
 
     async def _reconcile_loop():
@@ -270,6 +294,7 @@ async def toggle_trading():
 @app.get("/api/v1/runtime-settings", dependencies=[Depends(verify_api_key)])
 async def get_runtime_settings():
     return {
+        "config_schema_version": CONFIG_SCHEMA_VERSION,
         "is_trading_enabled": settings.is_trading_enabled,
         "pyramiding_enabled": settings.pyramiding_enabled,
         "per_trade_margin_pct": settings.per_trade_margin_pct,
@@ -307,6 +332,7 @@ async def telegram_webhook(request: Request):
 @app.post("/api/v1/runtime-settings/pyramiding/toggle", dependencies=[Depends(verify_api_key)])
 async def toggle_pyramiding_runtime():
     settings.pyramiding_enabled = not settings.pyramiding_enabled
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "pyramiding_enabled": settings.pyramiding_enabled}
 
 
@@ -315,6 +341,7 @@ async def set_per_trade_margin_pct_runtime(value: float):
     # 1%-30% безопасный диапазон для runtime-настроек
     clamped = max(0.01, min(0.30, float(value)))
     settings.per_trade_margin_pct = clamped
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "per_trade_margin_pct": settings.per_trade_margin_pct}
 
 
@@ -323,6 +350,7 @@ async def set_position_size_usdt_runtime(value: float):
     # 0 = выключить фикс и вернуться к расчету по % маржи.
     clamped = max(0.0, min(100000.0, float(value)))
     settings.position_size_usdt = clamped
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "position_size_usdt": settings.position_size_usdt}
 
 
@@ -333,6 +361,7 @@ async def set_max_open_trades_runtime(value: int):
     # Важно синхронизировать RiskManager уже запущенного оркестратора
     if orchestrator and orchestrator.execution and orchestrator.execution.risk_manager:
         orchestrator.execution.risk_manager.max_open_trades = clamped
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "max_open_trades": settings.max_open_trades}
 
 
@@ -341,6 +370,7 @@ async def set_tp_pct_runtime(value: float):
     # 0.1%..20%
     clamped = max(0.001, min(0.20, float(value)))
     settings.tp_pct = clamped
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "tp_pct": settings.tp_pct}
 
 
@@ -349,6 +379,7 @@ async def set_signal_expiry_runtime(value: int):
     # 60..600 сек
     clamped = max(60, min(600, int(value)))
     settings.signal_expiry_seconds = clamped
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "signal_expiry_seconds": settings.signal_expiry_seconds}
 
 
@@ -358,6 +389,7 @@ async def set_allowed_side_runtime(value: str):
     if norm not in {"LONG", "SHORT", "BOTH"}:
         return {"status": "error", "message": "allowed side must be LONG, SHORT or BOTH"}
     settings.allowed_position_side = norm
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "allowed_position_side": settings.allowed_position_side}
 
 
@@ -381,6 +413,8 @@ async def set_leverage_runtime(value: int):
         symbols_to_check = list(orchestrator.market_data.symbols[:2])
     elif getattr(exchange_client, "symbols", None):
         symbols_to_check = [s for s in exchange_client.symbols if s.endswith("/USDT")][:2]
+    if not symbols_to_check:
+        symbols_to_check = parse_market_symbols(settings.market_symbols, max_n=2)
     if not symbols_to_check:
         symbols_to_check = ["BTC/USDT"]
 
@@ -408,6 +442,7 @@ async def set_leverage_runtime(value: int):
         }
 
     settings.leverage = requested
+    await persist_runtime_settings_snapshot()
     return {"status": "success", "leverage": settings.leverage, "exchange_check": "ok"}
 
 @app.get("/api/v1/exchange/check", dependencies=[Depends(verify_api_key)])
@@ -425,8 +460,20 @@ async def get_market_overview():
     """Сбор данных и генерация AI-отчета по рынку."""
     if not orchestrator or not orchestrator.market_data:
         return {"status": "error", "message": "Market data service not initialized"}
-    
-    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+
+    symbols = list(orchestrator.market_data.symbols)
+    if not symbols:
+        symbols = parse_market_symbols(settings.market_symbols, max_n=MARKET_OVERVIEW_MAX_SYMBOLS)
+    else:
+        symbols = symbols[:MARKET_OVERVIEW_MAX_SYMBOLS]
+    if not symbols:
+        symbols = ["BTC/USDT"]
+
+    md_tfs = getattr(orchestrator.market_data, "timeframes", None) or parse_market_timeframes(
+        settings.market_timeframes
+    )
+    overview_tf = "15m" if "15m" in md_tfs else (md_tfs[0] if md_tfs else "15m")
+
     results = {}
     
     import pandas as pd
@@ -439,8 +486,8 @@ async def get_market_overview():
     
     for symbol in symbols:
         try:
-            # Получаем свечи 15м для анализа
-            candles = await exchange_client.fetch_ohlcv(symbol, '15m', limit=100)
+            # OHLCV: предпочтительно 15m из списка ТФ движка, иначе первый доступный ТФ
+            candles = await exchange_client.fetch_ohlcv(symbol, overview_tf, limit=100)
             df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
             # Расчет индикаторов
@@ -487,7 +534,13 @@ async def get_market_overview():
             app_logger.error(f"AI Market Overview Error: {e}")
             report = f"⚠️ Ошибка ИИ-анализа: {str(e)}"
     
-    return {"status": "success", "report": report}
+    return {
+        "status": "success",
+        "report": report,
+        # Отладка: что реально ушло в fetch_ohlcv и какой срез universe
+        "timeframe": overview_tf,
+        "symbols": symbols,
+    }
 
 
 @app.get("/api/v1/stats", dependencies=[Depends(verify_api_key)])
@@ -678,7 +731,7 @@ async def get_execution_audit(limit: int = 100, symbol: Optional[str] = None, ev
 async def get_active_trades():
     if not orchestrator:
         return {"trades": {}}
-
+    
     trades = {k: dict(v) for k, v in orchestrator.execution.active_trades.items()}
     if not trades:
         return {"trades": {}}

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, FrozenSet, Iterable, List
 
 import pandas as pd
 
@@ -15,22 +15,35 @@ class MetaStrategy:
     Detects a coarse market regime and selects the relevant strategy bucket.
     Regimes are intentionally simple:
     - TREND: strong directional market
-    - FLAT: range / neutral market
+    - RANGE: low ADX / range behaviour
+    - NEUTRAL: messy middle — smaller curated mix
+
+    Bucket membership uses stable strategy display names (see `_strategy_name`).
     """
 
-    TREND_STRATEGIES = frozenset({
+    # Schwager-style trend / breakout sleeve (includes measured-move style Rule of 7)
+    TREND_STRATEGIES: FrozenSet[str] = frozenset({
         "Donchian",
         "MA Trend",
         "Pullback",
         "Vol Contraction",
         "WRD",
+        "Rule of 7",
     })
-    FLAT_STRATEGIES = frozenset({
+    FLAT_STRATEGIES: FrozenSet[str] = frozenset({
         "Williams R",
         "WRD Reversal",
         "Funding Squeeze",
         "BB Mean Reversion",
         "Fakeout",
+    })
+    # NEUTRAL: allow a compact mix without activating the whole ensemble
+    NEUTRAL_MIX_STRATEGIES: FrozenSet[str] = frozenset({
+        "Williams R",
+        "Pullback",
+        "Donchian",
+        "MA Trend",
+        "Rule of 7",
     })
 
     def __init__(self, adx_trend_min: float = 22.0, adx_flat_max: float = 18.0):
@@ -61,26 +74,19 @@ class MetaStrategy:
         # 3. NEUTRAL (Everything else)
         return "NEUTRAL"
 
+    def _bucket_names_for_regime(self, regime: str) -> FrozenSet[str]:
+        """Named strategy set allowed for this coarse regime."""
+        return self.REGIME_BUCKETS.get(regime, self.NEUTRAL_MIX_STRATEGIES)
+
     def select_strategies(self, df: pd.DataFrame, strategies: Iterable[Any]) -> MetaSelection:
         regime = self.detect_market_regime(df)
         strategies = list(strategies)
-
-        if regime == "TREND":
-            # In trend, we focus on trend followers
-            selected = [s for s in strategies if self._strategy_name(s) in self.TREND_STRATEGIES]
-        elif regime == "RANGE":
-            # In clear range, we focus on mean reversion
-            selected = [s for s in strategies if self._strategy_name(s) in self.FLAT_STRATEGIES]
-        else:
-            # In NEUTRAL/Messy market, we allow a MIX of robust strategies from both groups
-            robust_mix = {"Williams R", "Pullback", "Donchian", "MA Trend"}
-            selected = [s for s in strategies if self._strategy_name(s) in robust_mix]
+        bucket = self._bucket_names_for_regime(regime)
+        selected = [s for s in strategies if self._strategy_name(s) in bucket]
 
         if not selected:
             selected = strategies
 
-        # Map internal 'RANGE' back to 'FLAT' for external compatibility if needed, 
-        # but let's keep 'NEUTRAL' and 'TREND' as is.
         return MetaSelection(regime=regime, strategies=selected)
 
     @staticmethod
@@ -105,6 +111,9 @@ class MetaStrategy:
             "StrategyWilliamsR": "Williams R",
             "StrategyWideRangeReversal": "WRD Reversal",
             "StrategyFundingSqueeze": "Funding Squeeze",
+            "StrategyRuleOf7": "Rule of 7",
+            "StrategyBollingerMR": "BB Mean Reversion",
+            "StrategyFakeout": "Fakeout",
         }
         return mapping.get(type(strategy).__name__, type(strategy).__name__)
 
@@ -115,3 +124,10 @@ class MetaStrategy:
             return default if pd.isna(val) else val
         except (TypeError, ValueError):
             return default
+
+
+MetaStrategy.REGIME_BUCKETS = {
+    "TREND": MetaStrategy.TREND_STRATEGIES,
+    "RANGE": MetaStrategy.FLAT_STRATEGIES,
+    "NEUTRAL": MetaStrategy.NEUTRAL_MIX_STRATEGIES,
+}

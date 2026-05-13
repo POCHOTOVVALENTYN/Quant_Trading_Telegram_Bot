@@ -1423,6 +1423,22 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Reconcile Error: {e}\n{traceback.format_exc()}")
 
+    async def _fail_signal_if_still_executing(self, signal_id: Optional[int], failure_reason: str) -> None:
+        """If the row is still EXECUTING, mark FAILED (idempotent; does not overwrite EXECUTED)."""
+        if signal_id is None:
+            return
+        fr = (failure_reason or "")[:512]
+        try:
+            async with async_session() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(SignalModel)
+                        .where(SignalModel.id == signal_id, SignalModel.status == "EXECUTING")
+                        .values(status="FAILED", failure_reason=fr)
+                    )
+        except Exception as ex:
+            logger.warning(f"Could not finalize signal {signal_id} from EXECUTING: {ex}")
+
     async def execute_signal(self, signal_data: dict, account_balance: float, drawdown: float, open_count: int):
         # Нормализуем символ перед началом обработки
         symbol = SymbolNormalizer.normalize(signal_data['symbol'])
@@ -1489,6 +1505,8 @@ class ExecutionEngine:
                     del self.active_trades[symbol]
                     return
 
+            executing_claimed = bool(signal_id is not None and res.rowcount > 0)
+            execution_db_resolved = not executing_claimed
             try:
                 await self._audit_event(
                     event_type="entry_started",
@@ -1789,10 +1807,6 @@ class ExecutionEngine:
                     "last_mgmt_bar_ts": 0.0,
                 }
                 
-                # Обновляем сигнал в БД как EXECUTED
-                async with async_session() as session:
-                    async with session.begin():
-                        await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED"))
                 _strat = signal_data.get("strategy", "?")
                 _tp_val = signal_data.get("take_profit")
                 _tp_str = f"{float(_tp_val):.4f}" if _tp_val else "—"
@@ -1833,6 +1847,13 @@ class ExecutionEngine:
                     f"📦 Объём: `{lot_size}` | Риск: `{_risk_usdt:.2f}` USDT"
                 )
 
+                async with async_session() as session:
+                    async with session.begin():
+                        await session.execute(
+                            update(SignalModel).where(SignalModel.id == signal_id).values(status="EXECUTED")
+                        )
+                execution_db_resolved = True
+
             except Exception as e:
                 # Если мы зафейлили вход, освобождаем монету
                 if symbol in self.active_trades and self.active_trades[symbol].get("stage") == "PENDING_EXECUTION":
@@ -1851,10 +1872,9 @@ class ExecutionEngine:
                     payload={"reason": reason, "error": str(e)[:300]},
                 )
 
-                # Помечаем сигнал как FAILED в БД
-                async with async_session() as session:
-                    async with session.begin():
-                        await session.execute(update(SignalModel).where(SignalModel.id == signal_id).values(status="FAILED", comment=str(e)[:200]))
+                err_note = str(e)[:500]
+                await self._fail_signal_if_still_executing(signal_id, err_note)
+                execution_db_resolved = True
 
                 try:
                     await send_telegram_msg(
@@ -1866,6 +1886,12 @@ class ExecutionEngine:
                 except Exception:
                     pass
                 raise e
+            finally:
+                if executing_claimed and not execution_db_resolved:
+                    await self._fail_signal_if_still_executing(
+                        signal_id,
+                        "execution_aborted_without_terminal_status",
+                    )
 
     async def schedule_update_positions(self, symbol: str, current_price: float, atr: float, adx: Optional[float] = None, df_tf=None, cvd_val: float = 0.0):
         """Вызывается каждую минуту для трейлинга и trade management."""

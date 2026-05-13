@@ -101,15 +101,12 @@ def _run_handler(
         callback_query=fake_query,
         effective_user=SimpleNamespace(id=777),
     )
-    monkeypatch.setattr(
-        tg.httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: _FakeAsyncClient(
-            trades_payload=_trades_payload() if trades_payload is None else trades_payload,
-            calls=calls,
-            reduce_payload=reduce_payload,
-        ),
+    fake_client = _FakeAsyncClient(
+        trades_payload=_trades_payload() if trades_payload is None else trades_payload,
+        calls=calls,
+        reduce_payload=reduce_payload,
     )
+    monkeypatch.setattr(tg, "global_client", fake_client)
     asyncio.run(tg.callback_handler(update, context=None))
     return fake_query
 
@@ -123,9 +120,10 @@ def test_callback_handler_pos_nav_renders_vip_card(monkeypatch):
     assert "ETH/USDT" in q.edits[0]["text"]
     assert "🧭" in q.edits[0]["text"]
     kb = q.edits[0]["reply_markup"].inline_keyboard
-    assert kb[1][0].callback_data.startswith("pos_refresh_")
-    assert kb[1][1].callback_data.startswith("pos_reduce25_")
-    assert kb[1][2].callback_data.startswith("pos_reduce50_")
+    flat_cb = [b.callback_data for row in kb for b in row]
+    assert any(c.startswith("pos_refresh_") for c in flat_cb)
+    assert any(c.startswith("pos_reduce_25_") for c in flat_cb)
+    assert any(c.startswith("pos_reduce_50_") for c in flat_cb)
 
 
 def test_callback_handler_pos_refresh_updates_current_card(monkeypatch):

@@ -6,10 +6,12 @@ from core.strategies.strategies import (
     StrategyFundingSqueeze,
     StrategyMATrend,
     StrategyPullback,
+    StrategyRuleOf7,
     StrategyVolContraction,
     StrategyWRD,
     StrategyWideRangeReversal,
     StrategyWilliamsR,
+    get_timeframe_seconds,
 )
 
 
@@ -66,6 +68,21 @@ def test_meta_strategy_selects_trend_bucket():
     assert "StrategyWilliamsR" not in names
 
 
+def test_meta_strategy_includes_rule_of_7_in_trend_bucket():
+    meta = MetaStrategy()
+    strategies = [
+        StrategyDonchian(),
+        StrategyRuleOf7(),
+        StrategyWilliamsR(),
+    ]
+    selection = meta.select_strategies(_df(adx=30.0, close=110.0, atr=1.5), strategies)
+    names = {type(s).__name__ for s in selection.strategies}
+
+    assert selection.regime == "TREND"
+    assert "StrategyRuleOf7" in names
+    assert "StrategyWilliamsR" not in names
+
+
 def test_meta_strategy_selects_range_bucket():
     meta = MetaStrategy()
     strategies = [
@@ -87,3 +104,7 @@ def test_meta_strategy_selects_range_bucket():
     assert "StrategyWideRangeReversal" in names
     assert "StrategyFundingSqueeze" in names
     assert "StrategyDonchian" not in names
+
+
+def test_get_timeframe_seconds_supports_weekly():
+    assert get_timeframe_seconds("1w") == 604800

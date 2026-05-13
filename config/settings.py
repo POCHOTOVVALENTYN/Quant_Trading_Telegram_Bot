@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Security
     encryption_key: str = "" # AES256 key base64 URL safe
     internal_api_key: str = "changeme_for_prod" # Internal REST API Key
+
+    # Telegram bot (REST к торговому движку)
+    telegram_engine_url: str = Field("http://localhost:8000", env="TELEGRAM_ENGINE_URL")
+    # Быстрый выбор плеча в меню (1..125, через запятую; строки клавиатуры по 3 кнопки)
+    telegram_leverage_presets: str = Field("5,10,15,20,25,50", env="TELEGRAM_LEVERAGE_PRESETS")
+    telegram_signals_preview_limit: int = Field(5, ge=1, le=100, env="TELEGRAM_SIGNALS_PREVIEW_LIMIT")
+    # Частичное сокращение позиции с карточки: проценты через запятую (целые 1..99)
+    telegram_position_reduce_pcts: str = Field("25,50", env="TELEGRAM_POSITION_REDUCE_PCTS")
     
     # Trading Defaults
     default_exchange: str = "binance"
@@ -36,7 +44,7 @@ class Settings(BaseSettings):
     
     # Market Data
     market_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,XRP/USDT,ADA/USDT,DOT/USDT,LINK/USDT,MATIC/USDT"
-    market_timeframes: str = "1m,5m,15m,1h,4h,1d"
+    market_timeframes: str = "1m,5m,15m,1h,4h,1d,1w"
     
     # Advanced Filters (НОВОЕ)
     max_open_positions: int = 5
@@ -80,6 +88,18 @@ class Settings(BaseSettings):
     rescue_cooldown: int = 60
     ws_backoff_max: int = 60
     heartbeat_interval: float = 3600.0
+
+    # Signal loop: circuit breaker (used when _process_ohlcv raises)
+    error_window_seconds: float = 600.0
+    error_threshold: int = 10
+
+    # Entry: post-only limit orders on Binance (GTX). If False, no postOnly/timeInForce GTX.
+    use_post_only: bool = False
+
+    # When True and an exchange instance is injected into MarketDataService, chart WS URLs
+    # point at Binance PROD futures stream even if the REST client is on testnet (legacy behavior).
+    # Set False to keep testnet WS aligned with testnet REST for OHLCV.
+    market_streamer_force_prod_chart_ws: bool = True
 
     # Strategy-regime matrix (JSON string: strategy -> list of allowed regime combos)
     # Each entry: {"strategy": "name", "trend": ["TREND","NEUTRAL"], "volatility": ["*"], "funding": ["*"]}

@@ -105,7 +105,8 @@ class StrategyRuleOf7(BaseStrategy):
 
 
 def get_timeframe_seconds(tf: str) -> int:
-    unit = tf[-1]
+    """Seconds per bar for Binance-style TF strings (1m, 4h, 1d, 1w, …)."""
+    unit = tf[-1].lower()
     val = int(tf[:-1])
     if unit == "m":
         return val * 60
@@ -113,6 +114,8 @@ def get_timeframe_seconds(tf: str) -> int:
         return val * 3600
     if unit == "d":
         return val * 86400
+    if unit == "w":
+        return val * 604800
     return val
 
 

@@ -37,13 +37,19 @@ class MarketDataService:
         
         if exchange:
             self.exchange = exchange
-            # Принудительно ставим боевой WS для стабильной маркет-даты, 
-            # даже если основной клиент в sandbox-режиме
-            prod_ws = "wss://fstream.binance.com/ws"
-            if hasattr(self.exchange, 'urls'):
-                self.exchange.urls['test']['ws']['future'] = prod_ws
-                self.exchange.urls['api']['ws']['future'] = prod_ws
-                app_logger.info(f"🔮 MarketDataService: используем PROD WS для графиков: {prod_ws}")
+            if getattr(settings, "market_streamer_force_prod_chart_ws", True):
+                prod_ws = "wss://fstream.binance.com/ws"
+                if hasattr(self.exchange, "urls"):
+                    self.exchange.urls["test"]["ws"]["future"] = prod_ws
+                    self.exchange.urls["api"]["ws"]["future"] = prod_ws
+                    app_logger.info(
+                        f"🔮 MarketDataService: PROD chart WS (market_streamer_force_prod_chart_ws=True): {prod_ws}"
+                    )
+            else:
+                app_logger.info(
+                    "🔮 MarketDataService: chart WS follows exchange mode "
+                    "(market_streamer_force_prod_chart_ws=False)"
+                )
         else:
             exchange_config = {
                 'enableRateLimit': True,
